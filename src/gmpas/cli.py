@@ -28,6 +28,10 @@ environment:
 """
 
 
+def _shown(paths) -> str:
+    return paths[0] if len(paths) == 1 else f"{paths[0]} (+{len(paths) - 1} more)"
+
+
 def _info(args) -> int:
     from .data import plottable
     from .mesh import MpasMesh
@@ -35,7 +39,7 @@ def _info(args) -> int:
 
     series = None
     if args.mesh_only:
-        mesh, ds = MpasMesh.load(args.path), None
+        mesh, ds = MpasMesh.load(args.path[0]), None
     else:
         series = Series(args.path, args.mesh or "")
         mesh, ds = series.mesh, series.first
@@ -166,7 +170,7 @@ def _plot_single(args) -> int:
     series = Series(args.path, args.mesh or "")
     mesh = series.mesh
     if args.var not in series.first:
-        print(f"{args.var!r} not in {args.path}. Available on cells: "
+        print(f"{args.var!r} not in {_shown(args.path)}. Available on cells: "
               f"{plottable(series.first)['nCells'][:20]}", file=sys.stderr)
         series.close()
         return 1
@@ -213,7 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", metavar="{info,plot,view}")
 
     def common(sp):
-        sp.add_argument("path", help="MPAS output or mesh file")
+        # nargs="+" so an unquoted glob works too: the shell expands it into
+        # many arguments, and Series.expand already accepts a list
+        sp.add_argument("path", nargs="+", metavar="PATH",
+                        help="file, directory, or glob (quoted or not)")
         sp.add_argument("-m", "--mesh", help="mesh file, if not alongside the data")
 
     i = sub.add_parser("info", help="summarise a mesh and its variables")

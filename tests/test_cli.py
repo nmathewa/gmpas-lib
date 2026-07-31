@@ -64,3 +64,41 @@ def test_all_steps_requires_a_step_placeholder(capsys, tmp_path, simple_mesh_fil
     args = parser.parse_args(["plot", str(diag), "mslp", "--all-steps",
                               "-o", "f_{step:04d}.png"])
     assert "{step" in args.out
+
+
+# ---------------------------------------------------------------- path forms
+
+
+def test_a_directory_is_read_as_a_series(tmp_path, capsys, monkeypatch):
+    """A directory means every .nc directly inside it, sorted by name."""
+    from conftest import write_mesh
+
+    run = tmp_path / "run"
+    run.mkdir()
+    for hour in ("00", "06", "12"):
+        write_mesh(run / f"history.2012-02-25_{hour}.00.00.nc", [(0.0, 0.0)])
+
+    assert main(["info", str(run), "--limit", "0"]) == 0
+    assert "3 steps across 3 files" in capsys.readouterr().out
+
+
+def test_several_paths_are_accepted(tmp_path, capsys):
+    """An unquoted glob reaches us already expanded by the shell."""
+    from conftest import write_mesh
+
+    files = [str(write_mesh(tmp_path / f"history.2012-02-25_{h}.00.00.nc",
+                            [(0.0, 0.0)])) for h in ("00", "06")]
+
+    assert main(["info", *files, "--limit", "0"]) == 0
+    assert "2 steps across 2 files" in capsys.readouterr().out
+
+
+def test_paths_and_variable_do_not_collide(tmp_path):
+    """`plot` takes both, so argparse must not swallow the variable name."""
+    from conftest import write_mesh
+
+    files = [str(write_mesh(tmp_path / f"m{i}.nc", [(0.0, 0.0)])) for i in (1, 2)]
+    args = build_parser().parse_args(["plot", *files, "areaCell", "-o", "x.png"])
+
+    assert args.path == files
+    assert args.var == "areaCell"
