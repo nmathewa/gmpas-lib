@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from http.server import BaseHTTPRequestHandler
 
 import pytest
@@ -115,3 +116,56 @@ def test_a_diverging_ramp_is_light_in_the_middle():
         return sum(int(h[i:i + 2], 16) for i in (1, 3, 5))
     assert lum(stops[2]) > lum(stops[0])
     assert lum(stops[2]) > lum(stops[-1])
+
+
+# ------------------------------------------------- frames at arbitrary size
+
+
+@pytest.fixture
+def small_viewer(tmp_path):
+    """A viewer over a tiny two-cell mesh, enough to exercise the plumbing."""
+    from conftest import write_mesh
+    from gmpas.viewer import Viewer
+
+    run = tmp_path / "run"
+    run.mkdir()
+    write_mesh(run / "history.2012-02-25_00.00.00.nc", [(0.0, 0.0), (10.0, 0.0)])
+    v = Viewer(run, nx=80, ny=50)
+    yield v
+    v.series.close()
+
+
+def test_the_view_cache_keys_on_size_not_just_extent(small_viewer):
+    """Panning renders a margin, so the same extent is requested at two sizes.
+
+    Keying on extent alone handed back an index built for a different pixel
+    grid, and the gather then reshaped into the wrong dimensions.
+    """
+    box = small_viewer.home
+
+    a = small_viewer.view(box, 80, 50)
+    b = small_viewer.view(box, 112, 70)
+
+    assert a is not b
+    assert a.idx.size == 80 * 50
+    assert b.idx.size == 112 * 70
+    assert small_viewer.view(box, 80, 50) is a       # still cached
+
+
+def test_a_frame_can_be_asked_for_at_a_larger_size(small_viewer):
+    """The margin is fetched at proportionally more pixels to stay sharp."""
+    from PIL import Image
+
+    png, _, _ = small_viewer.frame("areaCell", 0, 0, small_viewer.home,
+                                   "viridis", None, None, nx=112, ny=70)
+    with Image.open(io.BytesIO(png)) as im:
+        assert im.size == (112, 70)
+
+
+def test_frames_default_to_the_viewer_size(small_viewer):
+    from PIL import Image
+
+    png, _, _ = small_viewer.frame("areaCell", 0, 0, small_viewer.home,
+                                   "viridis", None, None)
+    with Image.open(io.BytesIO(png)) as im:
+        assert im.size == (80, 50)

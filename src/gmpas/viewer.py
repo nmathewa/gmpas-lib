@@ -195,26 +195,28 @@ class Viewer:
 
     # -- frames ----------------------------------------------------------
 
-    def view(self, extent) -> ViewIndex:
-        key = tuple(round(float(v), 6) for v in extent)
+    def view(self, extent, nx=None, ny=None) -> ViewIndex:
+        nx, ny = nx or self.nx, ny or self.ny
+        key = (*(round(float(v), 6) for v in extent), nx, ny)
         with self._lock:
             if key not in self._views:
-                self._views[key] = ViewIndex(self.mesh, extent, self.nx, self.ny)
+                self._views[key] = ViewIndex(self.mesh, extent, nx, ny)
             return self._views[key]
 
-    def overlay(self, extent) -> bytes:
-        key = tuple(round(float(v), 6) for v in extent)
+    def overlay(self, extent, nx=None, ny=None) -> bytes:
+        nx, ny = nx or self.nx, ny or self.ny
+        key = (*(round(float(v), 6) for v in extent), nx, ny)
         with self._lock:
             if key not in self._overlays:
-                self._overlays[key] = _overlay(extent, self.nx, self.ny)
+                self._overlays[key] = _overlay(extent, nx, ny)
             return self._overlays[key]
 
     def values(self, var: str, time: int, level: int) -> np.ndarray:
         """`time` indexes the whole series, across files, not one file."""
         return self.series.values(var, step=time, level=level)
 
-    def frame(self, var, time, level, extent, cmap, vmin, vmax):
-        img = self.view(extent).frame(self.values(var, time, level))
+    def frame(self, var, time, level, extent, cmap, vmin, vmax, nx=None, ny=None):
+        img = self.view(extent, nx, ny).frame(self.values(var, time, level))
         finite = img[np.isfinite(img)]
         if vmin is None or vmax is None:
             lo = float(np.percentile(finite, 2)) if finite.size else 0.0
@@ -272,6 +274,8 @@ def _handler(viewer: Viewer):
                         extent, q.get("cmap", "viridis"),
                         float(q["vmin"]) if q.get("vmin") else None,
                         float(q["vmax"]) if q.get("vmax") else None,
+                        int(q["nx"]) if q.get("nx") else None,
+                        int(q["ny"]) if q.get("ny") else None,
                     )
                     self.send_response(200)
                     self.send_header("Content-Type", "image/png")
@@ -281,7 +285,10 @@ def _handler(viewer: Viewer):
                     return self.wfile.write(png)
                 if url.path == "/api/overlay":
                     extent = [float(v) for v in q["extent"].split(",")]
-                    return self._send(viewer.overlay(extent), "image/png")
+                    return self._send(viewer.overlay(
+                        extent,
+                        int(q["nx"]) if q.get("nx") else None,
+                        int(q["ny"]) if q.get("ny") else None), "image/png")
                 if url.path == "/api/probe":
                     out = viewer.probe(float(q["lon"]), float(q["lat"]), q["var"],
                                        int(q.get("time", 0)), int(q.get("level", 0)))
@@ -552,7 +559,11 @@ async function pollScan(){
   if(M.scanning) setTimeout(pollScan, 700);
 }
 
-async function overlay(){ $("#over").src="/api/overlay?extent="+boxOf(view).join(","); }
+async function overlay(){
+  const b=outset(boxOf(view));
+  $("#over").src=`/api/overlay?extent=${b.join(",")}`+
+                 `&nx=${Math.round(M.nx*OUTSET)}&ny=${Math.round(M.ny*OUTSET)}`;
+}
 
 // show the frame we already have, transformed into place, until the real one
 // lands. Without this a zoom looks like nothing happens and then it jumps.
@@ -579,6 +590,19 @@ function scalebar(){
 // spilled over the colorbar; and the graticule needs exact pixel dimensions
 // anyway.
 const GUTTER_X=52, GUTTER_Y=18;
+// Frames are rendered wider than the window. Without a margin, dragging slid
+// the image off its own edge and exposed blank background until the redraw
+// landed -- which read as the pan being broken. 1.4x costs ~2x the pixels and
+// buys a screen-width of slack in every direction.
+const OUTSET=1.4;
+function outset(b, f=OUTSET){
+  const cx=(b[0]+b[1])/2, cy=(b[2]+b[3])/2, w=(b[1]-b[0])*f/2, h=(b[3]-b[2])*f/2;
+  return [cx-w, cx+w, cy-h, cy+h];
+}
+function covers(outer, inner){
+  return outer && outer[0]<=inner[0]+1e-9 && outer[1]>=inner[1]-1e-9
+                && outer[2]<=inner[2]+1e-9 && outer[3]>=inner[3]-1e-9;
+}
 function layout(){
   if(!M) return;
   const st=$("#stage"), cs=getComputedStyle(st), pad=parseFloat(cs.padding)||0;
@@ -650,9 +674,10 @@ async function draw(){
   // looked like zoom and pan had broken, because the preview transform kept
   // updating over a frame that could no longer be replaced.
   try{
-  const b=boxOf(view);
+  const b=outset(boxOf(view));
   const p=new URLSearchParams({var:cur.name,time:$("#time").value,
-    level:$("#level").value,extent:b.join(","),cmap:$("#cmap").value});
+    level:$("#level").value,extent:b.join(","),cmap:$("#cmap").value,
+    nx:Math.round(M.nx*OUTSET), ny:Math.round(M.ny*OUTSET)});
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
   const t0=performance.now();
@@ -664,7 +689,7 @@ async function draw(){
   img.onload=()=>{ if(old.startsWith("blob:")) URL.revokeObjectURL(old); };
   img.src=url;
   rendered=b;
-  img.style.transform=""; $("#over").style.transform="";
+  preview();          // the frame is larger than the window: crop to the view
   colorbar(lo,hi); scalebar(); graticule();
   say(`${cur.label} \u00b7 ${Math.round(performance.now()-t0)} ms`);
   }catch(e){
@@ -716,6 +741,7 @@ $("#wrap").onpointermove = ev=>{
   if(Math.abs(ev.clientX-drag.x)+Math.abs(ev.clientY-drag.y)>3) drag.moved=true;
   view.clon=drag.clon-dx; view.clat=drag.clat+dy;
   clamp(); preview(); scalebar(); graticule();
+  if(!covers(rendered, boxOf(view))) schedule(90);   // ran past the margin
 };
 $("#wrap").onpointerup = async ev=>{
   const moved=drag&&drag.moved; drag=null;
