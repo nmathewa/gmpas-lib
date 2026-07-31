@@ -97,7 +97,11 @@ def _png(img: np.ndarray, cmap: str, vmin: float, vmax: float) -> bytes:
 
 
 def _overlay(extent, nx: int, ny: int) -> bytes:
-    """Transparent coastline and graticule layer for one view box."""
+    """Transparent coastline layer for one view box.
+
+    Only coastlines: the graticule is drawn in the browser from the same
+    extent, so it toggles without a round trip and its labels stay sharp.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import cartopy.crs as ccrs
@@ -120,7 +124,6 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
     ax.set_aspect("auto")
 
     ax.add_feature(cfeature.COASTLINE, linewidth=0.7, edgecolor="#111")
-    ax.gridlines(linewidth=0.4, linestyle="--", alpha=0.45, color="#111")
     ax.patch.set_alpha(0)
     ax.spines["geo"].set_visible(False)
 
@@ -399,6 +402,19 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #top b{color:var(--fg);font-weight:500;white-space:nowrap}
 #tlab{font-variant-numeric:tabular-nums}
 #stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;padding:12px;min-height:0}
+#frame{display:grid;grid-template-columns:auto auto;grid-template-rows:auto auto;
+       max-width:100%;max-height:100%}
+#latax{position:relative;width:52px}
+#lonax{position:relative;height:18px}
+#corner{width:52px;height:18px}
+#latax span,#lonax span{position:absolute;color:var(--dim);font-size:11px;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+#latax span{right:6px;transform:translateY(-50%)}
+#lonax span{top:2px;transform:translateX(-50%)}
+#grat{position:absolute;inset:0;pointer-events:none}
+#grat i{position:absolute;background:#fff;opacity:.28}
+#grat i.v{top:0;bottom:0;width:1px}
+#grat i.h{left:0;right:0;height:1px}
 #wrap{position:relative;line-height:0;box-shadow:0 0 0 1px var(--line);overflow:hidden;
       cursor:grab;max-width:100%;max-height:100%}
 #wrap.drag{cursor:grabbing}
@@ -439,13 +455,21 @@ button:hover{border-color:var(--accent)}
     <span>time <b id="tlab">–</b></span><input type="range" id="time" min="0" max="0" style="width:150px">
     <span>level <b id="llab">0</b></span><input type="range" id="level" min="0" max="0" style="width:110px">
     <span>zoom</span><input type="range" id="zoom" min="0" max="800" value="0" style="width:110px">
+    <label style="white-space:nowrap"><input type="checkbox" id="grid" checked
+      style="vertical-align:-1px"> grid</label>
     <button id="home">reset view</button>
     <span id="probe"></span>
   </div>
   <div id="stage">
-    <div id="wrap">
-      <img id="data"><img id="over">
-      <div id="scale"><span id="scaletext"></span><div id="scalebar"></div></div>
+    <div id="frame">
+      <div id="latax"></div>
+      <div id="wrap">
+        <img id="data"><img id="over">
+        <div id="grat"></div>
+        <div id="scale"><span id="scaletext"></span><div id="scalebar"></div></div>
+      </div>
+      <div id="corner"></div>
+      <div id="lonax"></div>
     </div>
     <div id="msg"></div>
   </div>
@@ -549,6 +573,43 @@ function scalebar(){
   $("#scaletext").textContent = len>=1 ? `${len.toLocaleString()} km`
                                        : `${Math.round(len*1000).toLocaleString()} m`;
 }
+const STEPS=[0.05,0.1,0.2,0.25,0.5,1,2,2.5,5,10,15,20,30,45,60];
+function niceStep(span, want){
+  for(const s of STEPS) if(span/s <= want) return s;
+  return STEPS[STEPS.length-1];
+}
+function fmtLon(v){
+  let x=((v+180)%360+360)%360-180;                 // a view can run past +180
+  const r=Math.round(x*100)/100;
+  if(r===0) return "0\u00b0";
+  if(Math.abs(r)===180) return "180\u00b0";        // the antimeridian is neither
+  return `${Math.abs(r)}\u00b0${r>0?"E":"W"}`;
+}
+function fmtLat(v){
+  const r=Math.round(v*100)/100;
+  return r===0?"0\u00b0":`${Math.abs(r)}\u00b0${r>0?"N":"S"}`;
+}
+function graticule(){
+  const g=$("#grat"), la=$("#latax"), lo=$("#lonax");
+  g.innerHTML=""; la.innerHTML=""; lo.innerHTML="";
+  if(!$("#grid").checked) return;
+  const b=boxOf(view);
+  const w=$("#wrap").clientWidth, h=$("#wrap").clientHeight;
+  la.style.height=h+"px"; lo.style.width=w+"px";
+
+  const sx=niceStep(b[1]-b[0], 7), sy=niceStep(b[3]-b[2], 6);
+  for(let v=Math.ceil(b[0]/sx)*sx; v<=b[1]+1e-9; v+=sx){
+    const f=(v-b[0])/(b[1]-b[0]);
+    g.insertAdjacentHTML("beforeend",`<i class="v" style="left:${f*100}%"></i>`);
+    lo.insertAdjacentHTML("beforeend",`<span style="left:${f*w}px">${fmtLon(v)}</span>`);
+  }
+  for(let v=Math.ceil(b[2]/sy)*sy; v<=b[3]+1e-9; v+=sy){
+    const f=(b[3]-v)/(b[3]-b[2]);
+    g.insertAdjacentHTML("beforeend",`<i class="h" style="top:${f*100}%"></i>`);
+    la.insertAdjacentHTML("beforeend",`<span style="top:${f*h}px">${fmtLat(v)}</span>`);
+  }
+}
+
 function colorbar(lo,hi){
   const stops=M.ramps[$("#cmap").value];
   $("#ramp").style.background=`linear-gradient(90deg,${stops.join(",")})`;
@@ -580,13 +641,13 @@ async function draw(){
   img.src=url;
   rendered=b;
   img.style.transform=""; $("#over").style.transform="";
-  colorbar(lo,hi); scalebar();
+  colorbar(lo,hi); scalebar(); graticule();
   say(`${cur.label} \u00b7 ${Math.round(performance.now()-t0)} ms`);
   busy=false;
   if(pend){ pend=false; draw(); }
 }
 let redrawTimer=null;
-function schedule(ms){ preview(); scalebar(); clearTimeout(redrawTimer);
+function schedule(ms){ preview(); scalebar(); graticule(); clearTimeout(redrawTimer);
   redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value]; draw(); };
@@ -625,7 +686,7 @@ $("#wrap").onpointermove = ev=>{
   const dy=(ev.clientY-drag.y)/r.height*(b[3]-b[2]);
   if(Math.abs(ev.clientX-drag.x)+Math.abs(ev.clientY-drag.y)>3) drag.moved=true;
   view.clon=drag.clon-dx; view.clat=drag.clat+dy;
-  clamp(); preview(); scalebar();
+  clamp(); preview(); scalebar(); graticule();
 };
 $("#wrap").onpointerup = async ev=>{
   const moved=drag&&drag.moved; drag=null;
@@ -640,7 +701,8 @@ $("#wrap").onpointerup = async ev=>{
   const d=await (await fetch("/api/probe?"+q)).json();
   $("#probe").textContent=`cell ${d.cell} @ ${d.lat}\u00b0, ${d.lon}\u00b0 = ${d.value.toPrecision(6)}`;
 };
-addEventListener("resize", scalebar);
+$("#grid").onchange = graticule;
+addEventListener("resize", ()=>{ scalebar(); graticule(); });
 boot();
 </script></body></html>
 """
