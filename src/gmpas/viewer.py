@@ -251,6 +251,95 @@ class Viewer:
             hi = lo + 1.0
         return _png(img, cmap, lo, hi, compress), lo, hi
 
+    # -- export ----------------------------------------------------------
+
+    def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper"):
+        """A publication-shaped figure, not the bare raster the browser shows.
+
+        Goes through the ordinary plotting path so it gets cartopy axes,
+        coastlines, a labelled colorbar and a title -- the things a screenshot
+        of the viewer does not give you.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+
+        from .plot import cell_field
+        from .style import Style
+
+        da = self.series.dataarray(var, time)
+        values = self.values(var, time, level)
+        label = _data.field_label(da)
+        title = f"{var} — {self.series.labels[time]}"
+        if int(da.sizes.get("nVertLevels", 1)) > 1:
+            title += f"  (level {level})"
+
+        fig, _ = cell_field(self.mesh, values, style=Style.preset(style),
+                            cmap=cmap or "viridis", vmin=vmin, vmax=vmax,
+                            extent=tuple(extent), label=label, title=title)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=Style.preset(style).dpi)
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+        return buf.getvalue()
+
+    def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8):
+        """Every timestep as one animated GIF.
+
+        Frames are already palette images, which is exactly what GIF wants, so
+        this is a re-container rather than a re-encode.
+        """
+        from PIL import Image
+
+        frames = []
+        for step in range(len(self.series)):
+            png, _, _ = self.frame(var, step, level, extent, cmap,
+                                   vmin, vmax, nx, ny, compress=1)
+            frames.append(Image.open(io.BytesIO(png)).convert("P"))
+
+        buf = io.BytesIO()
+        frames[0].save(buf, format="GIF", save_all=True, append_images=frames[1:],
+                       duration=max(20, int(1000 / max(fps, 1))), loop=0,
+                       disposal=2, transparency=255)
+        return buf.getvalue()
+
+    def netcdf(self, var, time, level, extent, nx, ny):
+        """The current view sampled onto a regular lat-lon grid, as netCDF.
+
+        NEAREST-CELL SAMPLING, not a conservative remap: every point takes the
+        value of the cell containing it. Cell integrals are NOT preserved, so
+        this is for inspection and downstream plotting, not for budgets.
+        """
+        import xarray as xr
+
+        from .raster import target_grid
+
+        view = self.view(extent, nx, ny)
+        img = view.frame(self.values(var, time, level)).astype(np.float32)
+        lon, lat = target_grid(tuple(extent), view.nx, view.ny)
+        da = self.series.dataarray(var, time)
+
+        ds = xr.Dataset(
+            {var: (("lat", "lon"), img, dict(da.attrs))},
+            coords={"lat": ("lat", lat, {"units": "degrees_north"}),
+                    "lon": ("lon", lon, {"units": "degrees_east"})},
+            attrs={
+                "title": f"{var} sampled from an MPAS native mesh",
+                "source_mesh": self.mesh.path.name,
+                "mesh_cells": int(self.mesh.n_cells),
+                "valid_time": self.series.labels[time],
+                "method": "nearest cell centre (Voronoi containment); "
+                          "NOT area-conservative",
+                "longitude_convention":
+                    "continuous across the antimeridian: values may exceed "
+                    "180 degrees east so a dateline-crossing domain stays "
+                    "contiguous",
+                "history": "written by gmpas",
+            },
+        )
+        buf = io.BytesIO()
+        buf.write(ds.to_netcdf())
+        return buf.getvalue()
+
     def probe(self, lon, lat, var, time, level):
         cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
         value = float(self.values(var, time, level)[cell])
@@ -314,6 +403,44 @@ def _handler(viewer: Viewer):
                         extent,
                         int(q["nx"]) if q.get("nx") else None,
                         int(q["ny"]) if q.get("ny") else None), "image/png")
+                if url.path.startswith("/api/export/"):
+                    kind = url.path.rsplit("/", 1)[-1]
+                    extent = [float(v) for v in q["extent"].split(",")]
+                    var, lvl = q["var"], int(q.get("level", 0))
+                    step = int(q.get("time", 0))
+                    vmin = float(q["vmin"]) if q.get("vmin") else None
+                    vmax = float(q["vmax"]) if q.get("vmax") else None
+                    stem = f"{var}_{viewer.series.labels[step]}".replace(" ", "_") \
+                                                                .replace(":", "")
+                    if kind == "figure":
+                        body, ctype, name = (
+                            viewer.figure(var, step, lvl, extent,
+                                          q.get("cmap", "viridis"), vmin, vmax,
+                                          q.get("style", "paper")),
+                            "image/png", f"{stem}.png")
+                    elif kind == "gif":
+                        body, ctype, name = (
+                            viewer.gif(var, lvl, extent, q.get("cmap", "viridis"),
+                                       vmin, vmax,
+                                       int(q["nx"]) if q.get("nx") else None,
+                                       int(q["ny"]) if q.get("ny") else None,
+                                       int(q.get("fps", 8))),
+                            "image/gif", f"{var}_animation.gif")
+                    elif kind == "netcdf":
+                        body, ctype, name = (
+                            viewer.netcdf(var, step, lvl, extent,
+                                          int(q["nx"]) if q.get("nx") else None,
+                                          int(q["ny"]) if q.get("ny") else None),
+                            "application/x-netcdf", f"{stem}.nc")
+                    else:
+                        return self.send_error(404)
+                    self.send_response(200)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Disposition",
+                                     f'attachment; filename="{name}"')
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    return self.wfile.write(body)
                 if url.path == "/api/probe":
                     out = viewer.probe(float(q["lon"]), float(q["lat"]), q["var"],
                                        int(q.get("time", 0)), int(q.get("level", 0)))
@@ -549,6 +676,23 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
            title="PNG compression: lower is faster to build, higher is smaller to transfer">
     <div class="row" style="margin-top:8px"><button id="clearanim">clear cached frames</button></div>
     <div class="hint" id="animhint"></div>
+  </div>
+
+  <div class="sec"><label>export</label>
+    <select id="figstyle" title="figure size and dpi">
+      <option value="paper">paper &middot; 10x6 @130</option>
+      <option value="notebook">notebook &middot; 9x5 @100</option>
+      <option value="poster">poster &middot; 16x9 @200</option>
+    </select>
+    <div class="row" style="margin-top:6px">
+      <button id="expfig">figure</button><button id="expnc">data</button>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button id="expgif" style="flex:1">animation (GIF)</button>
+    </div>
+    <div class="hint" id="exphint">figure is a full plot with axes and
+      colorbar; data is this view on a lat-lon grid, sampled nearest-cell
+      and <b>not</b> area-conservative</div>
   </div>
 
   <div class="sec"><label>probe</label>
@@ -887,6 +1031,40 @@ $("#clearanim").onclick = ()=>{
   for(const urls of animCache.values()) urls.forEach(URL.revokeObjectURL);
   animCache.clear(); animUI(); panel(); say("cached frames released");
 };
+
+async function exportAs(kind, label){
+  const btns=[...document.querySelectorAll("#expfig,#expnc,#expgif")];
+  btns.forEach(b=>b.disabled=true);
+  $("#exphint").textContent=`building ${label}\u2026`;
+  const b=kind==="figure" ? boxOf(view) : outset(boxOf(view));
+  const p=new URLSearchParams({var:cur.name, time:$("#time").value,
+    level:$("#level").value, extent:b.join(","), cmap:$("#cmap").value,
+    style:$("#figstyle").value, fps:$("#fps").value,
+    nx:Math.round(M.nx*OUTSET), ny:Math.round(M.ny*OUTSET)});
+  if($("#vmin").value) p.set("vmin",$("#vmin").value);
+  if($("#vmax").value) p.set("vmax",$("#vmax").value);
+  // GIF must have one range for the whole run, or every frame rescales
+  if(kind==="gif" && !$("#vmin").value && lastRange){
+    p.set("vmin",lastRange[0]); p.set("vmax",lastRange[1]);
+  }
+  const t0=performance.now();
+  try{
+    const r=await fetch(`/api/export/${kind}?`+p);
+    if(!r.ok) throw new Error((await r.json()).error);
+    const blob=await r.blob();
+    const name=(r.headers.get("Content-Disposition")||"").match(/filename="(.+?)"/);
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=name?name[1]:`gmpas.${kind}`;
+    a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 10000);
+    $("#exphint").textContent=`${a.download} \u00b7 ${(blob.size/1048576).toFixed(1)} MB `+
+                              `\u00b7 ${((performance.now()-t0)/1000).toFixed(1)}s`;
+  }catch(e){ $("#exphint").textContent="export failed: "+e; }
+  finally{ btns.forEach(b=>b.disabled=false); }
+}
+$("#expfig").onclick = ()=>exportAs("figure","figure");
+$("#expnc").onclick  = ()=>exportAs("netcdf","netCDF");
+$("#expgif").onclick = ()=>{ animStop(); exportAs("gif","animation"); };
 
 $("#anim").onclick = async ()=>{
   if(anim.playing){ animStop(); return; }

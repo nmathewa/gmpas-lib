@@ -221,3 +221,60 @@ def test_compression_level_changes_size_not_content(small_viewer):
     a = np.asarray(Image.open(io.BytesIO(fast)).convert("RGBA"))
     b = np.asarray(Image.open(io.BytesIO(small)).convert("RGBA"))
     assert np.array_equal(a, b)          # lossless either way
+
+
+# ------------------------------------------------------------------- export
+
+
+def test_figure_export_is_a_full_plot_not_the_bare_raster(small_viewer):
+    """A screenshot of the viewer has no axes or colorbar; this does."""
+    from PIL import Image
+
+    png = small_viewer.figure("areaCell", 0, 0, small_viewer.home,
+                              "viridis", None, None, style="notebook")
+    with Image.open(io.BytesIO(png)) as im:
+        assert im.size == (900, 500)          # notebook preset at 100 dpi
+
+
+def test_netcdf_export_carries_the_grid_and_says_how_it_was_made(small_viewer,
+                                                                 tmp_path):
+    """Nearest-cell sampling is not a conservative remap, and must say so."""
+    import xarray as xr
+
+    out = tmp_path / "x.nc"
+    out.write_bytes(small_viewer.netcdf("areaCell", 0, 0, small_viewer.home,
+                                        40, 25))
+    with xr.open_dataset(out) as ds:
+        assert ds.sizes == {"lat": 25, "lon": 40}
+        assert ds["areaCell"].dtype == np.float32     # source precision, not more
+        assert "NOT area-conservative" in ds.attrs["method"]
+        assert "antimeridian" in ds.attrs["longitude_convention"]
+        assert ds.attrs["mesh_cells"] == small_viewer.mesh.n_cells
+
+
+def test_gif_export_holds_every_step(tmp_path):
+    """One frame per timestep, and the frames must actually differ."""
+    import xarray as xr
+    from PIL import Image
+
+    from conftest import write_mesh
+    from gmpas.viewer import Viewer
+
+    run = tmp_path / "run"
+    run.mkdir()
+    for i in range(4):
+        fp = run / f"history.2012-02-25_{i:02d}.00.00.nc"
+        write_mesh(fp, [(0.0, 0.0), (5.0, 0.0), (0.0, 5.0)])
+        with xr.open_dataset(fp) as d:
+            ds = d.load()
+        ds["fld"] = (("Time", "nCells"),
+                     np.array([[i * 10.0, i * 20.0, i * 30.0]], dtype="f4"))
+        ds.to_netcdf(fp, mode="w")
+
+    v = Viewer(run, nx=60, ny=40)
+    try:
+        gif = v.gif("fld", 0, v.home, "viridis", 0.0, 100.0, 60, 40, fps=5)
+        with Image.open(io.BytesIO(gif)) as im:
+            assert im.n_frames == 4
+    finally:
+        v.series.close()
