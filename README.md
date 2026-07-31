@@ -91,10 +91,16 @@ gmpas --version && pytest -q
 gmpas info    history.2012-02-25_12.00.00.nc
 gmpas plot    history.2012-02-25_12.00.00.nc precipw -o pw.png
 gmpas view    /path/to/run/
+gmpas scrip   history.2012-02-25_12.00.00.nc -o src.scrip.nc
+gmpas target  -o dst.scrip.nc
 ```
 
 `info` summarises the mesh and lists variables grouped by the element they
 live on. `plot` renders one field. `view` opens the interactive browser.
+`scrip` and `target` prepare the two grid files a conservative remapper needs
+— see [Conservative remapping](#conservative-remapping).
+
+Running `gmpas` with no arguments prints the whole list with examples.
 
 Every command takes a file, a directory, or a glob. A directory or glob is
 read as one time series across files, which is how MPAS actually writes
@@ -273,14 +279,92 @@ never looks. So:
 
 ## Conservative remapping
 
-gmpas writes the SCRIP grid file that ESMF, TempestRemap or ncremap need, and
-does not compute the weights itself — see [docs/REMAPPING.md](docs/REMAPPING.md)
-for the terminal workflow, the conservation check, and two MPAS-specific traps
-that crash or are rejected by the standard tooling.
+gmpas writes the grid files a real remapper needs and checks the answer; ESMF,
+TempestRemap or ncremap compute the weights. It does **not** compute them
+itself — spherical polygon intersection is hard to get right and those tools
+already do it. See [docs/REMAPPING.md](docs/REMAPPING.md) for the reasoning,
+the conservation check, and two MPAS traps that crash or are rejected by the
+standard tooling.
+
+### Running it from a terminal
+
+Put a `target_domain` file next to the run. `startlat`/`endlat` are the domain
+edges and `nlat` counts cells across them:
+
+```
+nlat     = 267
+nlon     = 534
+startlat = -20.0
+endlat   =  20.0
+startlon =  80.0
+endlon   = 160.0
+```
+
+Optionally add `include_fields` and/or `exclude_fields`, one variable name per
+line. Blank lines, `#` comments and trailing spaces are fine. A name in both
+files is contradictory: **include wins**, with a warning naming the fields.
+
+```
+u10
+v10
+theta
+precipw
+```
+
+Then, from that directory — the files are found without being named:
 
 ```bash
-gmpas scrip history.nc -o src.scrip.nc
+gmpas target                       # what was found, and the grid it describes
+gmpas target history.*.nc          # and which fields would be remapped
 ```
+
+```bash
+gmpas target -o dst.scrip.nc       # write the destination grid
+gmpas scrip  history.2012-02-25_12.00.00.nc -o src.scrip.nc
+```
+
+Generate the weights once for the pair — they are reusable for every variable,
+level and timestep of the run:
+
+```bash
+ESMF_RegridWeightGen -s src.scrip.nc -d dst.scrip.nc -w map.nc -m conserve --src_regional --dst_regional --ignore_unmapped
+```
+
+```bash
+ncremap -m map.nc history.2012-02-25_12.00.00.nc remapped.nc
+```
+
+`-m conserve` is first-order; `-m conserve2nd` is second-order and less
+diffusive. `ncremap -a aave` is the equivalent E3SM route.
+
+### Checking that it conserved
+
+Worth never skipping — every failure mode here gives a plausible-looking wrong
+answer rather than an error:
+
+```python
+import numpy as np, xarray as xr
+
+w = xr.open_dataset("map.nc")
+dst = np.zeros(w.sizes["n_b"])
+np.add.at(dst, w.row.values - 1, w.S.values * src[w.col.values - 1])
+
+I_src = (src * w.area_a.values * w.frac_a.values).sum()
+I_dst = (dst * w.area_b.values).sum()          # NOT * frac_b
+assert abs(I_dst - I_src) / abs(I_src) < 1e-12
+```
+
+Measured on a 413,788-cell mesh to a 0.25° grid: `1.1e-16` for a constant
+field and exactly `0.0` for real fields, against `2.1e-05` for
+nearest-neighbour sampling.
+
+The extent need not be exact — target cells outside the source mesh come back
+unmapped and a narrow target simply crops, both expected. `gmpas target`
+prints the covered extent beside the requested one so any shift is visible.
+
+Applying weights from the command line is not built yet
+([issue 2](https://github.com/nmathewa/gmpas-lib/issues/2)); the snippet above
+is what it would do, and `ncremap -m` does it today.
 
 ## Status
 
