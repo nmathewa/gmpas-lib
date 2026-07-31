@@ -401,9 +401,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
      align-items:center;color:var(--dim);flex-wrap:wrap}
 #top b{color:var(--fg);font-weight:500;white-space:nowrap}
 #tlab{font-variant-numeric:tabular-nums}
-#stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;padding:12px;min-height:0}
-#frame{display:grid;grid-template-columns:auto auto;grid-template-rows:auto auto;
-       max-width:100%;max-height:100%}
+#stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;
+       padding:12px;min-height:0;overflow:hidden}
+#frame{display:grid;grid-template-columns:auto auto;grid-template-rows:auto auto}
 #latax{position:relative;width:52px}
 #lonax{position:relative;height:18px}
 #corner{width:52px;height:18px}
@@ -416,9 +416,9 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #grat i.v{top:0;bottom:0;width:1px}
 #grat i.h{left:0;right:0;height:1px}
 #wrap{position:relative;line-height:0;box-shadow:0 0 0 1px var(--line);overflow:hidden;
-      cursor:grab;max-width:100%;max-height:100%}
+      cursor:grab}
 #wrap.drag{cursor:grabbing}
-#wrap img{display:block;max-width:100%;height:auto;transform-origin:0 0;will-change:transform}
+#wrap img{display:block;width:100%;height:100%;transform-origin:0 0;will-change:transform}
 #over{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 #scale{position:absolute;left:14px;bottom:14px;color:#fff;font-size:11px;
        text-shadow:0 0 3px #000,0 0 6px #000;pointer-events:none}
@@ -513,6 +513,7 @@ async function boot(){
   $("#title").textContent = M.file;
   M.cmaps.forEach(c=>{const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
   home = fit(M.home); view = {...home}; rendered = null;
+  layout();
   subtitle(); fillVars();
   if(M.scanning) setTimeout(pollScan, 400);
   pick(M.variables.find(v=>!v.static)?.name ?? M.variables[0].name);
@@ -573,6 +574,23 @@ function scalebar(){
   $("#scaletext").textContent = len>=1 ? `${len.toLocaleString()} km`
                                        : `${Math.round(len*1000).toLocaleString()} m`;
 }
+// Fit the image into whatever the stage has left, preserving the raster's
+// aspect. Letting CSS decide meant an unconstrained height, so a wide view
+// spilled over the colorbar; and the graticule needs exact pixel dimensions
+// anyway.
+const GUTTER_X=52, GUTTER_Y=18;
+function layout(){
+  if(!M) return;
+  const st=$("#stage"), cs=getComputedStyle(st), pad=parseFloat(cs.padding)||0;
+  const availW=st.clientWidth-2*pad-GUTTER_X, availH=st.clientHeight-2*pad-GUTTER_Y;
+  const a=aspect();
+  let w=availW, h=w/a;
+  if(h>availH){ h=availH; w=h*a; }
+  const wrap=$("#wrap");
+  wrap.style.width=Math.max(80,Math.floor(w))+"px";
+  wrap.style.height=Math.max(60,Math.floor(h))+"px";
+}
+
 const STEPS=[0.05,0.1,0.2,0.25,0.5,1,2,2.5,5,10,15,20,30,45,60];
 function niceStep(span, want){
   for(const s of STEPS) if(span/s <= want) return s;
@@ -626,6 +644,12 @@ async function draw(){
   if(!cur) return;
   if(busy){ pend=true; return; }
   busy=true;
+  // everything below runs under try/finally: a fetch that rejects -- a
+  // superseded request, a reload mid-flight, a server hiccup -- used to
+  // escape with busy still set, and the viewer then never drew again. It
+  // looked like zoom and pan had broken, because the preview transform kept
+  // updating over a frame that could no longer be replaced.
+  try{
   const b=boxOf(view);
   const p=new URLSearchParams({var:cur.name,time:$("#time").value,
     level:$("#level").value,extent:b.join(","),cmap:$("#cmap").value});
@@ -633,7 +657,7 @@ async function draw(){
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
   const t0=performance.now();
   const r=await fetch("/api/frame?"+p);
-  if(!r.ok){ say((await r.json()).error); busy=false; return; }
+  if(!r.ok){ say((await r.json()).error); return; }
   const [lo,hi]=r.headers.get("X-Range").split(",").map(Number);
   const url=URL.createObjectURL(await r.blob());
   const img=$("#data"), old=img.src;
@@ -643,8 +667,12 @@ async function draw(){
   img.style.transform=""; $("#over").style.transform="";
   colorbar(lo,hi); scalebar(); graticule();
   say(`${cur.label} \u00b7 ${Math.round(performance.now()-t0)} ms`);
-  busy=false;
-  if(pend){ pend=false; draw(); }
+  }catch(e){
+    say("render failed: "+e);
+  }finally{
+    busy=false;
+    if(pend){ pend=false; draw(); }      // always drains, however we left
+  }
 }
 let redrawTimer=null;
 function schedule(ms){ preview(); scalebar(); graticule(); clearTimeout(redrawTimer);
@@ -661,7 +689,7 @@ $("#zoom").oninput = e=>{ view.w = home.w/Math.pow(2, e.target.value/100);
 
 $("#wrap").onwheel = ev=>{
   ev.preventDefault();
-  const r=$("#data").getBoundingClientRect();
+  const r=$("#wrap").getBoundingClientRect();   // untransformed reference
   const fx=(ev.clientX-r.left)/r.width, fy=(ev.clientY-r.top)/r.height;
   const b=boxOf(view);
   const lon=b[0]+fx*(b[1]-b[0]), lat=b[3]-fy*(b[3]-b[2]);
@@ -677,11 +705,12 @@ $("#wrap").onwheel = ev=>{
 let drag=null;
 $("#wrap").onpointerdown = ev=>{
   drag={x:ev.clientX, y:ev.clientY, clon:view.clon, clat:view.clat, moved:false};
-  $("#wrap").setPointerCapture(ev.pointerId); $("#wrap").classList.add("drag");
+  try{ $("#wrap").setPointerCapture(ev.pointerId); }catch(e){}   // may refuse
+  $("#wrap").classList.add("drag");
 };
 $("#wrap").onpointermove = ev=>{
   if(!drag) return;
-  const r=$("#data").getBoundingClientRect(), b=boxOf(view);
+  const r=$("#wrap").getBoundingClientRect(), b=boxOf(view);
   const dx=(ev.clientX-drag.x)/r.width*(b[1]-b[0]);
   const dy=(ev.clientY-drag.y)/r.height*(b[3]-b[2]);
   if(Math.abs(ev.clientX-drag.x)+Math.abs(ev.clientY-drag.y)>3) drag.moved=true;
@@ -693,7 +722,7 @@ $("#wrap").onpointerup = async ev=>{
   $("#wrap").classList.remove("drag");
   if(moved){ schedule(0); return; }
   if(!cur) return;
-  const r=$("#data").getBoundingClientRect(), b=boxOf(view);
+  const r=$("#wrap").getBoundingClientRect(), b=boxOf(view);
   const lon=b[0]+((ev.clientX-r.left)/r.width)*(b[1]-b[0]);
   const lat=b[3]-((ev.clientY-r.top)/r.height)*(b[3]-b[2]);
   const q=new URLSearchParams({lon,lat,var:cur.name,
@@ -702,7 +731,7 @@ $("#wrap").onpointerup = async ev=>{
   $("#probe").textContent=`cell ${d.cell} @ ${d.lat}\u00b0, ${d.lon}\u00b0 = ${d.value.toPrecision(6)}`;
 };
 $("#grid").onchange = graticule;
-addEventListener("resize", ()=>{ scalebar(); graticule(); });
+addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); });
 boot();
 </script></body></html>
 """
