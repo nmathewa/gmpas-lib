@@ -128,7 +128,9 @@ class Viewer:
     """Everything the request handlers need, built once at startup."""
 
     def __init__(self, data_path, mesh_path="", nx=1200, ny=700):
-        self.series = Series(data_path, mesh_path)
+        # serve as soon as the mesh is ready; counting timesteps across
+        # every file happens behind the first request
+        self.series = Series(data_path, mesh_path, background_scan=True)
         self.mesh = self.series.mesh
         self.nx, self.ny = nx, ny
         self.home = self.mesh.extent
@@ -170,6 +172,7 @@ class Viewer:
             "files": self.series.n_files,
             "steps": len(self.series),
             "labels": self.series.labels,
+            "scanning": self.series.scanning,
             "home": list(self.home),
             "cmaps": CMAPS,
             "variables": out,
@@ -237,6 +240,13 @@ def _handler(viewer: Viewer):
             try:
                 if url.path == "/":
                     return self._send(PAGE.encode(), "text/html; charset=utf-8")
+                if url.path == "/api/status":
+                    # cheap: how the time axis stands while the scan runs
+                    return self._send(json.dumps({
+                        "scanning": viewer.series.scanning,
+                        "steps": len(viewer.series),
+                        "labels": viewer.series.labels,
+                    }).encode(), "application/json")
                 if url.path == "/api/meta":
                     return self._send(json.dumps(viewer.describe()).encode(),
                                       "application/json")
@@ -427,10 +437,11 @@ function say(t){const m=$("#msg");m.textContent=t;m.style.opacity=t?1:0;}
 async function boot(){
   M = await (await fetch("/api/meta")).json();
   $("#title").textContent = M.file;
-  $("#sub").textContent = `${M.cells.toLocaleString()} cells · ${M.regional?"regional":"global"} · ${M.steps} step${M.steps>1?"s":""} in ${M.files} file${M.files>1?"s":""}`;
+  $("#sub").textContent = `${M.cells.toLocaleString()} cells · ${M.regional?"regional":"global"} · ${M.steps} step${M.steps>1?"s":""} in ${M.files} file${M.files>1?"s":""}${M.scanning?" · scanning…":""}`;
   M.cmaps.forEach(c=>{const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
   fillVars();
   extent = M.home.slice();
+  if(M.scanning) setTimeout(pollScan, 400);
   pick(M.variables.find(v=>!v.static)?.name ?? M.variables[0].name);
 }
 function fillVars(){
@@ -483,6 +494,16 @@ function ramp(c){
   $("#ramp").style.background = `linear-gradient(90deg,${grad.join(",")})`;
 }
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value]; draw(); };
+
+async function pollScan(){
+  if(!M || !M.scanning) return;
+  const s = await (await fetch("/api/status")).json();
+  M.steps = s.steps; M.labels = s.labels; M.scanning = s.scanning;
+  const keep = $("#time").value;
+  $("#time").max = M.steps-1; $("#time").value = keep;
+  $("#sub").textContent = `${M.cells.toLocaleString()} cells \u00b7 ${M.regional?"regional":"global"} \u00b7 ${M.steps} step${M.steps>1?"s":""} in ${M.files} file${M.files>1?"s":""}${M.scanning?" \u00b7 scanning\u2026":""}`;
+  if(M.scanning) setTimeout(pollScan, 700);
+}
 $("#level").oninput = e=>{ $("#llab").textContent=e.target.value; draw(); };
 $("#cmap").onchange = draw;
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;

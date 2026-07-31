@@ -18,7 +18,9 @@ this class deliberately does not try to replace it.
 from __future__ import annotations
 
 import re
+import threading
 from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -28,8 +30,30 @@ from .data import find_mesh_beside, plottable, select
 from .mesh import MpasMesh, has_mesh
 from .paths import resolve_path
 
-#: MPAS names output files by valid time, which sorts chronologically as text
-STAMP = re.compile(r"(\d{4}-\d{2}-\d{2})_(\d{2})[.:](\d{2})[.:](\d{2})")
+#: MPAS names output files by valid time: history.2012-02-25_12.00.00.nc.
+#: Separators vary between sites -- `_` or `T` between date and time, `.` or
+#: `:` within it -- and the seconds are sometimes dropped.
+STAMP = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})[_T](\d{2})(?:[.:](\d{2}))?(?:[.:](\d{2}))?"
+)
+
+
+def parse_time(path: Path) -> datetime | None:
+    """The valid time in a filename, or None if it carries no timestamp.
+
+    MPAS puts the valid time in the name, so the whole time axis can be built
+    without opening a single file -- which matters on a parallel filesystem
+    where opening several hundred files is the slowest thing startup does.
+    """
+    m = STAMP.search(path.name)
+    if m is None:
+        return None
+    year, month, day, hour, minute, second = m.groups()
+    try:
+        return datetime(int(year), int(month), int(day), int(hour),
+                        int(minute or 0), int(second or 0))
+    except ValueError:            # e.g. hour 25 in something that only looked like a stamp
+        return None
 
 #: open file handles to keep around while scrubbing through time
 LRU_SIZE = 4
@@ -44,7 +68,7 @@ def expand(paths) -> list[Path]:
     for item in paths:
         p = resolve_path(item)
         if p.is_dir():
-            out.extend(sorted(p.glob("*.nc")))
+            out.extend(p.glob("*.nc"))
         elif any(ch in str(item) for ch in "*?["):
             base = p.parent
             out.extend(sorted(base.glob(Path(str(item)).name)))
@@ -58,19 +82,39 @@ def expand(paths) -> list[Path]:
             unique.append(p)
     if not unique:
         raise FileNotFoundError(f"no files matched {paths!r}")
-    return unique
+    return order(unique)
 
 
 def label_of(path: Path) -> str:
-    """The valid time in a filename, or the filename if it carries none."""
-    m = STAMP.search(path.name)
-    return f"{m.group(1)} {m.group(2)}:{m.group(3)}" if m else path.stem
+    """A human-readable valid time, or the filename if it carries none."""
+    when = parse_time(path)
+    if when is None:
+        return path.stem
+    return when.strftime("%Y-%m-%d %H:%M" if when.second == 0
+                         else "%Y-%m-%d %H:%M:%S")
+
+
+def order(paths: list[Path]) -> list[Path]:
+    """Chronological when every name carries a time, alphabetical otherwise.
+
+    Sorting the names as text happens to be chronological for MPAS's own
+    format, but only because it is zero-padded and big-endian. Anything that
+    mixes prefixes, or numbers steps rather than stamping them, would come out
+    shuffled -- and a shuffled time axis is the kind of wrong that looks like
+    a physics problem. So parse, and fall back to names only if some file has
+    no timestamp at all.
+    """
+    times = {p: parse_time(p) for p in paths}
+    if all(t is not None for t in times.values()):
+        return sorted(paths, key=lambda p: (times[p], p.name))
+    return sorted(paths, key=lambda p: p.name)
 
 
 class Series:
     """Many MPAS files presented as one time axis, opened on demand."""
 
-    def __init__(self, paths, mesh_path: str = ""):
+    def __init__(self, paths, mesh_path: str = "",
+                 background_scan: bool = False):
         self.files = expand(paths)
         self._open: OrderedDict[Path, xr.Dataset] = OrderedDict()
 
@@ -90,17 +134,65 @@ class Series:
                 )
             self.mesh = MpasMesh.load(found)
 
-        # (file, index within that file) for every step in the series
-        self.steps: list[tuple[Path, int]] = []
-        self.labels: list[str] = []
+        self.groups = plottable(first)
+
+        # Counting timesteps means opening every file, which is 86% of startup
+        # and grows with the run length -- painful on a parallel filesystem
+        # where each open is a network round trip. So start from the assumption
+        # every file holds one step, which is what MPAS history output almost
+        # always is, and correct it in the background.
+        #
+        # The provisional axis is a strict *subset* of the real one: step i
+        # maps to (file i, 0), which is a genuine timestep whatever the true
+        # count turns out to be. Scrubbing during the scan shows real data,
+        # never the wrong frame -- only fewer frames than there will be.
+        self._counts = {self.files[0]: int(first.sizes.get("Time", 1))}
+        self.steps, self.labels = self._axis()
+        self.scanning = False
+
+        if background_scan and len(self.files) > 1:
+            self.scanning = True
+            threading.Thread(target=self._scan, daemon=True).start()
+        elif len(self.files) > 1:
+            self._scan()
+
+    # -- the time axis ---------------------------------------------------
+
+    def _axis(self) -> tuple[list[tuple[Path, int]], list[str]]:
+        """Build (steps, labels) from whatever counts are known so far."""
+        steps: list[tuple[Path, int]] = []
+        labels: list[str] = []
         for path in self.files:
-            n = int(self._dataset(path).sizes.get("Time", 1))
+            n = self._counts.get(path, 1)
             base = label_of(path)
             for i in range(n):
-                self.steps.append((path, i))
-                self.labels.append(base if n == 1 else f"{base} +{i}")
+                steps.append((path, i))
+                labels.append(base if n == 1 else f"{base} +{i}")
+        return steps, labels
 
-        self.groups = plottable(first)
+    def _scan(self) -> None:
+        """Count timesteps in every file, then swap the axis in.
+
+        Uses netCDF4 rather than xarray -- 1.6 ms per file against 7.3 ms,
+        because reading one dimension does not need xarray's decoding. Keeps
+        its own handles so it never touches the LRU another thread is using.
+        """
+        import netCDF4
+
+        counts = dict(self._counts)
+        for path in self.files:
+            if path in counts:
+                continue
+            try:
+                with netCDF4.Dataset(path) as nc:
+                    dim = nc.dimensions.get("Time")
+                    counts[path] = len(dim) if dim is not None else 1
+            except Exception:
+                counts[path] = 1          # unreadable: leave it as one step
+        self._counts = counts
+        # plain assignment, so a reader mid-request keeps a consistent list
+        self.steps, self.labels = self._axis()
+        self.scanning = False
 
     # -- files -----------------------------------------------------------
 
@@ -125,6 +217,16 @@ class Series:
 
     def __len__(self) -> int:
         return len(self.steps)
+
+    @property
+    def times(self) -> list[datetime | None]:
+        """Valid time per step, read from the filenames -- no file opened."""
+        return [parse_time(path) for path, _ in self.steps]
+
+    @property
+    def dated(self) -> bool:
+        """Whether every file carries a parseable timestamp."""
+        return all(t is not None for t in self.times)
 
     @property
     def first(self) -> xr.Dataset:

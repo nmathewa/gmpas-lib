@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -163,3 +165,161 @@ def test_unknown_variable_lists_what_is_available(diag_beside_mesh):
     with pytest.raises(KeyError, match="mslp"):
         ds.mpas.plot("no_such_field")
     ds.close()
+
+
+# ------------------------------------------------------- multi-file series
+
+
+def _run_dir(tmp_path, n_files, n_times=1):
+    """A directory of MPAS-style history files, mesh in the first."""
+    from conftest import write_mesh
+
+    run = tmp_path / "run"
+    run.mkdir(exist_ok=True)
+    for i in range(n_files):
+        path = run / f"history.2012-02-25_{i:02d}.00.00.nc"
+        write_mesh(path, [(0.0, 0.0), (10.0, 0.0)])
+        if n_times > 1:
+            with xr.open_dataset(path) as ds:
+                extra = ds.load()
+            extra["fld"] = (("Time", "nCells"),
+                            np.zeros((n_times, 2)) + i)
+            extra.to_netcdf(path, mode="w")
+    return run
+
+
+def test_a_background_scan_serves_before_it_finishes(tmp_path):
+    """The provisional axis is one step per file, available immediately."""
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=5)
+    s = Series(run, background_scan=True)
+    try:
+        assert len(s) == 5              # usable at once, no waiting
+        assert [step[1] for step in s.steps] == [0] * 5
+    finally:
+        s.close()
+
+
+def test_the_provisional_axis_is_a_subset_never_wrong(tmp_path):
+    """Every provisional step maps to a real timestep, so no frame is bogus.
+
+    Files here hold 3 steps each. Before the scan lands the axis shows one
+    per file; afterwards it shows all of them. What it showed first was
+    correct, just incomplete.
+    """
+    import time
+
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=4, n_times=3)
+
+    provisional = Series(run, background_scan=True)
+    try:
+        first_view = list(provisional.steps)
+        for _ in range(200):
+            if not provisional.scanning:
+                break
+            time.sleep(0.02)
+        settled = list(provisional.steps)
+    finally:
+        provisional.close()
+
+    # file 0 is already open for the mesh, so its 3 steps are known exactly;
+    # the other three files are assumed to hold one each until scanned
+    assert len(first_view) == 3 + 3
+    assert len(settled) == 12            # 3 per file once counted
+    for step in first_view:
+        assert step in settled           # nothing shown was ever wrong
+
+
+def test_an_eager_series_counts_everything_up_front(tmp_path):
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=4, n_times=3)
+    s = Series(run)                      # default: no background scan
+    try:
+        assert not s.scanning
+        assert len(s) == 12
+    finally:
+        s.close()
+
+
+def test_a_single_file_is_counted_immediately(tmp_path):
+    """One file needs no scan -- it is already open for the mesh."""
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=1, n_times=3)
+    s = Series(run, background_scan=True)
+    try:
+        assert not s.scanning
+        assert len(s) == 3
+    finally:
+        s.close()
+
+
+# ------------------------------------------------- the axis from filenames
+
+
+def test_timestamps_are_read_from_filenames(tmp_path):
+    """MPAS puts the valid time in the name, so no file need be opened."""
+    from gmpas.series import label_of, parse_time
+
+    cases = {
+        "history.2012-02-25_12.00.00.nc": "2012-02-25 12:00",
+        "history.2012-02-25_12.00.nc": "2012-02-25 12:00",     # no seconds
+        "history.2012-02-25T12:30:45.nc": "2012-02-25 12:30:45",
+        "diag.2019-09-01_00.00.00.nc": "2019-09-01 00:00",
+    }
+    for name, expected in cases.items():
+        assert parse_time(Path(name)) is not None, name
+        assert label_of(Path(name)) == expected
+
+
+def test_a_name_without_a_time_falls_back_to_the_stem(tmp_path):
+    from gmpas.series import label_of, parse_time
+
+    assert parse_time(Path("output.nc")) is None
+    assert label_of(Path("output.nc")) == "output"
+
+
+def test_something_that_only_looks_like_a_stamp_is_rejected():
+    """Don't build a time axis out of a coincidence."""
+    from gmpas.series import parse_time
+
+    assert parse_time(Path("run.2012-02-30_12.00.00.nc")) is None   # no Feb 30
+    assert parse_time(Path("run.2012-02-25_25.00.00.nc")) is None   # hour 25
+
+
+def test_files_are_ordered_chronologically_not_alphabetically():
+    """Text order is only chronological by luck of MPAS's zero padding."""
+    from gmpas.series import order
+
+    names = [Path("run.2012-03-09_00.00.00.nc"),
+             Path("b.2012-03-01_06.00.00.nc"),
+             Path("a.2012-03-01_00.00.00.nc")]
+    assert [p.name for p in order(names)] == [
+        "a.2012-03-01_00.00.00.nc",
+        "b.2012-03-01_06.00.00.nc",
+        "run.2012-03-09_00.00.00.nc",
+    ]
+
+
+def test_undated_files_fall_back_to_name_order():
+    from gmpas.series import order
+
+    names = [Path("z.nc"), Path("a.2012-03-01_00.00.00.nc"), Path("m.nc")]
+    assert [p.name for p in order(names)] == ["a.2012-03-01_00.00.00.nc",
+                                             "m.nc", "z.nc"]
+
+
+def test_a_series_exposes_its_times_without_reading_files(tmp_path):
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=3)
+    s = Series(run, background_scan=True)
+    try:
+        assert s.dated
+        assert [t.hour for t in s.times] == [0, 1, 2]
+    finally:
+        s.close()
