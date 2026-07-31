@@ -19,6 +19,8 @@ examples:
   gmpas plot  run/ theta -l 20 --cmap turbo -o theta20.png
   gmpas plot  'run/history.*.nc' precipw --all-steps -o 'frames/pw_{step:04d}.png' -j 8
 
+  gmpas scrip run/init.nc -o mesh.scrip.nc  for conservative remapping weights
+
   gmpas view  run/                          browse interactively in a browser
   gmpas view  run/ --host 0.0.0.0 --no-browser   on an HPC compute node
 
@@ -207,6 +209,24 @@ def _plot_single(args) -> int:
     return 0
 
 
+def _scrip(args) -> int:
+    from .scrip import coverage_of, write_scrip
+
+    out, wrapped = write_scrip(args.path[0], args.out)
+    frac = coverage_of(out)
+    print(out)
+    print(f"covers {frac * 100:.1f}% of the sphere")
+    if wrapped:
+        print(f"normalised {wrapped:,} longitudes onto [0, 2pi) — the source "
+              f"file mixed conventions")
+    print("\nnext, generate conservative weights with one of:")
+    print(f"  ESMF_RegridWeightGen -s {out.name} -d dst.scrip.nc "
+          f"-w map.nc -m conserve")
+    print(f"  ncremap -s {out.name} -g dst.nc -m map.nc -a aave")
+    print("then apply them; gmpas does not compute weights itself.")
+    return 0
+
+
 def _view(args) -> int:
     from .viewer import serve
 
@@ -262,6 +282,11 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("-j", "--jobs", type=int, default=0,
                    help="parallel workers for --all-steps (default: all cores)")
     o.set_defaults(func=_plot)
+
+    c = sub.add_parser("scrip", help="write the mesh as a SCRIP grid file")
+    common(c)
+    c.add_argument("-o", "--out", default="mesh.scrip.nc", help="output path")
+    c.set_defaults(func=_scrip)
 
     v = sub.add_parser("view", help="browse a file interactively in a browser")
     common(v)
