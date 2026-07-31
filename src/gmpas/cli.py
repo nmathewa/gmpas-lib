@@ -7,6 +7,26 @@ import sys
 
 from . import __version__
 
+EXAMPLES = """
+examples:
+  gmpas info  run/history.2012-02-25_12.00.00.nc
+  gmpas info  run/ --limit 10
+
+  gmpas plot  run/history.2012-02-25_12.00.00.nc precipw -o pw.png
+  gmpas plot  run/ theta -l 20 --cmap turbo -o theta20.png
+  gmpas plot  'run/history.*.nc' precipw --all-steps -o 'frames/pw_{step:04d}.png' -j 8
+
+  gmpas view  run/                       browse interactively in a browser
+  gmpas view  run/ --no-browser -p 8765  for an SSH tunnel on a cluster
+
+Any path may be a file, a directory, or a glob. A directory or glob is read as
+one time series across files, which is how MPAS writes output.
+
+environment:
+  GMPAS_CACHE_DIR   where cached mesh geometry goes (default ~/.cache/gmpas/mesh)
+  GMPAS_DATA_DIR    tried first when resolving relative paths
+"""
+
 
 def _info(args) -> int:
     from .data import plottable
@@ -185,9 +205,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gmpas",
         description="Plot MPAS output on its own native mesh, without regridding.",
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("--version", action="version", version=f"gmpas {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # not required: a bare `gmpas` prints help rather than an argparse error
+    sub = p.add_subparsers(dest="cmd", metavar="{info,plot,view}")
 
     def common(sp):
         sp.add_argument("path", help="MPAS output or mesh file")
@@ -232,7 +255,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # `gmpas` on its own is a request to see what it can do, not a mistake
+    if getattr(args, "func", None) is None:
+        parser.print_help()
+        return 0
+
     try:
         return args.func(args)
     except (FileNotFoundError, KeyError, ValueError) as exc:
