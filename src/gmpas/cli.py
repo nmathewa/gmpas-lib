@@ -252,7 +252,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("view", help="browse a file interactively in a browser")
     common(v)
-    v.add_argument("-p", "--port", type=int, default=8765)
+    v.add_argument("-p", "--port", type=int, default=8765,
+                   help="preferred port; the next free one is used if busy")
     v.add_argument("--width", type=int, default=1200, help="raster width in pixels")
     v.add_argument("--height", type=int, default=700)
     v.add_argument("--no-browser", action="store_true",

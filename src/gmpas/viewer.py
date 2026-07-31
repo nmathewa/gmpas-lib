@@ -15,6 +15,7 @@ an SSH tunnel -- the case where ncview's X11 forwarding hurts most.
 
 from __future__ import annotations
 
+import errno
 import io
 import json
 import threading
@@ -272,10 +273,36 @@ def _handler(viewer: Viewer):
     return Handler
 
 
+#: consecutive ports to try before asking the OS to pick one
+PORT_ATTEMPTS = 20
+
+
+def bind(handler, port: int, host: str = "127.0.0.1",
+         attempts: int = PORT_ATTEMPTS) -> ThreadingHTTPServer:
+    """Bind to `port`, or the next free one after it.
+
+    A viewer left running in another terminal -- or one still shutting down --
+    should not stop this one from starting. Walk forward from the requested
+    port, and if the whole range is taken ask the OS for any free port rather
+    than failing.
+    """
+    for candidate in range(port, port + attempts):
+        try:
+            return ThreadingHTTPServer((host, candidate), handler)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+    return ThreadingHTTPServer((host, 0), handler)      # 0 = any free port
+
+
 def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True):
     """Start the viewer and block until interrupted."""
     viewer = Viewer(data_path, mesh_path, nx=nx, ny=ny)
-    server = ThreadingHTTPServer(("127.0.0.1", port), _handler(viewer))
+    server = bind(_handler(viewer), port)
+    actual = server.server_address[1]
+    if actual != port:
+        print(f"port {port} is in use — using {actual} instead")
+    port = actual
 
     cells = viewer.mesh.n_cells
     kind = "regional" if not viewer.mesh.is_global else "global"
