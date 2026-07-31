@@ -172,3 +172,49 @@ def test_a_crashing_esmf_is_retried_then_reported(tmp_path, monkeypatch):
     with pytest.raises(RemapError, match="segfaulted"):
         ensure_weights(tmp_path / "m.nc", domain, tmp_path / "w", quiet=True)
     assert len(calls) == remap_mod.WEIGHT_ATTEMPTS
+
+
+# ------------------------------------------------------- output construction
+
+
+def test_each_vertical_dimension_keeps_its_own_name(tmp_path):
+    """MPAS has several, of different lengths, and they are not the same axis.
+
+    nVertLevels (55), nVertLevelsP1 (56) and nSoilLevels (4) appear in one
+    file. Calling them all "lev" makes xarray try to align them and refuse.
+    """
+    from conftest import write_mesh
+    from gmpas.remap import remap_file
+
+    path = tmp_path / "h.nc"
+    write_mesh(path, [(0.0, 0.0), (2.0, 0.0), (0.0, 2.0)])
+    with xr.open_dataset(path) as d:
+        ds = d.load()
+    ds["flat"] = (("Time", "nCells"), np.zeros((1, 3), "f4"))
+    ds["tall"] = (("Time", "nCells", "nVertLevels"), np.zeros((1, 3, 5), "f4"))
+    ds["taller"] = (("Time", "nCells", "nVertLevelsP1"), np.zeros((1, 3, 6), "f4"))
+    ds["soil"] = (("Time", "nCells", "nSoilLevels"), np.zeros((1, 3, 2), "f4"))
+    ds.to_netcdf(path, mode="w")
+
+    weights = _weight_file(
+        tmp_path / "map.nc",
+        row=[1, 2, 3], col=[1, 2, 3], S=[1.0, 1.0, 1.0],
+        area_a=[1.0, 1.0, 1.0], area_b=[1.0, 1.0, 1.0],
+        frac_a=[1.0, 1.0, 1.0], frac_b=[1.0, 1.0, 1.0],
+    )
+    domain = TargetDomain(nlat=1, nlon=3, startlat=-1.0, endlat=1.0,
+                          startlon=-1.0, endlon=5.0)
+
+    info = remap_file(path, weights, domain,
+                      ["flat", "tall", "taller", "soil"],
+                      tmp_path / "out.nc")
+    assert info["fields"] == 4
+
+    with xr.open_dataset(tmp_path / "out.nc") as out:
+        assert out.flat.dims == ("Time", "lat", "lon")
+        assert out.tall.dims == ("Time", "nVertLevels", "lat", "lon")
+        assert out.taller.dims == ("Time", "nVertLevelsP1", "lat", "lon")
+        assert out.soil.dims == ("Time", "nSoilLevels", "lat", "lon")
+        assert out.sizes["nVertLevels"] == 5
+        assert out.sizes["nVertLevelsP1"] == 6
+        assert out.sizes["nSoilLevels"] == 2

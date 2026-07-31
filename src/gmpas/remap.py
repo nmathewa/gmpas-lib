@@ -219,29 +219,33 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
             n_lev = int(da.sizes[lev]) if lev else 1
             has_time = "Time" in da.dims
 
-            block = np.empty(
-                ((n_time if has_time else 1), n_lev, domain.nlat, domain.nlon),
-                dtype=np.float32,
-            )
+            # Keep the source dimension name. Calling every vertical axis
+            # "lev" makes xarray try to align nVertLevels (55) against
+            # nVertLevelsP1 (56) and nSoilLevels (4), and it refuses -- they
+            # are genuinely different coordinates, not one dimension.
+            dims: list[str] = []
+            if has_time:
+                dims.append("Time")
+            if lev:
+                dims.append(lev)
+            dims += ["lat", "lon"]
+
+            shape = ([n_time] if has_time else []) + ([n_lev] if lev else []) \
+                + [domain.nlat, domain.nlon]
+            block = np.empty(shape, dtype=np.float32)
+
             for t in range(n_time if has_time else 1):
                 slice_t = da.isel(Time=t) if has_time else da
                 for k in range(n_lev):
                     src = (slice_t.isel({lev: k}) if lev else slice_t).values
                     dst = weights.apply(src)
                     if slabs == 0:
-                        worst = max(worst,
-                                    weights.conservation_error(src, dst))
-                    block[t, k] = dst.reshape(domain.nlat, domain.nlon)
+                        worst = max(worst, weights.conservation_error(src, dst))
+                    index = ((t,) if has_time else ()) + ((k,) if lev else ())
+                    block[index] = dst.reshape(domain.nlat, domain.nlon)
                     slabs += 1
 
-            dims, arr = ["Time", "lev", "lat", "lon"], block
-            if not has_time:
-                dims, arr = dims[1:], block[0]
-            if not lev:
-                idx = dims.index("lev")
-                dims = [d for d in dims if d != "lev"]
-                arr = arr.squeeze(axis=idx)
-            result[name] = xr.DataArray(arr, dims=dims, attrs=dict(da.attrs))
+            result[name] = xr.DataArray(block, dims=dims, attrs=dict(da.attrs))
 
     out = xr.Dataset(
         result,

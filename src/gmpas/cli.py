@@ -351,22 +351,25 @@ def _remap(args) -> int:
     from .remap import RemapError, Weights, ensure_weights, remap_file
     from .series import Series
 
+    print(banner())
     cfg = discover(args.dir)
     domain = cfg.require_domain()
+    print(f"[1/3] configuration from {cfg.directory}")
+    for role, name in CONFIG_NAMES.items():
+        mark = "found " if role in cfg.found else "absent"
+        print(f"        {mark}  {name}")
+    print(f"  target: {domain}")
+    print("  opening the run — building mesh geometry if it is not cached")
+
     series = Series(args.path, args.mesh or (str(cfg.mesh) if cfg.mesh else ""))
     try:
         mesh_path, how = _resolve_mesh(args, cfg, series)
         available = list(series.first.variables)
         fields, notes = cfg.select(available, warn=False)
 
-        print(banner())
-        print(f"[1/3] configuration from {cfg.directory}")
-        for role, name in CONFIG_NAMES.items():
-            mark = "found " if role in cfg.found else "absent"
-            print(f"        {mark}  {name}")
-        print(f"  input : {len(series.files)} file(s)")
+        print(f"  input : {len(series.files)} file(s), "
+              f"{series.mesh.n_cells:,} cells")
         print(f"  mesh  : {Path(mesh_path).name}  (from {how})")
-        print(f"  target: {domain}")
         print(f"  fields: {len(fields)} selected of {len(available)} available")
         for note in notes:
             print(f"  warning: {note}")
@@ -545,6 +548,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Python block-buffers stdout when it is not a terminal, so under a job
+    # scheduler or through a pipe none of the progress appears until the run
+    # ends -- which looks exactly like a command producing no output at all.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):        # not a regular stream
+        pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
