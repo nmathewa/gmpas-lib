@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 from http.server import BaseHTTPRequestHandler
 
+import numpy as np
 import pytest
 
 from gmpas.viewer import PORT_ATTEMPTS, bind
@@ -169,3 +170,54 @@ def test_frames_default_to_the_viewer_size(small_viewer):
                                    "viridis", None, None)
     with Image.open(io.BytesIO(png)) as im:
         assert im.size == (80, 50)
+
+
+# ------------------------------------------------------------- frame encoding
+
+
+def test_frames_are_palette_pngs_not_rgba(small_viewer):
+    """A colormap has 256 entries, so 32-bit RGBA says nothing extra."""
+    from PIL import Image
+
+    png, _, _ = small_viewer.frame("areaCell", 0, 0, small_viewer.home,
+                                   "viridis", 0.0, 1.0)
+    with Image.open(io.BytesIO(png)) as im:
+        assert im.mode == "P"
+        assert im.info.get("transparency") == 255
+
+
+def test_off_mesh_pixels_stay_transparent(small_viewer):
+    """The map must show through where the mesh does not reach."""
+    from PIL import Image
+
+    png, _, _ = small_viewer.frame("areaCell", 0, 0,
+                                   (-170.0, -160.0, -80.0, -70.0),
+                                   "viridis", 0.0, 1.0)
+    with Image.open(io.BytesIO(png)) as im:
+        assert (np.asarray(im.convert("RGBA"))[..., 3] == 0).all()
+
+
+def test_an_explicit_range_is_used_verbatim(small_viewer):
+    """Animation fixes the range, and nothing may quietly re-derive it."""
+    _, lo, hi = small_viewer.frame("areaCell", 0, 0, small_viewer.home,
+                                   "viridis", -5.0, 12.5)
+    assert (lo, hi) == (-5.0, 12.5)
+
+
+def test_a_degenerate_range_is_widened(small_viewer):
+    """A constant field would otherwise divide by zero."""
+    _, lo, hi = small_viewer.frame("areaCell", 0, 0, small_viewer.home,
+                                   "viridis", 3.0, 3.0)
+    assert hi > lo
+
+
+def test_compression_level_changes_size_not_content(small_viewer):
+    from PIL import Image
+
+    fast, _, _ = small_viewer.frame("areaCell", 0, 0, small_viewer.home,
+                                    "viridis", 0.0, 1.0, compress=1)
+    small, _, _ = small_viewer.frame("areaCell", 0, 0, small_viewer.home,
+                                     "viridis", 0.0, 1.0, compress=9)
+    a = np.asarray(Image.open(io.BytesIO(fast)).convert("RGBA"))
+    b = np.asarray(Image.open(io.BytesIO(small)).convert("RGBA"))
+    assert np.array_equal(a, b)          # lossless either way
