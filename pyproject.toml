@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gmpas"
+version = "0.1.0"
+description = "Fast plotting of MPAS output on its own native variable-resolution mesh"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["mpas", "unstructured", "voronoi", "atmosphere", "visualization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+
+# Core: geometry, caching and data access. Deliberately NOT uxarray (it rebuilds
+# topology on every call) and NOT geopandas (the .npz cache replaces a .gpkg and
+# also carries edge geometry).
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",        # cKDTree: exact Voronoi cell lookup
+    "xarray>=2023.1",
+    "netCDF4>=1.6",
+]
+
+[project.scripts]
+gmpas = "gmpas.cli:main"
+
+[project.optional-dependencies]
+# Rendering is optional so geometry, rasterizing and remap weights stay usable
+# in a headless pipeline that never draws anything.
+plot = ["matplotlib>=3.7", "cartopy>=0.22"]
+test = ["pytest>=7.0"]
+dev = ["gmpas[plot,test]", "ruff>=0.4"]
+
+[project.urls]
+Homepage = "https://github.com/nalex2023/gmpas"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gmpas"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    # a silent nan/overflow in geometry or masking is a bug, not a warning
+    "error::RuntimeWarning",
+    # ...except netCDF4 built against a different numpy ABI, which warns on
+    # import and has nothing to do with this package
+    "ignore:numpy.ndarray size changed:RuntimeWarning",
+]
+
+[tool.ruff]
+line-length = 92
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "NPY"]
