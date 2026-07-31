@@ -488,7 +488,6 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
   <div class="sec"><label style="margin:0"><input type="checkbox" id="showstatic"
     style="width:auto;vertical-align:-1px"> show mesh &amp; static arrays</label></div>
   <div id="vars"></div>
-  <div class="sec"><label>colormap</label><select id="cmap"></select></div>
 </div>
 <div id="main">
   <div id="top">
@@ -522,6 +521,8 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
 </div>
 <div id="right">
   <h1>options</h1>
+
+  <div class="sec"><label>colormap</label><select id="cmap"></select></div>
 
   <div class="sec"><label>colour range</label>
     <div class="row">
