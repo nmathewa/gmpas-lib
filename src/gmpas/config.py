@@ -5,6 +5,9 @@ Three files, all optional to *find* but meaningful when present:
     target_domain     nlat/nlon and the domain bounds, as `key = value`
     include_fields    one variable name per line: remap only these
     exclude_fields    one variable name per line: remap everything but these
+    mesh_file         one line: the mesh to use, when the output does not
+                      carry its own (MPAS output streams are user-configured,
+                      so a history file may hold no mesh variables at all)
 
 They are deliberately dumb formats -- no YAML, no JSON -- because they get
 edited by hand next to a run and pasted into job scripts.
@@ -29,6 +32,7 @@ CONFIG_NAMES = {
     "domain": "target_domain",
     "include": "include_fields",
     "exclude": "exclude_fields",
+    "mesh": "mesh_file",
 }
 
 
@@ -47,6 +51,7 @@ class Config:
     domain: "TargetDomain | None" = None
     include: list[str] | None = None
     exclude: list[str] | None = None
+    mesh: Path | None = None
     found: dict[str, Path] = None            # role -> path, for reporting
 
     def require_domain(self) -> "TargetDomain":
@@ -84,6 +89,14 @@ def discover(directory=None, warn: bool = True) -> Config:
         cfg.include = read_field_list(found["include"])
     if "exclude" in found:
         cfg.exclude = read_field_list(found["exclude"])
+    if "mesh" in found:
+        # MPAS output streams are user-configured, so a history file need not
+        # carry verticesOnCell at all. Naming the mesh once here beats passing
+        # --mesh on every command.
+        entries = read_field_list(found["mesh"])
+        if entries:
+            candidate = Path(entries[0]).expanduser()
+            cfg.mesh = candidate if candidate.is_absolute() else where / candidate
 
     if warn and cfg.include and cfg.exclude:
         overlap = [f for f in cfg.include if f in set(cfg.exclude)]

@@ -305,6 +305,17 @@ standard tooling.
 
 ### Running it from a terminal
 
+The whole conversion is one command:
+
+```bash
+gmpas remap 'history.*.nc' -o out/
+```
+
+It reads the configuration below from the working directory, generates the
+weights once, and writes one remapped file per input file. See
+[docs/REMAPPING.md](docs/REMAPPING.md) for the output it prints and the
+individual steps.
+
 Put a `target_domain` file next to the run. `startlat`/`endlat` are the domain
 edges and `nlat` counts cells across them:
 
@@ -317,8 +328,9 @@ startlon =  80.0
 endlon   = 160.0
 ```
 
-Optionally add `include_fields` and/or `exclude_fields`, one variable name per
-line. Blank lines, `#` comments and trailing spaces are fine. A name in both
+Optionally add `mesh_file` — one line naming the mesh, for when the output
+stream does not carry `verticesOnCell` — and `include_fields` and/or
+`exclude_fields`, one variable name per line. Blank lines, `#` comments and trailing spaces are fine. A name in both
 files is contradictory: **include wins**, with a warning naming the fields.
 
 ```

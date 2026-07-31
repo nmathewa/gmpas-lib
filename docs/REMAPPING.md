@@ -41,7 +41,78 @@ conservation as the sample count grows, with error falling as `1/sqrt(N)`, but
 never actually preserves the cell integral. That is not conservation, and
 shipping it under that name would be worse than not offering it.
 
-## The workflow
+## One command
+
+Put `target_domain` next to the run, optionally `include_fields`,
+`exclude_fields` and `mesh_file`, then:
+
+```bash
+gmpas remap 'history.*.nc' -o out/
+```
+
+It reads the configuration, builds the weights once (reusing `map_*.nc` if it
+is already there), and writes **one output file per input file** — a few
+hundred history files concatenated into a single netCDF would be unwieldy, and
+one-in-one-out keeps the valid time in the filename.
+
+```
+[1/3] configuration from /scratch/run
+        found   target_domain
+        found   include_fields
+        absent  exclude_fields
+        found   mesh_file
+  input : 193 file(s)
+  mesh  : init.nc  (from mesh_file)
+  target: 534 x 267 cells, lon 80.0 .. 160.0, lat -20.0 .. 20.0, 0.149813 deg
+  fields: 20 selected of 119 available
+
+[2/3] weights
+  writing src.scrip.nc and dst.scrip.nc
+    normalised 12,774 longitudes onto [0, 2pi)
+  weights ready in 18.2 s (77 MB)
+
+[3/3] remapping 193 file(s) -> out/
+        not remapped — u: on nEdges — needs edge weights
+        conservation error 0.0e+00 (0 is exact)
+  [  1/193] history.2012-02-25_00.00.00.remap.nc  18 fields, 347 slabs, 5.7s, eta 18m
+```
+
+### Where the mesh comes from
+
+MPAS output streams are user-configured, so a history file need not carry
+`verticesOnCell` at all. The mesh is resolved in this order:
+
+1. `--mesh` on the command line
+2. a `mesh_file` in the config directory, holding one line: the path
+3. the data file itself, if it is self-describing
+4. a mesh sitting beside the data with a matching cell count
+
+`mesh_file` is usually the right answer for a real run — set once, not passed
+on every command.
+
+### What cannot be remapped by cell weights
+
+Cell weights carry cell fields. MPAS keeps velocity as `u` on edges and
+vorticity on vertices, and those need their own weight files, so they are
+reported rather than silently dropped:
+
+```
+        not remapped — u: on nEdges — needs edge weights
+        not remapped — vorticity: on nVertices — needs vertex weights
+```
+
+For winds, `uReconstructZonal` / `uReconstructMeridional` are already at cell
+centres and remap normally.
+
+### A caveat on ESMF
+
+ESMF 8.9.1 on macOS segfaults intermittently — measured at roughly **one run
+in five** on byte-identical inputs that succeed the other four times. Weight
+generation is a one-off, so `gmpas remap` retries up to four times and says so
+when it does. A reproducible crash is different and usually means the padded
+`grid_corners` problem below.
+
+## The steps, individually
 
 ### 1. Write the source grid
 

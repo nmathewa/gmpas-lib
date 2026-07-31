@@ -4,11 +4,45 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+from pathlib import Path
 
 from . import __version__
 
 #: only the default port is allowed to wander when busy
 DEFAULT_PORT = 8765
+
+BANNER = r"""
+    __    __    __
+   /  \__/  \__/  \     g m p a s   {version}
+   \__/  \__/  \__/
+   /  \__/  \__/  \     MPAS output on its own mesh
+   \__/  \__/  \__/
+"""
+
+
+def banner() -> str:
+    return BANNER.format(version=__version__)
+
+
+def human(n: float) -> str:
+    """Bytes, at a glance."""
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def clock(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    m, sec = divmod(int(seconds), 60)
+    if m < 60:
+        return f"{m}m{sec:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
 
 EXAMPLES = """
 examples:
@@ -20,6 +54,7 @@ examples:
   gmpas plot  'run/history.*.nc' precipw --all-steps -o 'frames/pw_{step:04d}.png' -j 8
 
   gmpas scrip run/init.nc -o mesh.scrip.nc  for conservative remapping weights
+  gmpas remap  run/history.*.nc -o out/     the whole conversion, one command
   gmpas target -o dst.scrip.nc              reads target_domain from this directory
   gmpas target run/history.nc               and which fields would be remapped
 
@@ -294,6 +329,119 @@ def _target(args) -> int:
     return 0
 
 
+def _resolve_mesh(args, cfg, series):
+    """Explicit flag, then mesh_file, then a self-describing file."""
+    from .mesh import has_mesh
+
+    if args.mesh:
+        return Path(args.mesh), "--mesh"
+    if cfg.mesh is not None:
+        if not cfg.mesh.exists():
+            raise SystemExit(f"gmpas: mesh_file names {cfg.mesh}, which does "
+                             f"not exist")
+        return cfg.mesh, "mesh_file"
+    if has_mesh(series.first):
+        return series.files[0], "the data file itself"
+    return series.mesh.path, "found beside the data"
+
+
+def _remap(args) -> int:
+    """Read the config, build weights once, convert every file."""
+    from .config import CONFIG_NAMES, discover
+    from .remap import RemapError, Weights, ensure_weights, remap_file
+    from .series import Series
+
+    cfg = discover(args.dir)
+    domain = cfg.require_domain()
+    series = Series(args.path, args.mesh or (str(cfg.mesh) if cfg.mesh else ""))
+    try:
+        mesh_path, how = _resolve_mesh(args, cfg, series)
+        available = list(series.first.variables)
+        fields, notes = cfg.select(available, warn=False)
+
+        print(banner())
+        print(f"[1/3] configuration from {cfg.directory}")
+        for role, name in CONFIG_NAMES.items():
+            mark = "found " if role in cfg.found else "absent"
+            print(f"        {mark}  {name}")
+        print(f"  input : {len(series.files)} file(s)")
+        print(f"  mesh  : {Path(mesh_path).name}  (from {how})")
+        print(f"  target: {domain}")
+        print(f"  fields: {len(fields)} selected of {len(available)} available")
+        for note in notes:
+            print(f"  warning: {note}")
+        if not fields:
+            raise SystemExit("gmpas: no fields selected — check include_fields")
+
+        work = Path(args.out)
+        print(f"\n[2/3] weights")
+        weights_path, built = ensure_weights(
+            mesh_path, domain, work, method=args.method, force=args.force_weights
+        )
+        weights = Weights.load(weights_path)
+        if weights.n_a != series.mesh.n_cells:
+            raise SystemExit(
+                f"gmpas: weights are for {weights.n_a:,} cells but the mesh has "
+                f"{series.mesh.n_cells:,}. Delete {weights_path.name} to rebuild."
+            )
+    finally:
+        series.close()
+
+    n = len(series.files)
+    print(f"\n[3/3] remapping {n} file(s) -> {work}/")
+    t0 = time.perf_counter()
+    total_slabs = 0
+    written: list[Path] = []
+    skipped_existing = 0
+
+    for i, src in enumerate(series.files, start=1):
+        out = work / f"{src.stem}.remap.nc"
+        head = f"  [{i:>{len(str(n))}}/{n}]"
+        if out.exists() and not args.overwrite:
+            print(f"{head} {out.name}  exists, skipping")
+            skipped_existing += 1
+            continue
+
+        t1 = time.perf_counter()
+        try:
+            info = remap_file(src, weights, domain, fields, out)
+        except (RemapError, OSError) as exc:
+            print(f"{head} {src.name}: {exc}", file=sys.stderr)
+            continue
+
+        written.append(out)
+        total_slabs += info["slabs"]
+        if i == 1:
+            for name, why in info["skipped"]:
+                print(f"        not remapped — {name}: {why}")
+            print(f"        conservation error {info['conservation']:.1e} "
+                  f"(0 is exact)")
+
+        done = time.perf_counter() - t0
+        left = (done / i) * (n - i)
+        eta = f", eta {clock(left)}" if i < n else ""
+        print(f"{head} {out.name}  {info['fields']} fields, "
+              f"{info['slabs']} slabs, {human(out.stat().st_size)}, "
+              f"{time.perf_counter() - t1:.1f}s{eta}")
+
+    dt = time.perf_counter() - t0
+    size = sum(p.stat().st_size for p in written)
+    print(f"\n{'-' * 60}")
+    print("generated:")
+    print(f"  {weights_path}  ({human(weights_path.stat().st_size)})"
+          f"{'  [new]' if built else '  [reused]'}")
+    for extra in ("src.scrip.nc", "dst.scrip.nc"):
+        q = work / extra
+        if q.exists():
+            print(f"  {q}  ({human(q.stat().st_size)})")
+    print(f"  {len(written)} remapped file(s) in {work}/  ({human(size)} total)")
+    if skipped_existing:
+        print(f"  {skipped_existing} already existed — pass --overwrite to redo")
+    print(f"\n{total_slabs:,} slabs in {clock(dt)}"
+          + (f"  ({dt / len(written):.1f}s per file)" if written else ""))
+    return 0
+
+
 def _view(args) -> int:
     from .viewer import serve
 
@@ -365,6 +513,21 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("-o", "--out", help="write the target grid as SCRIP here")
     t.set_defaults(func=_target)
 
+    r = sub.add_parser("remap", help="conservatively remap a run to a lat-lon grid")
+    common(r)
+    r.add_argument("-o", "--out", default="remapped",
+                   help="directory for the weights and the output files")
+    r.add_argument("-d", "--dir", help="where to look for the config files "
+                                       "(default: the working directory)")
+    r.add_argument("--method", default="conserve",
+                   choices=["conserve", "conserve2nd"],
+                   help="ESMF regrid method (default: first-order conservative)")
+    r.add_argument("--force-weights", action="store_true",
+                   help="rebuild map.nc even if it already exists")
+    r.add_argument("--overwrite", action="store_true",
+                   help="rewrite output files that already exist")
+    r.set_defaults(func=_remap)
+
     v = sub.add_parser("view", help="browse a file interactively in a browser")
     common(v)
     v.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
@@ -390,8 +553,13 @@ def main(argv=None) -> int:
         parser.print_help()
         return 0
 
+    from .remap import RemapError
+
     try:
         return args.func(args)
+    except RemapError as exc:
+        print(f"\ngmpas: {exc}", file=sys.stderr)
+        return 1
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"gmpas: {exc}", file=sys.stderr)
         return 1
