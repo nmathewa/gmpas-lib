@@ -36,6 +36,15 @@ CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo",
          "RdBu_r", "coolwarm", "BrBG", "Blues", "Spectral_r"]
 
 
+def ramp(name: str, n: int = 32) -> list[str]:
+    """Hex stops for a colormap, so the browser's bar matches the image."""
+    from matplotlib import colormaps
+
+    cm = colormaps[name]
+    return ["#%02x%02x%02x" % tuple(int(round(255 * c)) for c in cm(i / (n - 1))[:3])
+            for i in range(n)]
+
+
 # --------------------------------------------------------------- view index
 
 
@@ -174,7 +183,10 @@ class Viewer:
             "labels": self.series.labels,
             "scanning": self.series.scanning,
             "home": list(self.home),
+            "nx": self.nx,
+            "ny": self.ny,
             "cmaps": CMAPS,
+            "ramps": {name: ramp(name) for name in CMAPS},
             "variables": out,
         }
 
@@ -366,17 +378,17 @@ PAGE = """<!doctype html>
 *{box-sizing:border-box}
 body{margin:0;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
      background:var(--bg);color:var(--fg);display:flex;height:100vh;overflow:hidden}
-#side{width:260px;flex:none;background:var(--panel);border-right:1px solid var(--line);
-      display:flex;flex-direction:column;overflow-y:auto}
+#side{width:250px;flex:none;background:var(--panel);border-right:1px solid var(--line);
+      display:flex;flex-direction:column;overflow:hidden}
 #side h1{font-size:13px;font-weight:500;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}
 #side h1 small{display:block;color:var(--dim);font-weight:400;margin-top:2px}
-.sec{padding:10px 14px;border-bottom:1px solid var(--line)}
+.sec{padding:10px 14px;border-bottom:1px solid var(--line);flex:none}
 .sec label{display:block;color:var(--dim);font-size:11px;letter-spacing:.04em;
            text-transform:uppercase;margin-bottom:6px}
 select,input[type=text]{width:100%;background:#14161a;color:var(--fg);
   border:1px solid var(--line);border-radius:4px;padding:5px 6px;font:inherit}
 input[type=range]{width:100%;accent-color:var(--accent)}
-#vars{flex:1;overflow-y:auto;padding:6px 0}
+#vars{flex:1;overflow-y:auto;padding:6px 0;min-height:60px}
 #vars div{padding:4px 14px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #vars div:hover{background:#252932}
 #vars div.on{background:var(--accent);color:#08201a}
@@ -384,28 +396,35 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #main{flex:1;display:flex;flex-direction:column;min-width:0}
 #top{padding:8px 14px;border-bottom:1px solid var(--line);display:flex;gap:14px;
      align-items:center;color:var(--dim);flex-wrap:wrap}
-#top b{white-space:nowrap}
+#top b{color:var(--fg);font-weight:500;white-space:nowrap}
 #tlab{font-variant-numeric:tabular-nums}
-#top b{color:var(--fg);font-weight:500}
-#stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;padding:12px}
-#wrap{position:relative;line-height:0;box-shadow:0 0 0 1px var(--line)}
-#wrap img{display:block;max-width:100%;height:auto}
+#stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;padding:12px;min-height:0}
+#wrap{position:relative;line-height:0;box-shadow:0 0 0 1px var(--line);overflow:hidden;
+      cursor:grab;max-width:100%;max-height:100%}
+#wrap.drag{cursor:grabbing}
+#wrap img{display:block;max-width:100%;height:auto;transform-origin:0 0;will-change:transform}
 #over{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
-#bar{display:flex;gap:10px;align-items:center;padding:8px 14px;border-top:1px solid var(--line)}
-#ramp{flex:1;height:12px;border-radius:2px;border:1px solid var(--line)}
-.tick{color:var(--dim);font-variant-numeric:tabular-nums}
+#scale{position:absolute;left:14px;bottom:14px;color:#fff;font-size:11px;
+       text-shadow:0 0 3px #000,0 0 6px #000;pointer-events:none}
+#scalebar{height:5px;border:1px solid #fff;border-top:none;box-shadow:0 0 3px #000;
+          margin-top:2px}
+#scaletext{display:block;font-variant-numeric:tabular-nums}
+#msg{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:#000a;
+     padding:4px 10px;border-radius:4px;color:var(--dim);opacity:0;transition:opacity .2s;
+     pointer-events:none}
+#bar{padding:8px 14px;border-top:1px solid var(--line)}
+#ramp{height:14px;border-radius:2px;border:1px solid var(--line)}
+#ticks{display:flex;justify-content:space-between;margin-top:3px;color:var(--dim);
+       font-size:11px;font-variant-numeric:tabular-nums}
+#cblabel{color:var(--dim);font-size:11px;margin-bottom:4px}
 button{background:#252932;color:var(--fg);border:1px solid var(--line);border-radius:4px;
        padding:5px 9px;font:inherit;cursor:pointer}
 button:hover{border-color:var(--accent)}
-#msg{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:#000a;
-     padding:4px 10px;border-radius:4px;color:var(--dim);opacity:0;transition:opacity .2s}
 </style></head><body>
 <div id="side">
   <h1><span id="title">loading…</span><small id="sub"></small></h1>
-  <div class="sec" style="padding-top:8px;padding-bottom:8px">
-    <label style="margin:0"><input type="checkbox" id="showstatic" style="width:auto;vertical-align:-1px">
-    show mesh &amp; static arrays</label>
-  </div>
+  <div class="sec"><label style="margin:0"><input type="checkbox" id="showstatic"
+    style="width:auto;vertical-align:-1px"> show mesh &amp; static arrays</label></div>
   <div id="vars"></div>
   <div class="sec"><label>colormap</label><select id="cmap"></select></div>
   <div class="sec"><label>range</label>
@@ -417,36 +436,71 @@ button:hover{border-color:var(--accent)}
 </div>
 <div id="main">
   <div id="top">
-    <span>time <b id="tlab">0</b></span><input type="range" id="time" min="0" max="0" style="width:160px">
-    <span>level <b id="llab">0</b></span><input type="range" id="level" min="0" max="0" style="width:160px">
+    <span>time <b id="tlab">–</b></span><input type="range" id="time" min="0" max="0" style="width:150px">
+    <span>level <b id="llab">0</b></span><input type="range" id="level" min="0" max="0" style="width:110px">
+    <span>zoom</span><input type="range" id="zoom" min="0" max="800" value="0" style="width:110px">
     <button id="home">reset view</button>
     <span id="probe"></span>
   </div>
   <div id="stage">
-    <div id="wrap"><img id="data"><img id="over"></div>
+    <div id="wrap">
+      <img id="data"><img id="over">
+      <div id="scale"><span id="scaletext"></span><div id="scalebar"></div></div>
+    </div>
     <div id="msg"></div>
   </div>
-  <div id="bar"><span class="tick" id="lo"></span><div id="ramp"></div><span class="tick" id="hi"></span></div>
+  <div id="bar">
+    <div id="cblabel"></div>
+    <div id="ramp"></div>
+    <div id="ticks"></div>
+  </div>
 </div>
 <script>
 const $=s=>document.querySelector(s);
-let M=null, cur=null, extent=null, busy=false, pend=false;
+let M=null, cur=null, busy=false, pend=false;
+let view=null, home=null, rendered=null;      // geographic state
+const ZMAX=800;                               // slider units, 100 per doubling
 
 function say(t){const m=$("#msg");m.textContent=t;m.style.opacity=t?1:0;}
+function aspect(){ return M.nx/M.ny; }
+
+// a view is a centre plus a longitude span; latitude span follows the image
+// aspect so nothing is ever stretched
+function boxOf(v){
+  const h=v.w/aspect();
+  return [v.clon-v.w/2, v.clon+v.w/2, v.clat-h/2, v.clat+h/2];
+}
+function fit(box){
+  const [a,b,c,d]=box, clon=(a+b)/2, clat=(c+d)/2;
+  return {clon, clat, w: Math.max(b-a, (d-c)*aspect())};
+}
+function clamp(){
+  view.w = Math.min(view.w, home.w);                 // never wider than the mesh
+  view.w = Math.max(view.w, home.w/Math.pow(2,ZMAX/100));
+  const h=view.w/aspect(), hh=home.w/aspect();
+  const dx=Math.max(0,(home.w-view.w)/2), dy=Math.max(0,(hh-h)/2);
+  view.clon=Math.min(home.clon+dx, Math.max(home.clon-dx, view.clon));
+  view.clat=Math.min(home.clat+dy, Math.max(home.clat-dy, view.clat));
+  $("#zoom").value = Math.round(Math.log2(home.w/view.w)*100);
+}
 
 async function boot(){
   M = await (await fetch("/api/meta")).json();
   $("#title").textContent = M.file;
-  $("#sub").textContent = `${M.cells.toLocaleString()} cells · ${M.regional?"regional":"global"} · ${M.steps} step${M.steps>1?"s":""} in ${M.files} file${M.files>1?"s":""}${M.scanning?" · scanning…":""}`;
   M.cmaps.forEach(c=>{const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
-  fillVars();
-  extent = M.home.slice();
+  home = fit(M.home); view = {...home}; rendered = null;
+  subtitle(); fillVars();
   if(M.scanning) setTimeout(pollScan, 400);
   pick(M.variables.find(v=>!v.static)?.name ?? M.variables[0].name);
 }
+function subtitle(){
+  $("#sub").textContent = `${M.cells.toLocaleString()} cells \u00b7 `+
+    `${M.regional?"regional":"global"} \u00b7 ${M.steps} step${M.steps>1?"s":""}`+
+    ` in ${M.files} file${M.files>1?"s":""}${M.scanning?" \u00b7 scanning\u2026":""}`;
+}
 function fillVars(){
-  const show = $("#showstatic").checked;
-  $("#vars").innerHTML = "";
+  const show=$("#showstatic").checked;
+  $("#vars").innerHTML="";
   M.variables.filter(v=>show||!v.static).forEach(v=>{
     const d=document.createElement("div");d.textContent=v.name;d.title=v.label;
     if(v.static) d.classList.add("static");
@@ -454,83 +508,139 @@ function fillVars(){
   });
   if(cur) [...$("#vars").children].forEach(d=>d.classList.toggle("on",d.textContent===cur.name));
 }
-$("#showstatic")?.addEventListener("change", fillVars);
+$("#showstatic").addEventListener("change", fillVars);
 
 function pick(name){
   cur = M.variables.find(v=>v.name===name);
   [...$("#vars").children].forEach(d=>d.classList.toggle("on",d.textContent===name));
-  $("#time").max = M.steps-1; $("#tlab").textContent = M.labels[$("#time").value|0];
-  $("#level").max = cur.levels-1; $("#level").value = 0; $("#llab").textContent = 0;
+  $("#time").max=M.steps-1; $("#tlab").textContent=M.labels[$("#time").value|0];
+  $("#level").max=cur.levels-1; $("#level").value=0; $("#llab").textContent=0;
   overlay(); draw();
 }
-async function overlay(){ $("#over").src = "/api/overlay?extent="+extent.join(","); }
+async function pollScan(){
+  if(!M||!M.scanning) return;
+  const s=await (await fetch("/api/status")).json();
+  const keep=$("#time").value;
+  M.steps=s.steps; M.labels=s.labels; M.scanning=s.scanning;
+  $("#time").max=M.steps-1; $("#time").value=keep;
+  subtitle();
+  if(M.scanning) setTimeout(pollScan, 700);
+}
+
+async function overlay(){ $("#over").src="/api/overlay?extent="+boxOf(view).join(","); }
+
+// show the frame we already have, transformed into place, until the real one
+// lands. Without this a zoom looks like nothing happens and then it jumps.
+function preview(){
+  if(!rendered){ return; }
+  const b=boxOf(view), s=(rendered[1]-rendered[0])/(b[1]-b[0]);
+  const fx=(b[0]-rendered[0])/(rendered[1]-rendered[0]);
+  const fy=(rendered[3]-b[3])/(rendered[3]-rendered[2]);
+  const t=`translate(${-fx*s*100}%, ${-fy*s*100}%) scale(${s})`;
+  $("#data").style.transform=t; $("#over").style.transform=t;
+}
+function scalebar(){
+  const b=boxOf(view), wkm=(b[1]-b[0])*111.320*Math.cos(view.clat*Math.PI/180);
+  const px=$("#wrap").clientWidth||600;
+  let target=wkm*0.25, mag=Math.pow(10,Math.floor(Math.log10(target)));
+  const nice=[1,2,5,10].map(n=>n*mag).filter(n=>n<=wkm*0.45);
+  const len=nice.length?nice[nice.length-1]:target;
+  $("#scalebar").style.width=(len/wkm*px)+"px";
+  $("#scaletext").textContent = len>=1 ? `${len.toLocaleString()} km`
+                                       : `${Math.round(len*1000).toLocaleString()} m`;
+}
+function colorbar(lo,hi){
+  const stops=M.ramps[$("#cmap").value];
+  $("#ramp").style.background=`linear-gradient(90deg,${stops.join(",")})`;
+  const n=5, out=[];
+  for(let i=0;i<n;i++){
+    const v=lo+(hi-lo)*i/(n-1);
+    out.push(`<span>${Math.abs(v)>=1e4||(v!==0&&Math.abs(v)<1e-3)?v.toExponential(2):v.toPrecision(4)}</span>`);
+  }
+  $("#ticks").innerHTML=out.join("");
+  $("#cblabel").textContent=cur?cur.label:"";
+}
 
 async function draw(){
   if(!cur) return;
   if(busy){ pend=true; return; }
   busy=true;
-  const p = new URLSearchParams({var:cur.name, time:$("#time").value,
-    level:$("#level").value, extent:extent.join(","), cmap:$("#cmap").value});
+  const b=boxOf(view);
+  const p=new URLSearchParams({var:cur.name,time:$("#time").value,
+    level:$("#level").value,extent:b.join(","),cmap:$("#cmap").value});
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
   const t0=performance.now();
-  const r = await fetch("/api/frame?"+p);
+  const r=await fetch("/api/frame?"+p);
   if(!r.ok){ say((await r.json()).error); busy=false; return; }
-  const [lo,hi] = r.headers.get("X-Range").split(",").map(Number);
-  const blob = await r.blob();
-  $("#data").src = URL.createObjectURL(blob);
-  $("#lo").textContent = lo.toPrecision(4); $("#hi").textContent = hi.toPrecision(4);
-  ramp($("#cmap").value);
-  say(`${cur.label} · ${Math.round(performance.now()-t0)} ms`);
+  const [lo,hi]=r.headers.get("X-Range").split(",").map(Number);
+  const url=URL.createObjectURL(await r.blob());
+  const img=$("#data"), old=img.src;
+  img.onload=()=>{ if(old.startsWith("blob:")) URL.revokeObjectURL(old); };
+  img.src=url;
+  rendered=b;
+  img.style.transform=""; $("#over").style.transform="";
+  colorbar(lo,hi); scalebar();
+  say(`${cur.label} \u00b7 ${Math.round(performance.now()-t0)} ms`);
   busy=false;
   if(pend){ pend=false; draw(); }
 }
-function ramp(c){
-  const grad={viridis:["#440154","#21918c","#fde725"],plasma:["#0d0887","#cc4778","#f0f921"],
-    magma:["#000004","#b73779","#fcfdbf"],cividis:["#00224e","#7c7b78","#fee838"],
-    turbo:["#30123b","#a2fc3c","#7a0403"],RdBu_r:["#053061","#f7f7f7","#67001f"],
-    coolwarm:["#3b4cc0","#dddddd","#b40426"],BrBG:["#543005","#f5f5f5","#003c30"],
-    Blues:["#f7fbff","#6baed6","#08306b"],Spectral_r:["#5e4fa2","#ffffbf","#9e0142"]}[c];
-  $("#ramp").style.background = `linear-gradient(90deg,${grad.join(",")})`;
-}
-$("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value]; draw(); };
+let redrawTimer=null;
+function schedule(ms){ preview(); scalebar(); clearTimeout(redrawTimer);
+  redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
-async function pollScan(){
-  if(!M || !M.scanning) return;
-  const s = await (await fetch("/api/status")).json();
-  M.steps = s.steps; M.labels = s.labels; M.scanning = s.scanning;
-  const keep = $("#time").value;
-  $("#time").max = M.steps-1; $("#time").value = keep;
-  $("#sub").textContent = `${M.cells.toLocaleString()} cells \u00b7 ${M.regional?"regional":"global"} \u00b7 ${M.steps} step${M.steps>1?"s":""} in ${M.files} file${M.files>1?"s":""}${M.scanning?" \u00b7 scanning\u2026":""}`;
-  if(M.scanning) setTimeout(pollScan, 700);
-}
+$("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value]; draw(); };
 $("#level").oninput = e=>{ $("#llab").textContent=e.target.value; draw(); };
 $("#cmap").onchange = draw;
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
-$("#home").onclick = ()=>{ extent = M.home.slice(); overlay(); draw(); };
+$("#home").onclick = ()=>{ view={...home}; clamp(); schedule(0); };
+$("#zoom").oninput = e=>{ view.w = home.w/Math.pow(2, e.target.value/100);
+                          clamp(); schedule(180); };
 
-$("#wrap").onclick = async ev=>{
-  const r = $("#data").getBoundingClientRect();
-  const fx = (ev.clientX-r.left)/r.width, fy = (ev.clientY-r.top)/r.height;
-  const lon = extent[0] + fx*(extent[1]-extent[0]);
-  const lat = extent[3] - fy*(extent[3]-extent[2]);
-  const q = new URLSearchParams({lon, lat, var:cur.name,
-    time:$("#time").value, level:$("#level").value});
-  const d = await (await fetch("/api/probe?"+q)).json();
-  $("#probe").textContent = `cell ${d.cell} @ ${d.lat}°, ${d.lon}° = ${d.value.toPrecision(6)}`;
-};
 $("#wrap").onwheel = ev=>{
   ev.preventDefault();
   const r=$("#data").getBoundingClientRect();
   const fx=(ev.clientX-r.left)/r.width, fy=(ev.clientY-r.top)/r.height;
-  const lon = extent[0]+fx*(extent[1]-extent[0]), lat = extent[3]-fy*(extent[3]-extent[2]);
-  const k = ev.deltaY>0 ? 1.25 : 0.8;
-  extent = [lon-(lon-extent[0])*k, lon+(extent[1]-lon)*k,
-            lat-(lat-extent[2])*k, lat+(extent[3]-lat)*k];
-  clearTimeout(window._z);
-  window._z = setTimeout(()=>{ overlay(); draw(); }, 150);
+  const b=boxOf(view);
+  const lon=b[0]+fx*(b[1]-b[0]), lat=b[3]-fy*(b[3]-b[2]);
+  const k=Math.exp(ev.deltaY*0.0015);        // continuous, not stepped
+  const nw=Math.min(home.w, Math.max(home.w/Math.pow(2,ZMAX/100), view.w*k));
+  const s=nw/view.w;
+  view.clon = lon + (view.clon-lon)*s;       // keep the cursor point fixed
+  view.clat = lat + (view.clat-lat)*s;
+  view.w = nw;
+  clamp(); schedule(160);
 };
+
+let drag=null;
+$("#wrap").onpointerdown = ev=>{
+  drag={x:ev.clientX, y:ev.clientY, clon:view.clon, clat:view.clat, moved:false};
+  $("#wrap").setPointerCapture(ev.pointerId); $("#wrap").classList.add("drag");
+};
+$("#wrap").onpointermove = ev=>{
+  if(!drag) return;
+  const r=$("#data").getBoundingClientRect(), b=boxOf(view);
+  const dx=(ev.clientX-drag.x)/r.width*(b[1]-b[0]);
+  const dy=(ev.clientY-drag.y)/r.height*(b[3]-b[2]);
+  if(Math.abs(ev.clientX-drag.x)+Math.abs(ev.clientY-drag.y)>3) drag.moved=true;
+  view.clon=drag.clon-dx; view.clat=drag.clat+dy;
+  clamp(); preview(); scalebar();
+};
+$("#wrap").onpointerup = async ev=>{
+  const moved=drag&&drag.moved; drag=null;
+  $("#wrap").classList.remove("drag");
+  if(moved){ schedule(0); return; }
+  if(!cur) return;
+  const r=$("#data").getBoundingClientRect(), b=boxOf(view);
+  const lon=b[0]+((ev.clientX-r.left)/r.width)*(b[1]-b[0]);
+  const lat=b[3]-((ev.clientY-r.top)/r.height)*(b[3]-b[2]);
+  const q=new URLSearchParams({lon,lat,var:cur.name,
+    time:$("#time").value,level:$("#level").value});
+  const d=await (await fetch("/api/probe?"+q)).json();
+  $("#probe").textContent=`cell ${d.cell} @ ${d.lat}\u00b0, ${d.lon}\u00b0 = ${d.value.toPrecision(6)}`;
+};
+addEventListener("resize", scalebar);
 boot();
 </script></body></html>
 """

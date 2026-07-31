@@ -83,3 +83,35 @@ def test_a_bind_error_that_is_not_addr_in_use_is_raised(servers):
     """Don't paper over a real failure by wandering up the port range."""
     with pytest.raises(OSError):
         bind(Quiet, 80, host="203.0.113.1")     # unassignable address
+
+
+# ------------------------------------------------------------- colour ramps
+
+
+def test_ramp_returns_hex_stops_from_the_real_colormap():
+    """The browser's bar must show the colours the image actually uses."""
+    from gmpas.viewer import ramp
+
+    stops = ramp("viridis", 5)
+    assert len(stops) == 5
+    assert all(s.startswith("#") and len(s) == 7 for s in stops)
+    assert stops[0] == "#440154"          # viridis really does start here
+    assert stops[-1] == "#fde725"
+
+
+def test_every_offered_colormap_has_a_ramp():
+    from gmpas.viewer import CMAPS, ramp
+
+    for name in CMAPS:
+        assert len(ramp(name, 8)) == 8
+
+
+def test_a_diverging_ramp_is_light_in_the_middle():
+    """Sanity that the sampling is ordered, not shuffled."""
+    from gmpas.viewer import ramp
+
+    stops = ramp("RdBu_r", 5)
+    def lum(h):
+        return sum(int(h[i:i + 2], 16) for i in (1, 3, 5))
+    assert lum(stops[2]) > lum(stops[0])
+    assert lum(stops[2]) > lum(stops[-1])

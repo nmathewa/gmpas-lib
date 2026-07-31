@@ -337,7 +337,7 @@ def test_extent_comes_from_metadata_not_from_the_big_array(simple_mesh_file):
     assert mesh.extent == pytest.approx(tuple(mesh._meta["extent"]))
 
 
-def test_an_interrupted_build_leaves_no_usable_cache(tmp_path, monkeypatch):
+def test_an_interrupted_build_leaves_no_usable_cache(tmp_path):
     """A half-written cache that looks complete is worse than none."""
     from gmpas import mesh as mesh_mod
 
@@ -347,14 +347,17 @@ def test_an_interrupted_build_leaves_no_usable_cache(tmp_path, monkeypatch):
     def explode(*a, **k):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(mesh_mod, "_open_memmap", explode)
-    with pytest.raises(RuntimeError):
-        MpasMesh.load(path)
+    # a scoped context, not the shared `monkeypatch` fixture: calling
+    # .undo() on that would also revert the autouse GMPAS_CACHE_DIR
+    # isolation and write the retry into the real user cache
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(mesh_mod, "_open_memmap", explode)
+        with pytest.raises(RuntimeError):
+            MpasMesh.load(path)
+        assert not (cache / "meta.json").exists()
 
-    assert not (cache / "meta.json").exists()
-
-    monkeypatch.undo()
     assert MpasMesh.load(path).n_cells == 2      # recovers on the next try
+    assert cache.is_relative_to(tmp_path)        # and stayed inside the sandbox
 
 
 def test_second_load_comes_from_cache_and_matches(simple_mesh_file):
