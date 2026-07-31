@@ -28,7 +28,7 @@ from .plot import cell_field, edge_field, mesh_structure, vectors
 from .raster import RASTER_THRESHOLD, rasterize, should_raster, target_grid
 from .style import CMAPS, EXTENTS, Style, resolve_extent, save_figure
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     # entry points

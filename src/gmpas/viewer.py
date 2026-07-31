@@ -443,6 +443,10 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 button{background:#252932;color:var(--fg);border:1px solid var(--line);border-radius:4px;
        padding:5px 9px;font:inherit;cursor:pointer}
 button:hover{border-color:var(--accent)}
+button:disabled{opacity:.5;cursor:default;border-color:var(--line)}
+button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
+#animstate{font-variant-numeric:tabular-nums}
+#fps{width:80px}
 </style></head><body>
 <div id="side">
   <h1><span id="title">loading…</span><small id="sub"></small></h1>
@@ -465,6 +469,9 @@ button:hover{border-color:var(--accent)}
     <label style="white-space:nowrap"><input type="checkbox" id="grid" checked
       style="vertical-align:-1px"> grid</label>
     <button id="home">reset view</button>
+    <button id="anim">animate</button>
+    <input type="range" id="fps" min="1" max="24" value="8" title="frames per second">
+    <span id="animstate"></span>
     <span id="probe"></span>
   </div>
   <div id="stage">
@@ -523,6 +530,7 @@ async function boot(){
   layout();
   subtitle(); fillVars();
   if(M.scanning) setTimeout(pollScan, 400);
+  animUI();
   pick(M.variables.find(v=>!v.static)?.name ?? M.variables[0].name);
 }
 function subtitle(){
@@ -543,6 +551,7 @@ function fillVars(){
 $("#showstatic").addEventListener("change", fillVars);
 
 function pick(name){
+  animStop();
   cur = M.variables.find(v=>v.name===name);
   [...$("#vars").children].forEach(d=>d.classList.toggle("on",d.textContent===name));
   $("#time").max=M.steps-1; $("#tlab").textContent=M.labels[$("#time").value|0];
@@ -690,7 +699,8 @@ async function draw(){
   img.src=url;
   rendered=b;
   preview();          // the frame is larger than the window: crop to the view
-  colorbar(lo,hi); scalebar(); graticule();
+  lastRange=[lo,hi];
+  colorbar(lo,hi); scalebar(); graticule(); animUI();
   say(`${cur.label} \u00b7 ${Math.round(performance.now()-t0)} ms`);
   }catch(e){
     say("render failed: "+e);
@@ -699,13 +709,98 @@ async function draw(){
     if(pend){ pend=false; draw(); }      // always drains, however we left
   }
 }
+// Every frame of a run, held for the session. Keyed by the whole render
+// configuration, so panning or changing variable starts a new set while an
+// earlier one stays instantly replayable.
+const animCache=new Map();
+const anim={loading:false, playing:false, timer:null, cancel:false, urls:null};
+let lastRange=null;
+
+function animKey(){
+  const b=boxOf(view).map(v=>+v.toFixed(4));
+  return JSON.stringify([cur&&cur.name, $("#level").value, b,
+                         $("#cmap").value, $("#vmin").value, $("#vmax").value]);
+}
+function animUI(){
+  const k=animKey(), have=animCache.has(k);
+  const btn=$("#anim");
+  btn.disabled=anim.loading;
+  btn.textContent = anim.loading ? "loading\u2026"
+                  : anim.playing ? "\u23f8 pause"
+                  : have ? "\u25b6 play" : "animate";
+  btn.classList.toggle("on", anim.playing);
+  if(!anim.loading && !anim.playing)
+    $("#animstate").textContent = have ? `${animCache.get(k).length} frames ready` : "";
+}
+
+async function animLoad(){
+  const k=animKey(), n=M.steps;
+  if(n<2){ say("only one timestep"); return null; }
+  // Lock the colour range across the run: autoscaling every frame separately
+  // makes the sequence flicker and stops frames being comparable.
+  let lo=lastRange&&lastRange[0], hi=lastRange&&lastRange[1];
+  if(lo===undefined||lo===null){ await draw(); [lo,hi]=lastRange||[0,1]; }
+
+  anim.loading=true; anim.cancel=false; animUI();
+  const urls=new Array(n), b=outset(boxOf(view));
+  const nx=Math.round(M.nx*OUTSET), ny=Math.round(M.ny*OUTSET);
+  const t0=performance.now();
+  try{
+    for(let i=0;i<n;i++){
+      if(anim.cancel){ urls.slice(0,i).forEach(URL.revokeObjectURL); return null; }
+      const p=new URLSearchParams({var:cur.name, time:i, level:$("#level").value,
+        extent:b.join(","), cmap:$("#cmap").value, nx, ny, vmin:lo, vmax:hi});
+      const r=await fetch("/api/frame?"+p);
+      if(!r.ok) throw new Error((await r.json()).error);
+      urls[i]=URL.createObjectURL(await r.blob());
+      await new Promise(res=>{ const im=new Image(); im.onload=im.onerror=res; im.src=urls[i]; });
+      $("#animstate").textContent=`loading ${i+1} / ${n}`;
+    }
+  }catch(e){ say("animation failed: "+e); urls.filter(Boolean).forEach(URL.revokeObjectURL);
+             anim.loading=false; animUI(); return null; }
+  animCache.set(k, urls);
+  anim.loading=false;
+  $("#animstate").textContent=`${n} frames in ${((performance.now()-t0)/1000).toFixed(1)}s`;
+  animUI();
+  return urls;
+}
+
+function animStop(){
+  anim.playing=false; clearInterval(anim.timer); anim.timer=null; animUI();
+}
+function animPlay(urls){
+  anim.urls=urls; anim.playing=true; animUI();
+  const tick=()=>{
+    if(!anim.playing) return;
+    let i=(+$("#time").value+1)%urls.length;
+    $("#time").value=i; $("#tlab").textContent=M.labels[i];
+    $("#data").src=urls[i];
+    $("#animstate").textContent=`${i+1} / ${urls.length}`;
+  };
+  clearInterval(anim.timer);
+  anim.timer=setInterval(tick, 1000/(+$("#fps").value||8));
+}
+
+$("#anim").onclick = async ()=>{
+  if(anim.playing){ animStop(); return; }
+  const k=animKey();
+  let urls=animCache.get(k);
+  if(!urls) urls=await animLoad();
+  if(urls) animPlay(urls);
+};
+$("#fps").oninput = ()=>{ if(anim.playing) animPlay(anim.urls); };
+
 let redrawTimer=null;
-function schedule(ms){ preview(); scalebar(); graticule(); clearTimeout(redrawTimer);
+function schedule(ms){ animStop(); preview(); scalebar(); graticule(); clearTimeout(redrawTimer);
   redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
-$("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value]; draw(); };
-$("#level").oninput = e=>{ $("#llab").textContent=e.target.value; draw(); };
-$("#cmap").onchange = draw;
+$("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
+  if(anim.playing) return;                       // scrubbing during playback
+  const urls=animCache.get(animKey());
+  if(urls){ $("#data").src=urls[e.target.value]; return; }   // instant if loaded
+  draw(); };
+$("#level").oninput = e=>{ $("#llab").textContent=e.target.value; animStop(); draw(); };
+$("#cmap").onchange = ()=>{ animStop(); draw(); };
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
 $("#home").onclick = ()=>{ view={...home}; clamp(); schedule(0); };
