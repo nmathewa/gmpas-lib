@@ -241,10 +241,16 @@ def _target(args) -> int:
         print(f"  {mark} {name}")
 
     domain = cfg.require_domain()          # raises with guidance when absent
+    lat, lon = domain.lats(), domain.lons()
     print(f"\ntarget: {domain}")
-    print(f"  {domain.size:,} cells, "
-          f"lat centres {domain.lats()[0]:.4f} .. {domain.lats()[-1]:.4f}, "
-          f"lon centres {domain.lons()[0]:.4f} .. {domain.lons()[-1]:.4f}")
+    print(f"  {domain.size:,} cells")
+    print(f"  covers  lon {lon[0] - domain.dlon / 2:.4f} .. "
+          f"{lon[-1] + domain.dlon / 2:.4f}, "
+          f"lat {lat[0] - domain.dlat / 2:.4f} .. "
+          f"{lat[-1] + domain.dlat / 2:.4f}   (as requested)")
+    print(f"  centres lon {lon[0]:.4f} .. {lon[-1]:.4f}, "
+          f"lat {lat[0]:.4f} .. {lat[-1]:.4f}   "
+          f"(inset half a cell, {domain.dlat / 2:.4f} deg)")
 
     if cfg.include or cfg.exclude:
         print()

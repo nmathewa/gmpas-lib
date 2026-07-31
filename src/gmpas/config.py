@@ -111,7 +111,15 @@ class TargetDomain:
     That is the reading the numbers themselves argue for: a 267 x 534 grid
     spanning 40 by 80 degrees gives exactly 0.1498127 degrees in both
     directions as bounds, and two slightly different spacings if the bounds
-    are read as first and last centre instead.
+    are read as first and last centre instead. It also means the grid covers
+    exactly the requested box -- the alternative reading would overhang it by
+    half a cell on every side.
+
+    The extent is not treated as sacred beyond that. The target need only be
+    roughly the region asked for: cells reaching outside the source mesh come
+    back unmapped, and a target narrower than the mesh simply crops. Both are
+    normal. What would not be acceptable is a systematic shift of whole
+    degrees, and reading the bounds as edges avoids any shift at all.
     """
 
     nlat: int

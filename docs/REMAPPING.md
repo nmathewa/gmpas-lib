@@ -57,7 +57,14 @@ endlon   = 160.0
 
 `startlat`/`endlat` are the **domain edges** and `nlat` counts cells across
 them, so the spacing is `(endlat - startlat) / nlat` and centres sit half a
-cell inside each edge. Then, from that directory:
+cell inside each edge — the grid then covers exactly the box you asked for.
+
+The extent is not fussy beyond that. Target cells falling outside the source
+mesh come back unmapped, and a target narrower than the mesh simply crops;
+both are expected. `gmpas target` prints the covered extent next to the
+requested one so any shift is visible rather than assumed.
+
+Then, from that directory:
 
 ```bash
 gmpas target -o dst.scrip.nc
