@@ -1,0 +1,64 @@
+<svg width="680" viewBox="0 0 680 600" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>Terminal workflow for conservative remapping of MPAS output</title>
+<desc>An MPAS mesh becomes a SCRIP grid file via gmpas scrip, and a target grid becomes a second SCRIP file. ESMF_RegridWeightGen turns both into a weight file, generated once per mesh pair and reused for every field and timestep. Applying the weights is a sparse matrix multiply, followed by a check that the area integral was preserved.</desc>
+<style>
+  text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  .th { font-size: 14px; font-weight: 500; }
+  .ts { font-size: 12px; font-weight: 400; }
+  .arr { stroke: #888780; stroke-width: 1.5; fill: none; }
+  .teal rect { fill: #E1F5EE; stroke: #0F6E56; }
+  .teal .th { fill: #085041; } .teal .ts { fill: #0F6E56; }
+  .purple rect { fill: #EEEDFE; stroke: #534AB7; }
+  .purple .th { fill: #3C3489; } .purple .ts { fill: #534AB7; }
+  .coral rect { fill: #FAECE7; stroke: #993C1D; }
+  .coral .th { fill: #712B13; } .coral .ts { fill: #993C1D; }
+  .gray rect { fill: #F1EFE8; stroke: #5F5E5A; }
+  .gray .th { fill: #444441; } .gray .ts { fill: #5F5E5A; }
+  @media (prefers-color-scheme: dark) {
+    .arr { stroke: #B4B2A9; }
+    .teal rect { fill: #085041; stroke: #9FE1CB; }
+    .teal .th { fill: #9FE1CB; } .teal .ts { fill: #5DCAA5; }
+    .purple rect { fill: #3C3489; stroke: #CECBF6; }
+    .purple .th { fill: #CECBF6; } .purple .ts { fill: #AFA9EC; }
+    .coral rect { fill: #712B13; stroke: #F5C4B3; }
+    .coral .th { fill: #F5C4B3; } .coral .ts { fill: #F0997B; }
+    .gray rect { fill: #444441; stroke: #D3D1C7; }
+    .gray .th { fill: #D3D1C7; } .gray .ts { fill: #B4B2A9; }
+  }
+</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+
+<g class="teal"><rect x="70" y="40" width="190" height="50" rx="4"/><text class="th" x="165" y="61" text-anchor="middle">MPAS mesh file</text><text class="ts" x="165" y="78" text-anchor="middle">or a self-describing history</text></g>
+<g class="purple"><rect x="420" y="40" width="190" height="50" rx="4"/><text class="th" x="515" y="61" text-anchor="middle">target grid</text><text class="ts" x="515" y="78" text-anchor="middle">lat-lon, or another mesh</text></g>
+
+<line class="arr" x1="165" y1="90" x2="165" y2="116" marker-end="url(#arrow)"/>
+<line class="arr" x1="515" y1="90" x2="515" y2="116" marker-end="url(#arrow)"/>
+
+<g class="gray"><rect x="70" y="118" width="190" height="50" rx="4"/><text class="th" x="165" y="139" text-anchor="middle">gmpas scrip</text><text class="ts" x="165" y="156" text-anchor="middle">normalises, trims corners</text></g>
+<g class="gray"><rect x="420" y="118" width="190" height="50" rx="4"/><text class="th" x="515" y="139" text-anchor="middle">write dst SCRIP</text><text class="ts" x="515" y="156" text-anchor="middle">ncremap can generate one</text></g>
+
+<line class="arr" x1="165" y1="168" x2="165" y2="194" marker-end="url(#arrow)"/>
+<line class="arr" x1="515" y1="168" x2="515" y2="194" marker-end="url(#arrow)"/>
+
+<g class="teal"><rect x="70" y="196" width="190" height="50" rx="4"/><text class="th" x="165" y="217" text-anchor="middle">src.scrip.nc</text><text class="ts" x="165" y="234" text-anchor="middle">cell corners and areas</text></g>
+<g class="purple"><rect x="420" y="196" width="190" height="50" rx="4"/><text class="th" x="515" y="217" text-anchor="middle">dst.scrip.nc</text><text class="ts" x="515" y="234" text-anchor="middle">same six arrays</text></g>
+
+<line class="arr" x1="180" y1="246" x2="245" y2="272" marker-end="url(#arrow)"/>
+<line class="arr" x1="500" y1="246" x2="435" y2="272" marker-end="url(#arrow)"/>
+
+<g class="coral"><rect x="170" y="274" width="340" height="54" rx="4"/><text class="th" x="340" y="296" text-anchor="middle">ESMF_RegridWeightGen  -m conserve</text><text class="ts" x="340" y="314" text-anchor="middle">or ncremap -a aave, or TempestRemap</text></g>
+
+<line class="arr" x1="340" y1="328" x2="340" y2="354" marker-end="url(#arrow)"/>
+
+<g class="coral"><rect x="250" y="356" width="180" height="50" rx="4"/><text class="th" x="340" y="377" text-anchor="middle">map.nc</text><text class="ts" x="340" y="394" text-anchor="middle">reuse for every field</text></g>
+
+<line class="arr" x1="340" y1="406" x2="340" y2="432" marker-end="url(#arrow)"/>
+
+<g class="purple"><rect x="40" y="434" width="150" height="50" rx="4"/><text class="th" x="115" y="455" text-anchor="middle">history.nc</text><text class="ts" x="115" y="472" text-anchor="middle">any field or step</text></g>
+<line class="arr" x1="190" y1="459" x2="246" y2="459" marker-end="url(#arrow)"/>
+<g class="gray"><rect x="250" y="434" width="240" height="50" rx="4"/><text class="th" x="370" y="455" text-anchor="middle">apply the weights</text><text class="ts" x="370" y="472" text-anchor="middle">dst = S x src, sparse</text></g>
+
+<line class="arr" x1="360" y1="484" x2="345" y2="510" marker-end="url(#arrow)"/>
+
+<g class="gray"><rect x="210" y="512" width="260" height="50" rx="4"/><text class="th" x="340" y="533" text-anchor="middle">check the integral</text><text class="ts" x="340" y="550" text-anchor="middle">src and dst must agree</text></g>
+</svg>

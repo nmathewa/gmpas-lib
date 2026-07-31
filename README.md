@@ -271,6 +271,17 @@ never looks. So:
   is right. Pinned by a test; prefer `uReconstructZonal` /
   `umeridional_*` when the diagnostics file has them.
 
+## Conservative remapping
+
+gmpas writes the SCRIP grid file that ESMF, TempestRemap or ncremap need, and
+does not compute the weights itself — see [docs/REMAPPING.md](docs/REMAPPING.md)
+for the terminal workflow, the conservation check, and two MPAS-specific traps
+that crash or are rejected by the standard tooling.
+
+```bash
+gmpas scrip history.nc -o src.scrip.nc
+```
+
 ## Status
 
 Plotting is implemented. Conservative remapping (`convert`) is next: the same

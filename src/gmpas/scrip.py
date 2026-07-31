@@ -18,6 +18,8 @@ would be worse than not offering it.
 What gmpas does own is the cheap half: writing the grid file, applying somebody
 else's weights, and checking afterwards that the integral really was preserved.
 
+See docs/REMAPPING.md for the whole terminal workflow.
+
 The values are read from the mesh file rather than from the geometry cache.
 The cache is built for drawing -- degrees, float32, polygons shifted across the
 antimeridian so they render contiguously -- and none of that belongs in a file
