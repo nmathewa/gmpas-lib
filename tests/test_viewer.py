@@ -58,6 +58,27 @@ def test_an_exhausted_range_falls_back_to_any_free_port(servers):
     assert last.server_address[1] > 0
 
 
+def test_an_explicit_port_fails_rather_than_moving(servers):
+    """Somebody who named a port has a tunnel pointing at it.
+
+    Listening somewhere else would leave them watching a browser that can
+    never load, which is worse than a clear refusal.
+    """
+    held = bind(Quiet, 0)
+    servers.append(held)
+    port = held.server_address[1]
+
+    with pytest.raises(OSError, match="cannot bind"):
+        bind(Quiet, port, strict=True)
+
+
+def test_binding_all_interfaces_is_possible(servers):
+    """Loopback is unreachable from a login node; HPC needs 0.0.0.0."""
+    s = bind(Quiet, 0, host="0.0.0.0")
+    servers.append(s)
+    assert s.server_address[0] == "0.0.0.0"
+
+
 def test_a_bind_error_that_is_not_addr_in_use_is_raised(servers):
     """Don't paper over a real failure by wandering up the port range."""
     with pytest.raises(OSError):

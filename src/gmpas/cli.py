@@ -7,6 +7,9 @@ import sys
 
 from . import __version__
 
+#: only the default port is allowed to wander when busy
+DEFAULT_PORT = 8765
+
 EXAMPLES = """
 examples:
   gmpas info  run/history.2012-02-25_12.00.00.nc
@@ -16,8 +19,15 @@ examples:
   gmpas plot  run/ theta -l 20 --cmap turbo -o theta20.png
   gmpas plot  'run/history.*.nc' precipw --all-steps -o 'frames/pw_{step:04d}.png' -j 8
 
-  gmpas view  run/                       browse interactively in a browser
-  gmpas view  run/ --no-browser -p 8765  for an SSH tunnel on a cluster
+  gmpas view  run/                          browse interactively in a browser
+  gmpas view  run/ --host 0.0.0.0 --no-browser   on an HPC compute node
+
+on a cluster the job runs on a compute node but your tunnel lands on the login
+node, so bind all interfaces and tunnel to the node by name:
+
+  compute node:  gmpas view /scratch/run/ --host 0.0.0.0 --no-browser
+  your machine:  ssh -N -L 8765:<compute-node>:8765 <login-node>
+                 then open http://localhost:8765
 
 Any path may be a file, a directory, or a glob. A directory or glob is read as
 one time series across files, which is how MPAS writes output.
@@ -200,8 +210,11 @@ def _plot_single(args) -> int:
 def _view(args) -> int:
     from .viewer import serve
 
-    serve(args.path, args.mesh or "", port=args.port,
-          nx=args.width, ny=args.height, open_browser=not args.no_browser)
+    # an explicit --port is usually an SSH tunnel already pointing at it, so
+    # silently listening elsewhere would be worse than failing
+    serve(args.path, args.mesh or "", port=args.port, host=args.host,
+          nx=args.width, ny=args.height, open_browser=not args.no_browser,
+          strict_port=args.port != DEFAULT_PORT)
     return 0
 
 
@@ -252,8 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("view", help="browse a file interactively in a browser")
     common(v)
-    v.add_argument("-p", "--port", type=int, default=8765,
-                   help="preferred port; the next free one is used if busy")
+    v.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
+                   help=f"port (default {DEFAULT_PORT}; the default wanders "
+                        f"if busy, an explicit one fails instead)")
+    v.add_argument("--host", default="127.0.0.1",
+                   help="interface to bind. Use 0.0.0.0 on an HPC compute "
+                        "node so a tunnel from the login node can reach it")
     v.add_argument("--width", type=int, default=1200, help="raster width in pixels")
     v.add_argument("--height", type=int, default=700)
     v.add_argument("--no-browser", action="store_true",

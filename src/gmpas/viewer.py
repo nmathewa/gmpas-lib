@@ -278,38 +278,65 @@ PORT_ATTEMPTS = 20
 
 
 def bind(handler, port: int, host: str = "127.0.0.1",
-         attempts: int = PORT_ATTEMPTS) -> ThreadingHTTPServer:
-    """Bind to `port`, or the next free one after it.
+         attempts: int = PORT_ATTEMPTS,
+         strict: bool = False) -> ThreadingHTTPServer:
+    """Bind to `port`, or -- unless `strict` -- the next free one after it.
 
-    A viewer left running in another terminal -- or one still shutting down --
-    should not stop this one from starting. Walk forward from the requested
-    port, and if the whole range is taken ask the OS for any free port rather
-    than failing.
+    `strict` matters for tunnelling. Somebody who passed an explicit port did
+    so because an SSH tunnel is already pointing at it, and quietly listening
+    somewhere else leaves them staring at a browser that will never load. So
+    an explicit port fails loudly, and only the default wanders.
     """
-    for candidate in range(port, port + attempts):
+    last = None
+    for candidate in range(port, port + (1 if strict else attempts)):
         try:
             return ThreadingHTTPServer((host, candidate), handler)
         except OSError as exc:
-            if exc.errno != errno.EADDRINUSE:
+            if exc.errno not in (errno.EADDRINUSE, errno.EACCES):
                 raise
+            last = exc
+    if strict:
+        raise OSError(
+            last.errno,
+            f"cannot bind {host}:{port} — {last.strerror}. "
+            f"Pick a free port, or drop --port to let one be chosen."
+        )
     return ThreadingHTTPServer((host, 0), handler)      # 0 = any free port
 
 
-def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True):
-    """Start the viewer and block until interrupted."""
+def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True,
+          host="127.0.0.1", strict_port=False):
+    """Start the viewer and block until interrupted.
+
+    `host` defaults to loopback, which is right on a laptop and wrong on a
+    compute node: an SSH tunnel from your machine lands on the *login* node,
+    so a viewer listening only on the compute node's loopback is unreachable.
+    Pass host="0.0.0.0" there, exactly as one does for Jupyter.
+    """
+    import socket
+
     viewer = Viewer(data_path, mesh_path, nx=nx, ny=ny)
-    server = bind(_handler(viewer), port)
-    actual = server.server_address[1]
-    if actual != port:
-        print(f"port {port} is in use — using {actual} instead")
-    port = actual
+    server = bind(_handler(viewer), port, host=host, strict=strict_port)
+    port = server.server_address[1]
 
     cells = viewer.mesh.n_cells
     kind = "regional" if not viewer.mesh.is_global else "global"
     print(f"{cells:,} cells, {kind} — {len(viewer.series)} steps across "
           f"{viewer.series.n_files} file(s), "
           f"{len(viewer.plottable_cell_vars())} plottable fields")
-    print(f"http://127.0.0.1:{port}   (ctrl-c to stop)")
+
+    node = socket.gethostname()
+    if host in ("127.0.0.1", "localhost"):
+        print(f"listening on 127.0.0.1:{port} — this machine only")
+        print(f"  open  http://127.0.0.1:{port}")
+        print(f"  if {node} is a remote node, this is NOT reachable through a "
+              f"tunnel to a login node; restart with --host 0.0.0.0")
+    else:
+        print(f"listening on {host}:{port} — reachable as {node}:{port}")
+        print(f"  from your machine:  ssh -N -L {port}:{node}:{port} <login-node>")
+        print(f"  then open           http://localhost:{port}")
+    print("ctrl-c to stop")
+
     if open_browser:
         threading.Timer(0.5, webbrowser.open,
                         args=(f"http://127.0.0.1:{port}",)).start()
