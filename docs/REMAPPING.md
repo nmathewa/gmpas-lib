@@ -44,14 +44,54 @@ normalised.
 
 ### 2. Write the target grid
 
-For a regular lat-lon target, `ncremap` can generate one:
+Describe it in a `target_domain` file beside the run:
 
-```bash
-ncremap -g dst.scrip.nc -G latlon=180,360
+```
+nlat     = 267
+nlon     = 534
+startlat = -20.0
+endlat   =  20.0
+startlon =  80.0
+endlon   = 160.0
 ```
 
-Or write it directly — a SCRIP file is six arrays, and for a rectilinear grid
-the corners and areas are analytic.
+`startlat`/`endlat` are the **domain edges** and `nlat` counts cells across
+them, so the spacing is `(endlat - startlat) / nlat` and centres sit half a
+cell inside each edge. Then, from that directory:
+
+```bash
+gmpas target -o dst.scrip.nc
+```
+
+`gmpas target` reads the file from the working directory — no path needed —
+reports the resulting grid, and writes the SCRIP. Pass a data file too and it
+lists which fields would be remapped:
+
+```bash
+gmpas target history.2012-02-25_12.00.00.nc -o dst.scrip.nc
+```
+
+Cell areas are written as exact solid angles, `dlon x (sin(north) -
+sin(south))`, not the `dlon x dlat x cos(lat)` approximation — a remapper
+compares them against its own and the difference shows up as conservation
+error.
+
+`ncremap -g dst.scrip.nc -G latlon=180,360` will also generate a target, and
+a SCRIP file is only six arrays if you would rather write one directly.
+
+### Choosing fields
+
+Two more optional files in the same directory, one variable name per line:
+
+```
+include_fields    remap only these
+exclude_fields    remap everything but these
+```
+
+Blank lines, `#` comments and stray trailing spaces are all fine — these get
+hand-edited. A name in **both** files is contradictory: **include wins**, and
+a warning names the fields, because silently dropping something explicitly
+asked for leaves output missing with nothing to explain it.
 
 ### 3. Generate the weights — once per mesh pair
 

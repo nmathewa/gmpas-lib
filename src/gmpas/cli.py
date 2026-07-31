@@ -20,6 +20,8 @@ examples:
   gmpas plot  'run/history.*.nc' precipw --all-steps -o 'frames/pw_{step:04d}.png' -j 8
 
   gmpas scrip run/init.nc -o mesh.scrip.nc  for conservative remapping weights
+  gmpas target -o dst.scrip.nc              reads target_domain from this directory
+  gmpas target run/history.nc               and which fields would be remapped
 
   gmpas view  run/                          browse interactively in a browser
   gmpas view  run/ --host 0.0.0.0 --no-browser   on an HPC compute node
@@ -227,6 +229,55 @@ def _scrip(args) -> int:
     return 0
 
 
+def _target(args) -> int:
+    """Report the discovered configuration, and write the destination grid."""
+    from .config import CONFIG_NAMES, discover
+
+    cfg = discover(args.dir, warn=False)
+    where = cfg.directory
+    print(f"# configuration in {where}")
+    for role, name in CONFIG_NAMES.items():
+        mark = "found  " if role in cfg.found else "absent "
+        print(f"  {mark} {name}")
+
+    domain = cfg.require_domain()          # raises with guidance when absent
+    print(f"\ntarget: {domain}")
+    print(f"  {domain.size:,} cells, "
+          f"lat centres {domain.lats()[0]:.4f} .. {domain.lats()[-1]:.4f}, "
+          f"lon centres {domain.lons()[0]:.4f} .. {domain.lons()[-1]:.4f}")
+
+    if cfg.include or cfg.exclude:
+        print()
+        if cfg.include:
+            print(f"include: {len(cfg.include)} field(s)")
+        if cfg.exclude:
+            print(f"exclude: {len(cfg.exclude)} field(s)")
+
+    if args.path:
+        from .series import Series
+        series = Series(args.path, args.mesh or "")
+        try:
+            available = list(series.first.variables)
+            selected, notes = cfg.select(available, warn=False)
+        finally:
+            series.close()
+        for note in notes:
+            print(f"  warning: {note}", file=sys.stderr)
+        print(f"\nwould remap {len(selected)} field(s):")
+        for name in selected:
+            print(f"  {name}")
+
+    if args.out:
+        out = domain.to_scrip(args.out)
+        print(f"\nwrote {out}")
+        print("  pair it with the source grid:")
+        print(f"    gmpas scrip <mesh>.nc -o src.scrip.nc")
+        print(f"    ESMF_RegridWeightGen -s src.scrip.nc -d {out.name} "
+              f"-w map.nc -m conserve --src_regional --dst_regional "
+              f"--ignore_unmapped")
+    return 0
+
+
 def _view(args) -> int:
     from .viewer import serve
 
@@ -287,6 +338,16 @@ def build_parser() -> argparse.ArgumentParser:
     common(c)
     c.add_argument("-o", "--out", default="mesh.scrip.nc", help="output path")
     c.set_defaults(func=_scrip)
+
+    t = sub.add_parser("target", help="show the discovered config and write "
+                                     "the destination grid")
+    t.add_argument("path", nargs="*", help="optional data file, to list the "
+                                           "fields that would be remapped")
+    t.add_argument("-m", "--mesh", help="mesh file, if not alongside the data")
+    t.add_argument("-d", "--dir", help="where to look for the config files "
+                                       "(default: the working directory)")
+    t.add_argument("-o", "--out", help="write the target grid as SCRIP here")
+    t.set_defaults(func=_target)
 
     v = sub.add_parser("view", help="browse a file interactively in a browser")
     common(v)
