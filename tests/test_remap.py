@@ -218,3 +218,72 @@ def test_each_vertical_dimension_keeps_its_own_name(tmp_path):
         assert out.sizes["nVertLevels"] == 5
         assert out.sizes["nVertLevelsP1"] == 6
         assert out.sizes["nSoilLevels"] == 2
+
+
+# ------------------------------------------------------------ core detection
+
+
+def test_the_scheduler_allocation_beats_the_machine_size(monkeypatch):
+    """os.cpu_count() is the node, not the job. Asking for 4 cores and then
+    spawning 256 workers is a good way to be thrown off a shared system."""
+    from gmpas.remap import detect_cores
+
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
+    assert detect_cores() == (8, "SLURM_CPUS_PER_TASK")
+
+
+def test_slurm_per_node_notation_is_parsed(monkeypatch):
+    """SLURM writes counts like 4(x2)."""
+    from gmpas.remap import detect_cores
+
+    monkeypatch.delenv("SLURM_CPUS_PER_TASK", raising=False)
+    monkeypatch.setenv("SLURM_CPUS_ON_NODE", "4(x2)")
+    assert detect_cores() == (4, "SLURM_CPUS_ON_NODE")
+
+
+def test_other_schedulers_are_recognised(monkeypatch):
+    from gmpas.remap import CORE_VARS, detect_cores
+
+    for var in ("PBS_NCPUS", "LSB_DJOB_NUMPROC", "NSLOTS"):
+        for other in CORE_VARS:
+            monkeypatch.delenv(other, raising=False)
+        monkeypatch.setenv(var, "12")
+        assert detect_cores() == (12, var)
+
+
+def test_nothing_is_hardcoded_when_no_scheduler(monkeypatch):
+    """Falls through to what the OS will actually allow."""
+    from gmpas.remap import CORE_VARS, detect_cores
+
+    for var in CORE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    n, source = detect_cores()
+    assert n >= 1
+    assert source in {"affinity mask", "machine cores"}
+
+
+def test_a_nonsense_value_is_ignored(monkeypatch):
+    from gmpas.remap import CORE_VARS, detect_cores
+
+    for var in CORE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SLURM_CPUS_PER_TASK", "not-a-number")
+    _, source = detect_cores()
+    assert source != "SLURM_CPUS_PER_TASK"
+
+
+# -------------------------------------------------------------- parallel run
+
+
+def test_a_failing_file_does_not_stop_the_run(tmp_path, weights):
+    """One bad file in two hundred must not lose the other 199."""
+    from gmpas.remap import remap_many
+
+    domain = TargetDomain(nlat=1, nlon=2, startlat=-1.0, endlat=1.0,
+                          startlon=0.0, endlon=2.0)
+    jobs = [(tmp_path / "absent.nc", tmp_path / "a.nc", domain, ["x"])]
+
+    results = list(remap_many(jobs, weights, weights.path, workers=1))
+    assert len(results) == 1
+    assert "error" in results[0]
+    assert results[0]["source"] == "absent.nc"

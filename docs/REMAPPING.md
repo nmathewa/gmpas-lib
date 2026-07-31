@@ -104,6 +104,44 @@ reported rather than silently dropped:
 For winds, `uReconstructZonal` / `uReconstructMeridional` are already at cell
 centres and remap normally.
 
+### Running it in parallel
+
+Files are independent, so they convert in parallel:
+
+```bash
+gmpas remap 'history.*.nc' -o out/ -j 64
+```
+
+With no `-j`, the worker count is **the cores this job was actually given**,
+not the size of the machine — `SLURM_CPUS_PER_TASK`, then the other
+schedulers' variables, then the process affinity mask (which respects cgroups
+and taskset), and only then `os.cpu_count()`. The command says which it used:
+
+```
+  64 worker(s) (of 64 from SLURM_CPUS_PER_TASK)
+```
+
+Measured on 8 files, 936 slabs, on a 10-core laptop:
+
+| workers | wall | per file |
+|---|---|---|
+| 1 | 14 s | 1.73 s |
+| 2 | 8 s | 1.01 s |
+| 4 | 5 s | 0.65 s |
+| 8 | 5 s | 0.58 s |
+
+It flattens past the core count because the work is largely netCDF reads. On a
+parallel filesystem the ceiling is I/O bandwidth rather than cores, so very
+high `-j` will not keep scaling — worth measuring on a subset before
+committing a whole run.
+
+Under `fork` the weights are inherited copy-on-write rather than re-read, which
+matters at high core counts: ~15 MB of index arrays re-loaded in 256 workers
+would be several gigabytes of duplication for read-only data.
+
+A file that fails is reported and the run continues; the exit status is
+non-zero if any failed.
+
 ### A caveat on ESMF
 
 ESMF 8.9.1 on macOS segfaults intermittently — measured at roughly **one run

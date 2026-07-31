@@ -193,6 +193,120 @@ def remappable(ds: xr.Dataset, names) -> tuple[list[str], list[tuple[str, str]]]
     return keep, skip
 
 
+# ----------------------------------------------------------------- parallel
+
+#: scheduler variables that state how many cores a job was actually given
+CORE_VARS = (
+    "SLURM_CPUS_PER_TASK",      # SLURM, --cpus-per-task
+    "SLURM_CPUS_ON_NODE",       # SLURM, whole-node allocation
+    "PBS_NCPUS", "NCPUS",       # PBS / Torque
+    "LSB_DJOB_NUMPROC",         # LSF
+    "NSLOTS",                   # Grid Engine
+)
+
+
+def detect_cores() -> tuple[int, str]:
+    """How many cores this process may actually use, and how we know.
+
+    `os.cpu_count()` reports the machine, which on a shared HPC node is not
+    what the job was given -- asking for 4 cores and then spawning 256 workers
+    is a good way to be unpopular. So the scheduler's own statement comes
+    first, then the process affinity mask (which respects cgroups and
+    taskset), and only then the machine size.
+    """
+    import os
+
+    for var in CORE_VARS:
+        raw = os.environ.get(var, "").strip()
+        if raw:
+            head = raw.split(",")[0].split("(")[0]      # SLURM writes "4(x2)"
+            if head.isdigit() and int(head) > 0:
+                return int(head), var
+
+    if hasattr(os, "sched_getaffinity"):                 # Linux: cgroup-aware
+        try:
+            n = len(os.sched_getaffinity(0))
+            if n > 0:
+                return n, "affinity mask"
+        except OSError:
+            pass
+
+    return os.cpu_count() or 1, "machine cores"
+
+#: loaded once per worker process; under fork it is inherited, not re-read
+_WEIGHTS: "Weights | None" = None
+_WEIGHTS_PATH: Path | None = None
+
+
+def _init_worker(weights_path, preloaded=None):
+    """Give a worker its weights.
+
+    Under `fork` the parent's already-loaded copy is inherited and shared
+    copy-on-write, which matters at high core counts: re-reading ~15 MB of
+    index arrays in each of 256 workers is several gigabytes of duplication
+    for data nobody writes to.
+    """
+    global _WEIGHTS, _WEIGHTS_PATH
+    _WEIGHTS_PATH = Path(weights_path)
+    _WEIGHTS = preloaded
+
+    # one BLAS thread each, or the workers fight over the same cores
+    import os
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+
+
+def _remap_one(job):
+    """Worker entry point. Top level so it survives being sent to a process."""
+    global _WEIGHTS
+    path, out_path, domain, fields = job
+    if _WEIGHTS is None:                       # spawn: no inheritance
+        _WEIGHTS = Weights.load(_WEIGHTS_PATH)
+    try:
+        info = remap_file(path, _WEIGHTS, domain, fields, out_path)
+        info["source"] = Path(path).name
+        return info
+    except Exception as exc:                   # a bad file must not kill the run
+        return {"source": Path(path).name, "error": f"{type(exc).__name__}: {exc}",
+                "out": Path(out_path), "fields": 0, "slabs": 0,
+                "skipped": [], "conservation": 0.0}
+
+
+def remap_many(jobs, weights: "Weights", weights_path, workers: int = 1,
+               on_done=None):
+    """Remap many files, yielding each result as it lands.
+
+    `jobs` is (source, output, domain, fields) tuples. With one worker this
+    runs in-process; with more it forks where possible so the weights are
+    shared rather than copied.
+    """
+    jobs = list(jobs)
+    if workers <= 1:
+        _init_worker(weights_path, preloaded=weights)
+        for job in jobs:
+            info = _remap_one(job)
+            if on_done:
+                on_done(info)
+            yield info
+        return
+
+    import multiprocessing as mp
+
+    try:
+        ctx = mp.get_context("fork")
+        preloaded = weights                    # inherited copy-on-write
+    except ValueError:                         # no fork on this platform
+        ctx = mp.get_context("spawn")
+        preloaded = None
+
+    with ctx.Pool(workers, initializer=_init_worker,
+                  initargs=(weights_path, preloaded)) as pool:
+        for info in pool.imap_unordered(_remap_one, jobs):
+            if on_done:
+                on_done(info)
+            yield info
+
+
 # --------------------------------------------------------------------- file
 
 

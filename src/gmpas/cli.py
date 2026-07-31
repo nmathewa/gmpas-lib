@@ -34,6 +34,50 @@ def human(n: float) -> str:
     return f"{n:.1f} GB"
 
 
+class Progress:
+    """A bar when someone is watching, periodic lines when nobody is.
+
+    Under a scheduler stdout is a log file, and a carriage-returning bar just
+    fills it with thousands of partial lines. So the same information is
+    emitted either way, in whichever shape suits the destination.
+    """
+
+    def __init__(self, total: int, width: int = 32, every: int = 10):
+        self.total = total
+        self.width = width
+        self.every = every            # percent between lines when not a tty
+        self.done = 0
+        self.t0 = time.perf_counter()
+        self.tty = sys.stdout.isatty()
+        self._last = -1
+
+    def advance(self, label: str = "") -> None:
+        self.done += 1
+        elapsed = time.perf_counter() - self.t0
+        frac = self.done / self.total if self.total else 1.0
+        eta = (elapsed / self.done) * (self.total - self.done) if self.done else 0
+
+        if self.tty:
+            filled = int(self.width * frac)
+            bar = "#" * filled + "-" * (self.width - filled)
+            sys.stdout.write(
+                f"\r  [{bar}] {self.done}/{self.total} {frac * 100:3.0f}%  "
+                f"{elapsed / self.done:.1f}s/file  eta {clock(eta)}   "
+            )
+            sys.stdout.flush()
+        else:
+            pct = int(frac * 100)
+            if pct // self.every > self._last // self.every or self.done == self.total:
+                self._last = pct
+                print(f"  {self.done}/{self.total} ({pct}%)  "
+                      f"{elapsed / self.done:.1f}s/file  eta {clock(eta)}")
+
+    def close(self) -> None:
+        if self.tty:
+            sys.stdout.write("\r" + " " * (self.width + 60) + "\r")
+            sys.stdout.flush()
+
+
 def clock(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.0f}s"
@@ -348,7 +392,8 @@ def _resolve_mesh(args, cfg, series):
 def _remap(args) -> int:
     """Read the config, build weights once, convert every file."""
     from .config import CONFIG_NAMES, discover
-    from .remap import RemapError, Weights, ensure_weights, remap_file
+    from .remap import (RemapError, Weights, detect_cores,
+                        ensure_weights, remap_many)
     from .series import Series
 
     print(banner())
@@ -391,44 +436,55 @@ def _remap(args) -> int:
         series.close()
 
     n = len(series.files)
-    print(f"\n[3/3] remapping {n} file(s) -> {work}/")
+    todo = [(src, work / f"{src.stem}.remap.nc") for src in series.files]
+    if not args.overwrite:
+        existing = [(a, b) for a, b in todo if b.exists()]
+        todo = [(a, b) for a, b in todo if not b.exists()]
+    else:
+        existing = []
+
+    detected, source = detect_cores()
+    workers = args.jobs if args.jobs > 0 else detected
+    workers = max(1, min(workers, len(todo) or 1))
+
+    print(f"\n[3/3] remapping {len(todo)} file(s) -> {work}/")
+    if existing:
+        print(f"  {len(existing)} already done — pass --overwrite to redo")
+    print(f"  {workers} worker(s)" +
+          (f" (of {detected} from {source})" if args.jobs <= 0
+           else f" (asked for {args.jobs}; {detected} available from {source})"))
+
     t0 = time.perf_counter()
     total_slabs = 0
     written: list[Path] = []
-    skipped_existing = 0
+    failures: list[tuple[str, str]] = []
+    first_reported = False
+    bar = Progress(len(todo)) if todo else None
 
-    for i, src in enumerate(series.files, start=1):
-        out = work / f"{src.stem}.remap.nc"
-        head = f"  [{i:>{len(str(n))}}/{n}]"
-        if out.exists() and not args.overwrite:
-            print(f"{head} {out.name}  exists, skipping")
-            skipped_existing += 1
+    jobs = [(src, out, domain, fields) for src, out in todo]
+    for info in remap_many(jobs, weights, weights_path, workers=workers):
+        if bar:
+            bar.advance()
+        if info.get("error"):
+            failures.append((info["source"], info["error"]))
             continue
-
-        t1 = time.perf_counter()
-        try:
-            info = remap_file(src, weights, domain, fields, out)
-        except (RemapError, OSError) as exc:
-            print(f"{head} {src.name}: {exc}", file=sys.stderr)
-            continue
-
-        written.append(out)
+        written.append(info["out"])
         total_slabs += info["slabs"]
-        if i == 1:
+        if not first_reported:
+            first_reported = True
+            if bar:
+                bar.close()
             for name, why in info["skipped"]:
-                print(f"        not remapped — {name}: {why}")
-            print(f"        conservation error {info['conservation']:.1e} "
-                  f"(0 is exact)")
+                print(f"  not remapped — {name}: {why}")
+            print(f"  conservation error {info['conservation']:.1e} (0 is exact)")
+    if bar:
+        bar.close()
 
-        done = time.perf_counter() - t0
-        left = (done / i) * (n - i)
-        eta = f", eta {clock(left)}" if i < n else ""
-        print(f"{head} {out.name}  {info['fields']} fields, "
-              f"{info['slabs']} slabs, {human(out.stat().st_size)}, "
-              f"{time.perf_counter() - t1:.1f}s{eta}")
+    for name, why in failures:
+        print(f"  failed — {name}: {why}", file=sys.stderr)
 
     dt = time.perf_counter() - t0
-    size = sum(p.stat().st_size for p in written)
+    size = sum(p.stat().st_size for p in written if p.exists())
     print(f"\n{'-' * 60}")
     print("generated:")
     print(f"  {weights_path}  ({human(weights_path.stat().st_size)})"
@@ -438,11 +494,12 @@ def _remap(args) -> int:
         if q.exists():
             print(f"  {q}  ({human(q.stat().st_size)})")
     print(f"  {len(written)} remapped file(s) in {work}/  ({human(size)} total)")
-    if skipped_existing:
-        print(f"  {skipped_existing} already existed — pass --overwrite to redo")
+    if failures:
+        print(f"  {len(failures)} file(s) failed")
     print(f"\n{total_slabs:,} slabs in {clock(dt)}"
-          + (f"  ({dt / len(written):.1f}s per file)" if written else ""))
-    return 0
+          + (f"  ({dt / len(written):.2f}s per file, "
+             f"{len(written) / dt:.1f} files/s)" if written and dt else ""))
+    return 1 if failures else 0
 
 
 def _view(args) -> int:
@@ -529,6 +586,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="rebuild map.nc even if it already exists")
     r.add_argument("--overwrite", action="store_true",
                    help="rewrite output files that already exist")
+    r.add_argument("-j", "--jobs", type=int, default=0,
+                   help="parallel workers (default: the cores this job was "
+                        "given, from the scheduler or the affinity mask)")
     r.set_defaults(func=_remap)
 
     v = sub.add_parser("view", help="browse a file interactively in a browser")

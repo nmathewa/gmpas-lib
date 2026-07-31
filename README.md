@@ -308,11 +308,14 @@ standard tooling.
 The whole conversion is one command:
 
 ```bash
-gmpas remap 'history.*.nc' -o out/
+gmpas remap 'history.*.nc' -o out/ -j 64
 ```
 
 It reads the configuration below from the working directory, generates the
-weights once, and writes one remapped file per input file. See
+weights once, and writes one remapped file per input file, in parallel. With
+no `-j` the worker count comes from the cores the job was actually given
+(`SLURM_CPUS_PER_TASK` and friends, then the affinity mask), not from the size
+of the machine. See
 [docs/REMAPPING.md](docs/REMAPPING.md) for the output it prints and the
 individual steps.
 
