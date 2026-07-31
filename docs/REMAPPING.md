@@ -3,6 +3,18 @@
 A terminal workflow. gmpas writes the grid file and checks the answer; a real
 remapper computes the weights.
 
+## What you need installed
+
+```bash
+conda install -c conda-forge esmf nco
+```
+
+`esmf` provides `ESMF_RegridWeightGen`, `nco` provides `ncremap`. Both are
+executables rather than Python packages, so they cannot come from pip and are
+not declared in `pyproject.toml` — `environment.yml` has them. A
+`command not found: ESMF_RegridWeightGen` means the environment holding them is
+not active.
+
 ![conservative remapping workflow](remapping-workflow.svg)
 
 ```mermaid

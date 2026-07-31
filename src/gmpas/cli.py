@@ -267,20 +267,30 @@ def _target(args) -> int:
             selected, notes = cfg.select(available, warn=False)
         finally:
             series.close()
+        sys.stdout.flush()
         for note in notes:
             print(f"  warning: {note}", file=sys.stderr)
+        sys.stderr.flush()
         print(f"\nwould remap {len(selected)} field(s):")
         for name in selected:
             print(f"  {name}")
 
     if args.out:
+        import shutil
+
         out = domain.to_scrip(args.out)
         print(f"\nwrote {out}")
         print("  pair it with the source grid:")
-        print(f"    gmpas scrip <mesh>.nc -o src.scrip.nc")
+        print("    gmpas scrip <mesh>.nc -o src.scrip.nc")
         print(f"    ESMF_RegridWeightGen -s src.scrip.nc -d {out.name} "
               f"-w map.nc -m conserve --src_regional --dst_regional "
               f"--ignore_unmapped")
+        if shutil.which("ESMF_RegridWeightGen") is None:
+            sys.stdout.flush()
+            print("\n  ESMF_RegridWeightGen is not on your PATH — install it with:",
+                  file=sys.stderr)
+            print("    conda install -c conda-forge esmf nco", file=sys.stderr)
+            sys.stderr.flush()
     return 0
 
 

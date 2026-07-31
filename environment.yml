@@ -1,0 +1,35 @@
+# Everything gmpas can use, in one conda environment.
+#
+#   conda env create -f environment.yml
+#   conda activate gmpas
+#   pip install -e . --no-deps
+#
+# The scientific stack comes from conda-forge because cartopy and netCDF4 are
+# much easier to install that way than from pip. The remapping tools are not
+# Python packages at all -- ESMF_RegridWeightGen and ncremap are executables
+# gmpas shells out to -- so they can only come from conda, not from pyproject.
+name: gmpas
+channels:
+  - conda-forge
+dependencies:
+  # core: geometry, caching, data access
+  - python >=3.10
+  - numpy >=1.24
+  - scipy >=1.10          # cKDTree: exact Voronoi cell lookup
+  - xarray >=2023.1
+  - netcdf4 >=1.6
+
+  # rendering (the `plot` extra)
+  - matplotlib >=3.7
+  - cartopy >=0.22
+  - pillow                # palette PNG encoding for the viewer
+
+  # conservative remapping. Optional: needed only for `gmpas scrip` /
+  # `gmpas target` workflows, not for plotting or the viewer.
+  - esmf                  # provides ESMF_RegridWeightGen
+  - nco                   # provides ncremap
+
+  # development
+  - pytest >=7.0
+  - ruff >=0.4
+  - pip

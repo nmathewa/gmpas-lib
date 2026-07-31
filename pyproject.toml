@@ -34,7 +34,10 @@ gmpas = "gmpas.cli:main"
 [project.optional-dependencies]
 # Rendering is optional so geometry, rasterizing and remap weights stay usable
 # in a headless pipeline that never draws anything.
-plot = ["matplotlib>=3.7", "cartopy>=0.22"]
+plot = ["matplotlib>=3.7", "cartopy>=0.22", "pillow>=9.0"]
+# Conservative remapping needs ESMF_RegridWeightGen (conda-forge `esmf`) and
+# optionally ncremap (conda-forge `nco`). Both are executables, not Python
+# packages, so pip cannot install them -- see environment.yml.
 test = ["pytest>=7.0"]
 dev = ["gmpas[plot,test]", "ruff>=0.4"]
 
