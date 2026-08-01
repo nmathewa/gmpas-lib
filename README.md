@@ -312,10 +312,25 @@ gmpas remap 'history.*.nc' -o out/ -j 64
 ```
 
 It reads the configuration below from the working directory, generates the
-weights once, and writes one remapped file per input file, in parallel. With
-no `-j` the worker count comes from the cores the job was actually given
-(`SLURM_CPUS_PER_TASK` and friends, then the affinity mask), not from the size
-of the machine. See
+weights once, and writes one remapped file per input file, converting them in
+parallel.
+
+**Pass `-j` explicitly.** Left out, the worker count is detected from the
+scheduler — `SLURM_CPUS_PER_TASK`, `PBS_NCPUS` and friends, then the process
+affinity mask — but detection is only as good as what the site sets. `NCPUS=1`
+in a login profile, which several sites use, will pin a 256-core job to a
+single worker:
+
+```
+  1 worker(s) (of 1 from NCPUS)
+```
+
+If the run looks slower than it should, that line is the first thing to read.
+`-j` always wins:
+
+```
+  64 worker(s) (asked for 64; 1 available from NCPUS)
+``` See
 [docs/REMAPPING.md](docs/REMAPPING.md) for the output it prints and the
 individual steps.
 

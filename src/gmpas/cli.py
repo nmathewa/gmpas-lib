@@ -450,9 +450,18 @@ def _remap(args) -> int:
     print(f"\n[3/3] remapping {len(todo)} file(s) -> {work}/")
     if existing:
         print(f"  {len(existing)} already done — pass --overwrite to redo")
-    print(f"  {workers} worker(s)" +
-          (f" (of {detected} from {source})" if args.jobs <= 0
-           else f" (asked for {args.jobs}; {detected} available from {source})"))
+    if args.jobs > 0:
+        print(f"  {workers} worker(s)  (-j {args.jobs}; "
+              f"{detected} detected from {source})")
+    else:
+        print(f"  {workers} worker(s)  (detected from {source})")
+        if workers == 1 and len(todo) > 1:
+            import os
+            machine = os.cpu_count() or 1
+            print(f"        {source} says 1. If this job has more cores, set "
+                  f"them with -j")
+            print(f"        (this machine reports {machine}; "
+                  f"-j {machine} would use them all)")
 
     t0 = time.perf_counter()
     total_slabs = 0

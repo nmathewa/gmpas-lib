@@ -112,13 +112,23 @@ Files are independent, so they convert in parallel:
 gmpas remap 'history.*.nc' -o out/ -j 64
 ```
 
-With no `-j`, the worker count is **the cores this job was actually given**,
-not the size of the machine — `SLURM_CPUS_PER_TASK`, then the other
-schedulers' variables, then the process affinity mask (which respects cgroups
-and taskset), and only then `os.cpu_count()`. The command says which it used:
+**Give `-j` explicitly.** Without it the worker count is detected — from
+`SLURM_CPUS_PER_TASK`, the other schedulers' variables, then the process
+affinity mask, and only then `os.cpu_count()` — which beats using the size of
+the machine, but is still only as reliable as what the site sets. The command
+always reports which source it used, and that line is worth reading:
 
 ```
-  64 worker(s) (of 64 from SLURM_CPUS_PER_TASK)
+  64 worker(s) (of 64 from SLURM_CPUS_PER_TASK)     detection worked
+  1 worker(s) (of 1 from NCPUS)                     detection was misled
+```
+
+`NCPUS` in particular is set to `1` by some login profiles regardless of the
+allocation, which silently pins a large job to one worker. `-j` overrides
+whatever was detected:
+
+```
+  64 worker(s) (asked for 64; 1 available from NCPUS)
 ```
 
 Measured on 8 files, 936 slabs, on a 10-core laptop:
