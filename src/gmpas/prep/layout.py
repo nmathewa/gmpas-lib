@@ -34,7 +34,8 @@ body{margin:0;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-ser
      background:var(--bg);color:var(--fg);display:flex;height:100vh;overflow:hidden}
 #side{width:250px;flex:none;background:var(--panel);border-right:1px solid var(--line);
       display:flex;flex-direction:column;overflow:hidden}
-#side h1{font-size:13px;font-weight:500;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}
+#side h1{font-size:13px;font-weight:500;margin:0;padding:12px 14px;
+         border-bottom:1px solid var(--line)}
 #side h1 small{display:block;color:var(--dim);font-weight:400;margin-top:2px}
 .sec{padding:10px 14px;border-bottom:1px solid var(--line);flex:none}
 .sec label{display:block;color:var(--dim);font-size:11px;letter-spacing:.04em;
@@ -111,7 +112,8 @@ button:hover{border-color:var(--accent)}
 </div>
 <div id="main">
   <div id="top">
-    <span>zoom</span><input type="range" id="zoom" min="0" max="800" value="0" style="width:140px">
+    <span>zoom</span>
+    <input type="range" id="zoom" min="0" max="800" value="0" style="width:140px">
     <label style="white-space:nowrap"><input type="checkbox" id="grid" checked
       style="vertical-align:-1px"> grid</label>
     <button id="home">reset view</button>
@@ -138,9 +140,15 @@ button:hover{border-color:var(--accent)}
 <div id="right">
   <h1>options</h1>
   <div class="sec"><label>extent</label>
-    <div class="row"><input type="text" id="elon0" placeholder="lon min"><input type="text" id="elon1" placeholder="lon max"></div>
-    <div class="row" style="margin-top:6px"><input type="text" id="elat0" placeholder="lat min"><input type="text" id="elat1" placeholder="lat max"></div>
-    <div class="row" style="margin-top:6px"><button id="applyext">apply</button><button id="copyext">copy</button></div>
+    <div class="row">
+      <input type="text" id="elon0" placeholder="lon min">
+      <input type="text" id="elon1" placeholder="lon max"></div>
+    <div class="row" style="margin-top:6px">
+      <input type="text" id="elat0" placeholder="lat min">
+      <input type="text" id="elat1" placeholder="lat max"></div>
+    <div class="row" style="margin-top:6px">
+      <button id="applyext">apply</button>
+      <button id="copyext">copy</button></div>
     <div class="hint" id="exthint"></div>
   </div>
 __PANEL__
