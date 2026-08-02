@@ -105,17 +105,23 @@ gmpas --version && pytest -q
 ## Command line
 
 ```bash
-gmpas info    history.2012-02-25_12.00.00.nc
-gmpas plot    history.2012-02-25_12.00.00.nc precipw -o pw.png
-gmpas view    /path/to/run/
-gmpas scrip   history.2012-02-25_12.00.00.nc -o src.scrip.nc
-gmpas target  -o dst.scrip.nc
+gmpas info       history.2012-02-25_12.00.00.nc
+gmpas plot       history.2012-02-25_12.00.00.nc precipw -o pw.png
+gmpas view       /path/to/run/
+gmpas scrip      history.2012-02-25_12.00.00.nc -o src.scrip.nc
+gmpas target     -o dst.scrip.nc
+gmpas prep view  mesh.nc
 ```
 
 `info` summarises the mesh and lists variables grouped by the element they
 live on. `plot` renders one field. `view` opens the interactive browser.
 `scrip` and `target` prepare the two grid files a conservative remapper needs
 — see [Conservative remapping](#conservative-remapping).
+
+Everything above except `prep` is **postprocessing**: it opens a run and
+renders, remaps or exports it. `prep` is the other end of the pipeline, for
+work that happens before there is any output — see
+[Preprocessing](#preprocessing).
 
 Running `gmpas` with no arguments prints the whole list with examples.
 
@@ -239,6 +245,56 @@ Rendering tests skip themselves when the `plot` extra is absent.
 - `src/gmpas/style.py` — `Style` presets, colormaps, named extents, `save_figure`
 - `src/gmpas/accessor.py` — the `ds.mpas` xarray accessor
 - `src/gmpas/paths.py` — cache and data directory resolution
+- `src/gmpas/prep/` — preprocessing: the `gmpas prep` commands and their layout
+
+## Preprocessing
+
+The rest of gmpas opens a run. `gmpas prep` covers what happens before one
+exists — building a mesh and looking at it on its own.
+
+```bash
+gmpas prep view mesh.nc
+```
+
+A browser view of a mesh file with no output data anywhere near it: cells
+coloured by width, so where the mesh refines is visible at a glance.
+
+```
+8,228 cells, 24,987 edges, regional — cell width 43 to 68.1 km
+listening on 127.0.0.1:8765 — this machine only
+```
+
+Same flags as `view` for tunnelling and size: `-p/--port`, `--host`,
+`--width`, `--height`, `--no-browser`. On a compute node use `--host 0.0.0.0`
+and tunnel, exactly as for `view`.
+
+Two fields are offered, both derived from geometry the mesh cache already
+holds, so neither costs a rebuild: `cell_width_km` (the default) and
+`cell_area_km2`.
+
+**The colour scale is fixed**, taken once from the whole mesh rather than
+autoscaled to the current view. There is no vmin/vmax control to put it back,
+and that is the point: a scale that restretched as you panned would make the
+same refinement band change colour while you moved across it, which misreads a
+variable-resolution mesh badly.
+
+The layout is the `view` page reduced to what a preprocessing step uses. The
+timestep and level sliders, the colormap picker, the colour-range boxes, the
+animation panel, the exports and the probe all belong to a model run, so they
+are absent rather than disabled. Pan, zoom, graticule, scale bar and the
+extent box stay — the last because reading a domain off a mesh is how one
+picks a region.
+
+`prep.layout.page(title, panel=..., script=...)` is that layout as a reusable
+shell, with slots for a step's own controls. Mesh generation with JIGSAW is
+meant to be the second user
+([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)); like the
+remapping tools, JIGSAW would be an external executable gmpas shells out to,
+not a Python dependency.
+
+Nothing in `prep/` modifies the postprocessing path. It imports the viewer's
+rasterizing, PNG encoding, coastline overlay and port binding, and changes
+none of them.
 
 ## Differences from the MCP server
 
@@ -421,3 +477,10 @@ Plotting is implemented. Conservative remapping (`convert`) is next: the same
 KD-tree gives area weights by supersampling a target cell and counting which
 source cells the samples land in, which — unlike barycentric sampling —
 actually conserves cell integrals.
+
+Preprocessing has begun: `gmpas prep view` is implemented, `gmpas prep
+generate` — building a mesh with JIGSAW — is not
+([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)). That one is
+blocked on a question rather than on effort: JIGSAW writes its own `.msh`
+format, and converting it to a mesh `MpasMesh.load()` can open conventionally
+needs a second external tool from MPAS-Tools.
