@@ -28,7 +28,9 @@ from .plot import cell_field, edge_field, mesh_structure, vectors
 from .raster import RASTER_THRESHOLD, rasterize, should_raster, target_grid
 from .style import CMAPS, EXTENTS, Style, resolve_extent, save_figure
 
-__version__ = "0.1.1"
+# kept in step with pyproject.toml by test_version.py -- `gmpas --version` and
+# the built wheel disagreeing is the kind of thing only noticed after a release
+__version__ = "0.2.0"
 
 __all__ = [
     # entry points

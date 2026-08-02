@@ -1,0 +1,65 @@
+name: tests
+
+# Pull requests and pushes to main. Not tags: a tag points at a commit that
+# has already been tested here, so re-running proves nothing new.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # a second push to the same branch supersedes the first
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest · ubuntu · python 3.12
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}          # -l so the conda env is actually active
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # conda-forge, not pip: cartopy and netCDF4 are painful to build from
+      # source, and ESMF_RegridWeightGen is an executable pip cannot install at
+      # all. Installing the real environment.yml is what makes a green check
+      # here mean the same thing as a green run on a laptop.
+      - name: Install the conda environment
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: environment.yml
+          environment-name: gmpas
+          # environment.yml says `python >=3.10`, which would let the solver
+          # drift onto whatever is newest. Pin the version CI is meant to test.
+          create-args: python=3.12
+          cache-environment: true
+
+      - name: Install gmpas
+        # --no-deps: every dependency came from conda above. Letting pip
+        # resolve them again can shadow the conda build of a compiled package
+        # with a wheel, which is how a working environment silently breaks.
+        run: pip install -e . --no-deps
+
+      - name: Report what is actually installed
+        # a failure three steps down is much easier to read with this above it
+        run: |
+          python -c "import gmpas; print('gmpas', gmpas.__version__)"
+          python -c "import numpy, scipy, xarray, netCDF4, matplotlib, cartopy; print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'xarray', xarray.__version__, 'netCDF4', netCDF4.__version__, 'matplotlib', matplotlib.__version__, 'cartopy', cartopy.__version__)"
+          which ESMF_RegridWeightGen ncremap || echo "remap tools NOT on PATH"
+
+      # No ruff step yet, deliberately. `ruff check src tests` currently reports
+      # 42 pre-existing violations (mostly E501 in the embedded viewer page), so
+      # gating on it would mean this workflow is red from its first run for
+      # reasons unrelated to whether the code works. Tracked separately; turn it
+      # on once the tree is clean.
+
+      - name: Run the test suite
+        # Agg: the runner is headless, and a rendering test that tries for a
+        # display fails in a way that looks nothing like the real problem
+        env:
+          MPLBACKEND: Agg
+        run: pytest -q --durations=10
