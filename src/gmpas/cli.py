@@ -522,6 +522,17 @@ def _view(args) -> int:
     return 0
 
 
+def _prep_view(args) -> int:
+    from .prep.meshview import serve
+
+    # same rule as `view`: an explicit --port is usually a tunnel already
+    # pointing at it, so listening elsewhere would be worse than failing
+    serve(args.mesh_file, port=args.port, host=args.host,
+          nx=args.width, ny=args.height, open_browser=not args.no_browser,
+          strict_port=args.port != DEFAULT_PORT)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gmpas",
@@ -613,6 +624,35 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--no-browser", action="store_true",
                    help="do not open a browser (useful over an SSH tunnel)")
     v.set_defaults(func=_view)
+
+    # -- preprocessing ---------------------------------------------------
+    # Everything above is postprocessing: it opens a run and renders, remaps or
+    # exports it. `prep` is the other end of the pipeline -- building a mesh and
+    # looking at it before any model output exists -- so it gets its own
+    # namespace rather than more top-level verbs. Mesh generation (#15) belongs
+    # here next, as `gmpas prep generate`.
+    pre = sub.add_parser("prep", help="preprocessing: inspect and build meshes",
+                         description="Preprocessing steps, which run before "
+                                     "there is any model output to plot.")
+    presub = pre.add_subparsers(dest="prep_cmd", metavar="{view}")
+    # a bare `gmpas prep` should list its steps, not error
+    pre.set_defaults(func=lambda _a, _p=pre: (_p.print_help(), 0)[1])
+
+    pv = presub.add_parser("view", help="browse a mesh file on its own, "
+                                        "with no output data")
+    pv.add_argument("mesh_file", metavar="MESH", help="MPAS mesh file")
+    pv.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
+                    help=f"port (default {DEFAULT_PORT}; the default wanders "
+                         f"if busy, an explicit one fails instead)")
+    pv.add_argument("--host", default="127.0.0.1",
+                    help="interface to bind. Use 0.0.0.0 on an HPC compute "
+                         "node so a tunnel from the login node can reach it")
+    pv.add_argument("--width", type=int, default=1200,
+                    help="raster width in pixels")
+    pv.add_argument("--height", type=int, default=700)
+    pv.add_argument("--no-browser", action="store_true",
+                    help="do not open a browser (useful over an SSH tunnel)")
+    pv.set_defaults(func=_prep_view)
     return p
 
 
