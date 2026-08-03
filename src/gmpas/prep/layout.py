@@ -102,12 +102,8 @@ button:hover{border-color:var(--accent)}
 <div id="side">
   <h1><span id="title">loading&hellip;</span><small id="sub"></small></h1>
   <div class="sec"><label>field</label><div id="fields"></div></div>
-  <div class="sec" id="facts"><label>mesh</label>
-    <div class="kv"><span>cells</span><b id="f_cells">&ndash;</b></div>
-    <div class="kv"><span>edges</span><b id="f_edges">&ndash;</b></div>
-    <div class="kv"><span>coverage</span><b id="f_cov">&ndash;</b></div>
-    <div class="kv"><span>width min</span><b id="f_wmin">&ndash;</b></div>
-    <div class="kv"><span>width max</span><b id="f_wmax">&ndash;</b></div>
+  <div class="sec" id="facts"><label id="factlabel">mesh</label>
+    <div id="factrows"></div>
   </div>
 </div>
 <div id="main">
@@ -319,15 +315,22 @@ function panel(){
   $("#exthint").textContent=`${b[0].toFixed(2)}, ${b[1].toFixed(2)}, `+
                             `${b[2].toFixed(2)}, ${b[3].toFixed(2)}`;
 }
+// The facts block is whatever the step says it is. A mesh has cells, edges and
+// coverage; a distance function has none of those, and inventing values for it
+// would be worse than leaving the rows out. So the server sends `subtitle` and
+// `stats` (a list of [label, value] pairs) and this just renders them.
 function subtitle(){
-  $("#sub").textContent = `${M.cells.toLocaleString()} cells \\u00b7 `+
-    `${M.regional?"regional":"global"} \\u00b7 ${M.coverage}% of its sphere`;
-  $("#f_cells").textContent=M.cells.toLocaleString();
-  $("#f_edges").textContent=M.edges.toLocaleString();
-  $("#f_cov").textContent=M.coverage+"%";
-  const w=M.fields.find(f=>f.name==="cell_width_km");
-  if(w){ $("#f_wmin").textContent=w.vmin.toPrecision(4)+" km";
-         $("#f_wmax").textContent=w.vmax.toPrecision(4)+" km"; }
+  $("#sub").textContent = M.subtitle || "";
+  $("#factlabel").textContent = M.facts_label || "mesh";
+  $("#factrows").innerHTML = "";
+  (M.stats || []).forEach(([label, value])=>{
+    const d=document.createElement("div");
+    d.className="kv";
+    d.innerHTML=`<span></span><b></b>`;
+    d.firstChild.textContent=label;
+    d.lastChild.textContent=value;
+    $("#factrows").append(d);
+  });
 }
 function fillFields(){
   $("#fields").innerHTML="";

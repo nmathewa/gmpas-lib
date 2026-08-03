@@ -535,6 +535,21 @@ def _prep_view(args) -> int:
     return 0
 
 
+def _prep_hfun(args) -> int:
+    from .prep.hfunview import HfunViewer, report, serve
+
+    # --check is the whole point on a login node or in a script: the numbers
+    # without a server, so a bad transition is caught before JIGSAW runs
+    if args.check:
+        print(report(HfunViewer(args.hfun_file)))
+        return 0
+
+    serve(args.hfun_file, port=args.port, host=args.host,
+          nx=args.width, ny=args.height, open_browser=not args.no_browser,
+          strict_port=args.port != DEFAULT_PORT)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gmpas",
@@ -636,7 +651,7 @@ def build_parser() -> argparse.ArgumentParser:
     pre = sub.add_parser("prep", help="preprocessing: inspect and build meshes",
                          description="Preprocessing steps, which run before "
                                      "there is any model output to plot.")
-    presub = pre.add_subparsers(dest="prep_cmd", metavar="{view}")
+    presub = pre.add_subparsers(dest="prep_cmd", metavar="{view,hfun}")
     # a bare `gmpas prep` should list its steps, not error
     pre.set_defaults(func=lambda _a, _p=pre: (_p.print_help(), 0)[1])
 
@@ -655,6 +670,28 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--no-browser", action="store_true",
                     help="do not open a browser (useful over an SSH tunnel)")
     pv.set_defaults(func=_prep_view)
+
+    ph = presub.add_parser("hfun", help="browse a JIGSAW distance function "
+                                        "before any mesh exists")
+    ph.add_argument("hfun_file", metavar="HFUN",
+                    help="a JIGSAW hfun.py defining hfun_min and "
+                         "get_hfun(lon, lat); a directory is read as its "
+                         "hfun.py")
+    ph.add_argument("--check", action="store_true",
+                    help="print the resolution report and exit, without "
+                         "serving anything")
+    ph.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
+                    help=f"port (default {DEFAULT_PORT}; the default wanders "
+                         f"if busy, an explicit one fails instead)")
+    ph.add_argument("--host", default="127.0.0.1",
+                    help="interface to bind. Use 0.0.0.0 on an HPC compute "
+                         "node so a tunnel from the login node can reach it")
+    ph.add_argument("--width", type=int, default=1200,
+                    help="raster width in pixels")
+    ph.add_argument("--height", type=int, default=700)
+    ph.add_argument("--no-browser", action="store_true",
+                    help="do not open a browser (useful over an SSH tunnel)")
+    ph.set_defaults(func=_prep_hfun)
     return p
 
 

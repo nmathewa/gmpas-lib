@@ -82,12 +82,28 @@ class MeshViewer:
                 "vmin": float(np.nanmin(v)),
                 "vmax": float(np.nanmax(v)),
             })
+        cells, edges = int(self.mesh.n_cells), int(self.mesh.n_edges)
+        coverage = round(self.mesh.coverage * 100, 1)
+        regional = not self.mesh.is_global
+        width = next(f for f in fields if f["name"] == "cell_width_km")
         return {
             "file": self.mesh.path.name,
-            "cells": int(self.mesh.n_cells),
-            "edges": int(self.mesh.n_edges),
-            "regional": not self.mesh.is_global,
-            "coverage": round(self.mesh.coverage * 100, 1),
+            "cells": cells,
+            "edges": edges,
+            "regional": regional,
+            "coverage": coverage,
+            # the sidebar is data-driven now, so a step with no cells or edges
+            # can reuse the same shell rather than fork it
+            "subtitle": f"{cells:,} cells · {'regional' if regional else 'global'}"
+                        f" · {coverage}% of its sphere",
+            "facts_label": "mesh",
+            "stats": [
+                ["cells", f"{cells:,}"],
+                ["edges", f"{edges:,}"],
+                ["coverage", f"{coverage}%"],
+                ["width min", f"{width['vmin']:.4g} km"],
+                ["width max", f"{width['vmax']:.4g} km"],
+            ],
             "home": list(self.home),
             "nx": self.nx,
             "ny": self.ny,

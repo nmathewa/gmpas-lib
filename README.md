@@ -111,6 +111,7 @@ gmpas view       /path/to/run/
 gmpas scrip      history.2012-02-25_12.00.00.nc -o src.scrip.nc
 gmpas target     -o dst.scrip.nc
 gmpas prep view  mesh.nc
+gmpas prep hfun  hfun.py
 ```
 
 `info` summarises the mesh and lists variables grouped by the element they
@@ -286,11 +287,60 @@ extent box stay — the last because reading a domain off a mesh is how one
 picks a region.
 
 `prep.layout.page(title, panel=..., script=...)` is that layout as a reusable
-shell, with slots for a step's own controls. Mesh generation with JIGSAW is
-meant to be the second user
+shell, with slots for a step's own controls. The sidebar's facts block is
+data-driven — a step sends `subtitle` and `stats`, so one with no cells or
+edges reuses the shell rather than forking it. `prep hfun` is the second user;
+mesh generation is meant to be the third
 ([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)); like the
 remapping tools, JIGSAW would be an external executable gmpas shells out to,
 not a Python dependency.
+
+### Looking at a mesh before it exists
+
+```bash
+gmpas prep hfun hfun.py            # browse it
+gmpas prep hfun hfun.py --check    # just the numbers, no server
+```
+
+In the JIGSAW workflow for MPAS-Atmosphere, a variable-resolution mesh is
+defined entirely by a small Python file. `create_hfun.py` samples it onto a
+lat-lon grid to write `HFUN.msh`, JIGSAW turns that into generating points, and
+`mkgrid` turns those into `grid.nc`. Every design decision lives in that one
+file, so this reads it on its own — no JIGSAW, no mesh, no generation time:
+
+```
+hfun.py: hfun_min 12 km, grid distance 12 to 60 km
+max cell size gradient 0.0300 at 75.64, -95.05 (within the 0.03 guideline)
+measured on the 3336 x 1668 lat-lon grid create_hfun.py would write (12 km spacing)
+```
+
+The contract is the mini-tutorial's: a module-level `hfun_min` in km, and
+`get_hfun(lon, lat)` taking **radians** and returning **km**. That function is
+called once with whole arrays and may do expensive setup — a real one might
+interpolate a raster — so it is called once per view here, never per pixel.
+
+**The gradient is the number worth having.** The tutorial's guidance is to keep
+cell size changing by no more than a few percent per km of distance, with 0.03
+generally safe, and `mesh_quality.py` reports exactly that from a finished
+`grid.nc`:
+
+```python
+nominalDx = r_earth * nominalMinDc * (1.0 / meshDensity) ** 0.25
+gradient  = abs(nominalDx[c0] - nominalDx[c1]) / dcEdge / r_earth
+```
+
+Since `meshDensity` is `(hfun_min / h) ** 4` and `nominalMinDc` is `hfun_min`,
+that is the change in grid distance between neighbouring cells over the
+distance between them. Its continuous limit is `|grad h|` with respect to arc
+length, which is what is computed here — on the same lat-lon grid
+`create_hfun.py` would write, so the number is comparable both to the 0.03
+guideline and to what `mesh_quality.py` will say once the mesh exists. The two
+polar rows are excluded: every longitude at a pole is the same point, so the
+zonal derivative there is 0/0 rather than a gradient.
+
+Two fields are offered, neither invented here: `cell_width_km` is `get_hfun`
+straight out, and `mesh_density` is `(hfun_min / h) ** 4` — MPAS's own
+`meshDensity`, 1.0 where the mesh is finest.
 
 Nothing in `prep/` modifies the postprocessing path. It imports the viewer's
 rasterizing, PNG encoding, coastline overlay and port binding, and changes
@@ -478,9 +528,10 @@ KD-tree gives area weights by supersampling a target cell and counting which
 source cells the samples land in, which — unlike barycentric sampling —
 actually conserves cell integrals.
 
-Preprocessing has begun: `gmpas prep view` is implemented, `gmpas prep
-generate` — building a mesh with JIGSAW — is not
+Preprocessing has begun: `gmpas prep view` and `gmpas prep hfun` are
+implemented — the two ends of looking at a mesh, one after it exists and one
+before. `gmpas prep generate` — actually running JIGSAW — is not
 ([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)). That one is
 blocked on a question rather than on effort: JIGSAW writes its own `.msh`
 format, and converting it to a mesh `MpasMesh.load()` can open conventionally
-needs a second external tool from MPAS-Tools.
+needs `mkgrid`, which wants MPI and PnetCDF.

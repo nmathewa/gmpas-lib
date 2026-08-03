@@ -17,7 +17,10 @@ second.
 
 from __future__ import annotations
 
+from .hfun import Hfun, HfunError, diagnose
+from .hfunview import HfunViewer
 from .layout import page
 from .meshview import MeshViewer, serve
 
-__all__ = ["MeshViewer", "page", "serve"]
+__all__ = ["Hfun", "HfunError", "HfunViewer", "MeshViewer", "diagnose",
+           "page", "serve"]
