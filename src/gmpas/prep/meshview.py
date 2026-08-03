@@ -26,13 +26,12 @@ import json
 import socket
 import threading
 import webbrowser
-from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
 from ..mesh import MpasMesh
-from ..viewer import ViewIndex, _overlay, _png, bind, ramp
+from ..viewer import PageHandler, ViewIndex, _overlay, _png, bind, ramp
 from .layout import page
 
 #: the one colormap this section uses. Sequential and perceptually uniform,
@@ -142,18 +141,7 @@ class MeshViewer:
 
 
 def _handler(viewer: MeshViewer, html: str):
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):          # keep the console quiet
-            pass
-
-        def _send(self, body: bytes, ctype: str):
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-
+    class Handler(PageHandler):
         def do_GET(self):
             url = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(url.query).items()}

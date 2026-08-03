@@ -265,7 +265,7 @@ function colorbar(){
 
 async function overlay(){
   const b=outset(boxOf(view));
-  $("#over").src=`/api/overlay?extent=${b.join(",")}`+
+  $("#over").src=`api/overlay?extent=${b.join(",")}`+
                  `&nx=${Math.round(M.nx*OUTSET)}&ny=${Math.round(M.ny*OUTSET)}`;
 }
 // show the frame we already have, transformed into place, until the real one
@@ -290,7 +290,7 @@ async function draw(){
     const p=new URLSearchParams({field:cur.name, extent:b.join(","),
       nx:Math.round(M.nx*OUTSET), ny:Math.round(M.ny*OUTSET)});
     const t0=performance.now();
-    const r=await fetch("/api/frame?"+p);
+    const r=await fetch("api/frame?"+p);
     if(!r.ok){ say((await r.json()).error); return; }
     const url=URL.createObjectURL(await r.blob());
     const img=$("#data"), old=img.src;
@@ -405,7 +405,7 @@ $("#grid").onchange = graticule;
 addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); });
 
 async function boot(){
-  M = await (await fetch("/api/meta")).json();
+  M = await (await fetch("api/meta")).json();
   $("#title").textContent = M.file;
   home = fit(M.home); view = {...home}; rendered = null;
   layout(); subtitle(); fillFields(); panel();

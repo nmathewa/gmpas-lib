@@ -513,30 +513,36 @@ def _remap(args) -> int:
     return 1 if failures else 0
 
 
-def _view(args) -> int:
-    from .viewer import serve
+def _dashboard(args, data_path=None, mesh_path="", hfun_path="") -> int:
+    """Serve whatever sources were asked for, on one port.
 
-    # an explicit --port is usually an SSH tunnel already pointing at it, so
-    # silently listening elsewhere would be worse than failing
-    serve(args.path, args.mesh or "", port=args.port, host=args.host,
-          nx=args.width, ny=args.height, open_browser=not args.no_browser,
-          strict_port=args.port != DEFAULT_PORT)
+    Every command that opens a browser goes through here, so a run, the mesh it
+    is on and the distance function behind that mesh are one server and one
+    tunnel rather than three. An explicit --port is usually a tunnel already
+    pointing at it, so listening elsewhere would be worse than failing.
+    """
+    from .dashboard import build, serve
+
+    sources, banner = build(data_path, mesh_path, hfun_path,
+                            nx=args.width, ny=args.height)
+    serve(sources, port=args.port, host=args.host,
+          open_browser=not args.no_browser,
+          strict_port=args.port != DEFAULT_PORT, banner=banner)
     return 0
+
+
+def _view(args) -> int:
+    return _dashboard(args, data_path=args.path, mesh_path=args.mesh or "",
+                      hfun_path=args.hfun or "")
 
 
 def _prep_view(args) -> int:
-    from .prep.meshview import serve
-
-    # same rule as `view`: an explicit --port is usually a tunnel already
-    # pointing at it, so listening elsewhere would be worse than failing
-    serve(args.mesh_file, port=args.port, host=args.host,
-          nx=args.width, ny=args.height, open_browser=not args.no_browser,
-          strict_port=args.port != DEFAULT_PORT)
-    return 0
+    return _dashboard(args, mesh_path=args.mesh_file,
+                      hfun_path=args.hfun or "")
 
 
 def _prep_hfun(args) -> int:
-    from .prep.hfunview import HfunViewer, report, serve
+    from .prep.hfunview import HfunViewer, report
 
     # --check is the whole point on a login node or in a script: the numbers
     # without a server, so a bad transition is caught before JIGSAW runs
@@ -544,10 +550,8 @@ def _prep_hfun(args) -> int:
         print(report(HfunViewer(args.hfun_file)))
         return 0
 
-    serve(args.hfun_file, port=args.port, host=args.host,
-          nx=args.width, ny=args.height, open_browser=not args.no_browser,
-          strict_port=args.port != DEFAULT_PORT)
-    return 0
+    return _dashboard(args, mesh_path=args.mesh or "",
+                      hfun_path=args.hfun_file)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -630,6 +634,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     v = sub.add_parser("view", help="browse a file interactively in a browser")
     common(v)
+    v.add_argument("--hfun", help="also serve the JIGSAW hfun.py behind this "
+                                  "mesh, as a third page on the same port")
     v.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
                    help=f"port (default {DEFAULT_PORT}; the default wanders "
                         f"if busy, an explicit one fails instead)")
@@ -658,6 +664,9 @@ def build_parser() -> argparse.ArgumentParser:
     pv = presub.add_parser("view", help="browse a mesh file on its own, "
                                         "with no output data")
     pv.add_argument("mesh_file", metavar="MESH", help="MPAS mesh file")
+    pv.add_argument("--hfun", help="also serve the JIGSAW hfun.py behind this "
+                                   "mesh, so intent and result are one click "
+                                   "apart")
     pv.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
                     help=f"port (default {DEFAULT_PORT}; the default wanders "
                          f"if busy, an explicit one fails instead)")
@@ -680,6 +689,9 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--check", action="store_true",
                     help="print the resolution report and exit, without "
                          "serving anything")
+    ph.add_argument("--mesh", help="also serve a mesh built from this hfun, "
+                                   "to compare what was asked for against "
+                                   "what came out")
     ph.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
                     help=f"port (default {DEFAULT_PORT}; the default wanders "
                          f"if busy, an explicit one fails instead)")

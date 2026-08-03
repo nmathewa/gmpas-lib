@@ -24,13 +24,12 @@ import json
 import socket
 import threading
 import webbrowser
-from http.server import BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
 from ..raster import target_grid
-from ..viewer import _overlay, _png, bind, ramp
+from ..viewer import PageHandler, _overlay, _png, bind, ramp
 from .hfun import GRADIENT_GUIDELINE, Hfun, diagnose
 from .layout import page
 
@@ -120,7 +119,15 @@ class HfunViewer:
             if key not in self._frames:
                 lon, lat = target_grid(tuple(extent), nx, ny)
                 lon2, lat2 = np.meshgrid(lon, lat)
-                self._frames[key] = self.hfun.sample_degrees(lon2, lat2)
+                h = self.hfun.sample_degrees(lon2, lat2)
+
+                # Past a pole there is no sphere left to have a grid distance.
+                # get_hfun answers anyway -- sin and cos are periodic, so it
+                # folds back and returns a mirror image of the other side --
+                # and that fabricated band has no coastline to sit under.
+                # Frames are rendered 1.4x wider than the window, so a global
+                # view always asks for some of it. Blank it instead.
+                self._frames[key] = np.where(np.abs(lat2) > 90.0, np.nan, h)
             h = self._frames[key]
 
         if field == "cell_width_km":
@@ -150,18 +157,7 @@ class HfunViewer:
 
 
 def _handler(viewer: HfunViewer, html: str):
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):          # keep the console quiet
-            pass
-
-        def _send(self, body: bytes, ctype: str):
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-
+    class Handler(PageHandler):
         def do_GET(self):
             url = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(url.query).items()}

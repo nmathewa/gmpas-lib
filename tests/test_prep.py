@@ -94,13 +94,15 @@ def test_the_view_index_is_reused_across_frames(viewer, simple_mesh):
 
 def test_the_page_drops_the_postprocessing_controls():
     html = page("gmpas prep view")
-    for gone in ("#vmin", "#vmax", "id=\"cmap\"", "animate", "/api/export/",
-                 "/api/probe", "id=\"time\"", "id=\"level\""):
+    for gone in ("#vmin", "#vmax", "id=\"cmap\"", "animate", "api/export/",
+                 "api/probe", "id=\"time\"", "id=\"level\""):
         assert gone not in html
-    # but keeps what a preprocessing step needs
+    # but keeps what a preprocessing step needs. The API paths are relative so
+    # the page works mounted under a prefix as well as at the root
     for kept in ("id=\"elon0\"", "applyext", "copyext", "id=\"grat\"",
-                 "id=\"scalebar\"", "/api/frame", "/api/overlay"):
+                 "id=\"scalebar\"", "api/frame", "api/overlay"):
         assert kept in html
+    assert "/api/" not in html
 
 
 def test_the_page_splices_in_a_step_panel():
