@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,6 +48,14 @@ CACHED_ARRAYS = ("lon_cell", "lat_cell", "cell_verts", "cell_wrapped",
 
 #: fraction of its sphere a mesh must cover before it counts as global
 GLOBAL_COVERAGE = 0.9
+
+#: headroom demanded on top of the computed cache size, so the build does not
+#: start against a filesystem it will fill exactly
+SPACE_MARGIN = 64 * 1024 * 1024
+
+
+class MeshCacheError(OSError):
+    """The mesh cache could not be written -- almost always out of room."""
 
 
 def has_mesh(ds: xr.Dataset) -> bool:
@@ -345,8 +355,131 @@ class _Bounds:
         return (lo, hi, self.lat[0], self.lat[1])
 
 
-def _open_memmap(path: Path, dtype, shape):
-    return np.lib.format.open_memmap(path, mode="w+", dtype=dtype, shape=shape)
+class _NpyWriter:
+    """Stream one `.npy` out chunk by chunk, through ordinary writes.
+
+    Deliberately not `open_memmap(mode="w+")`. A writable mapping creates the
+    file at its full size but *sparse*, so nothing is reserved: the assignment
+    into the mapping always appears to succeed and the allocation failure lands
+    later, in page writeback, where there is no caller left to return it to.
+
+    Measured on a 120 MB volume, writing a 356 MB array through such a mapping:
+    every write returned cleanly, `flush()` returned cleanly, and after
+    unmounting and remounting two thirds of the array read back as zeros. On
+    Linux the same overcommit arrives instead as SIGBUS, which kills the
+    process outright with no traceback -- the symptom in issue #19.
+
+    An ordinary buffered write has neither failure mode: it returns ENOSPC (or
+    EDQUOT, over a quota) as an `OSError` the build can clean up after and the
+    user can read. The chunking is unchanged, so peak memory is the same.
+    """
+
+    def __init__(self, path: Path, dtype, shape: tuple[int, ...]):
+        self.path = Path(path)
+        self.dtype = np.dtype(dtype)
+        self.shape = tuple(int(n) for n in shape)
+        self._rows = 0
+        self._fp = open(self.path, "wb")
+        np.lib.format.write_array_header_1_0(self._fp, {
+            "descr": np.lib.format.dtype_to_descr(self.dtype),
+            "fortran_order": False,
+            "shape": self.shape,
+        })
+
+    def append(self, block: np.ndarray) -> None:
+        block = np.ascontiguousarray(block, dtype=self.dtype)
+        with _writing(self.path):
+            block.tofile(self._fp)
+        self._rows += block.shape[0]
+
+    def close(self) -> None:
+        if self._rows != self.shape[0]:
+            raise MeshCacheError(
+                f"{self.path.name}: wrote {self._rows} rows of {self.shape[0]}"
+            )
+        # fsync so a deferred allocation failure is raised here, as an error
+        # about this file, rather than surfacing as a corrupt read much later
+        with _writing(self.path):
+            self._fp.flush()
+            os.fsync(self._fp.fileno())
+        self._fp.close()
+
+
+@contextmanager
+def _writing(path: Path):
+    """Say which cached array failed, and that running out of room is why.
+
+    numpy reports a short write as `1000000 requested and 0 written`, which
+    names neither the file nor the cause. Out of room is overwhelmingly the
+    reason a cache write fails, and the user can act on that sentence.
+    """
+    try:
+        yield
+    except OSError as exc:
+        raise MeshCacheError(
+            f"failed writing {path.name} to the mesh cache: {exc}\n"
+            f"  Most likely {path.parent.parent} is full or over quota. "
+            f"Free some space, or set GMPAS_CACHE_DIR to somewhere larger."
+        ) from exc
+
+
+def _save(path: Path, arr: np.ndarray) -> None:
+    """`np.save` that has actually reached the disk when it returns."""
+    with _writing(path), open(path, "wb") as fp:
+        np.lib.format.write_array(fp, np.ascontiguousarray(arr))
+        fp.flush()
+        os.fsync(fp.fileno())
+
+
+def _cache_bytes(nc) -> int:
+    """Size of the finished cache, from the netCDF header alone -- no reads.
+
+    Every cached array is a fixed multiple of nCells or nEdges, so this is
+    exact rather than an estimate, and it costs nothing to compute before
+    deciding whether the build can succeed at all.
+    """
+    n_cells = len(nc.dimensions["nCells"])
+    n_edges = len(nc.dimensions["nEdges"])
+    max_edges = len(nc.dimensions["maxEdges"])
+    v = nc.variables
+
+    def width(name: str) -> int:
+        return v[name].dtype.itemsize
+
+    return (
+        n_cells * max_edges * 2 * width("lonVertex")     # cell_verts
+        + n_edges * 2 * 2 * width("lonVertex")           # edge_segs
+        + n_cells + n_edges                              # the two bool arrays
+        + n_cells * 3 * width("xCell")                   # xyz_cell
+        + n_cells * width("areaCell")                    # area_cell
+        + n_cells * 2 * width("lonCell")                 # lon_cell, lat_cell
+        + n_edges * 2 * width("lonEdge")                 # lon_edge, lat_edge
+        + n_edges * width("angleEdge")                   # angle_edge
+    )
+
+
+def _size(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def _check_space(where: Path, need: int, mesh: Path) -> None:
+    """Refuse to start a build that cannot fit, and say so in bytes."""
+    free = shutil.disk_usage(where).free
+    if free >= need + SPACE_MARGIN:
+        return
+
+    raise MeshCacheError(
+        f"not enough room to cache {mesh.name}: its geometry needs "
+        f"{_size(need)} and {where} has {_size(free)} free.\n"
+        f"  Free some space, or send the cache somewhere larger with "
+        f"GMPAS_CACHE_DIR=/path/with/room\n"
+        f"  (this reads free space, not your quota -- on a shared filesystem "
+        f"a quota can bind well before the disk does)."
+    )
 
 
 def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
@@ -360,7 +493,9 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
     impossible to cache rather than merely slow.
 
     Writes to a temporary directory and renames, so an interrupted build never
-    leaves a half-written cache that looks complete.
+    leaves a half-written cache that looks complete -- and removes that
+    directory if it fails, so a build that ran out of room does not leave its
+    partial output behind to make the next attempt worse.
     """
     import netCDF4
 
@@ -379,6 +514,8 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
                 f"{missing}). Pass the mesh/init/static file instead."
             )
 
+        _check_space(cache.parent, _cache_bytes(nc), path)
+
         lon_v = _wrap180(nc.variables["lonVertex"][:] * R2D)
         lat_v = nc.variables["latVertex"][:] * R2D
         dt = lon_v.dtype
@@ -389,8 +526,8 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
 
         bounds = _Bounds()
 
-        verts = _open_memmap(tmp / "cell_verts.npy", dt, (n_cells, max_edges, 2))
-        cw = _open_memmap(tmp / "cell_wrapped.npy", bool, (n_cells,))
+        verts = _NpyWriter(tmp / "cell_verts.npy", dt, (n_cells, max_edges, 2))
+        cw = _NpyWriter(tmp / "cell_wrapped.npy", bool, (n_cells,))
         voc_var, ne_var = nc.variables["verticesOnCell"], nc.variables["nEdgesOnCell"]
         for i in range(0, n_cells, chunk):
             j = min(i + chunk, n_cells)
@@ -405,13 +542,13 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             block[..., 1] = lat_v[voc]
             block, wrapped = _unwrap_polygons(block)
 
-            verts[i:j] = block
-            cw[i:j] = wrapped
+            verts.append(block)
+            cw.append(wrapped)
             bounds.update(block)
-        verts.flush(); cw.flush(); del verts, cw
+        verts.close(); cw.close()
 
-        segs = _open_memmap(tmp / "edge_segs.npy", dt, (n_edges, 2, 2))
-        ew = _open_memmap(tmp / "edge_wrapped.npy", bool, (n_edges,))
+        segs = _NpyWriter(tmp / "edge_segs.npy", dt, (n_edges, 2, 2))
+        ew = _NpyWriter(tmp / "edge_wrapped.npy", bool, (n_edges,))
         voe_var = nc.variables["verticesOnEdge"]
         for i in range(0, n_edges, chunk):
             j = min(i + chunk, n_edges)
@@ -420,9 +557,9 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             block[..., 0] = lon_v[voe]
             block[..., 1] = lat_v[voe]
             block, wrapped = _unwrap_polygons(block)
-            segs[i:j] = block
-            ew[i:j] = wrapped
-        segs.flush(); ew.flush(); del segs, ew
+            segs.append(block)
+            ew.append(wrapped)
+        segs.close(); ew.close()
 
         xyz = np.stack([nc.variables["xCell"][:], nc.variables["yCell"][:],
                         nc.variables["zCell"][:]], axis=-1)
@@ -434,13 +571,13 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             radius = EARTH_RADIUS
             area = area * EARTH_RADIUS**2
 
-        np.save(tmp / "xyz_cell.npy", xyz)
-        np.save(tmp / "area_cell.npy", area)
-        np.save(tmp / "lon_cell.npy", _wrap180(nc.variables["lonCell"][:] * R2D))
-        np.save(tmp / "lat_cell.npy", nc.variables["latCell"][:] * R2D)
-        np.save(tmp / "lon_edge.npy", _wrap180(nc.variables["lonEdge"][:] * R2D))
-        np.save(tmp / "lat_edge.npy", nc.variables["latEdge"][:] * R2D)
-        np.save(tmp / "angle_edge.npy", nc.variables["angleEdge"][:])
+        _save(tmp / "xyz_cell.npy", xyz)
+        _save(tmp / "area_cell.npy", area)
+        _save(tmp / "lon_cell.npy", _wrap180(nc.variables["lonCell"][:] * R2D))
+        _save(tmp / "lat_cell.npy", nc.variables["latCell"][:] * R2D)
+        _save(tmp / "lon_edge.npy", _wrap180(nc.variables["lonEdge"][:] * R2D))
+        _save(tmp / "lat_edge.npy", nc.variables["latEdge"][:] * R2D)
+        _save(tmp / "angle_edge.npy", nc.variables["angleEdge"][:])
 
         coverage = float(area.sum() / (4.0 * np.pi * radius**2))
         extent = ((-180.0, 180.0, -90.0, 90.0) if coverage >= GLOBAL_COVERAGE
@@ -453,6 +590,11 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             "n_edges": n_edges,
             "cache_version": CACHE_VERSION,
         }, indent=2))
+    except BaseException:
+        # a build that died because the filesystem was full must not leave its
+        # partial output sitting on that filesystem
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     finally:
         nc.close()
 

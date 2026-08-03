@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import io
 import sys
 import time
 from pathlib import Path
@@ -657,6 +659,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # A fatal signal is not an exception and cannot be caught below: SIGBUS
+    # from a memory-mapped page the filesystem could not supply kills the
+    # process where it stands, and all the user sees is `Bus error`. This
+    # installs a C-level handler that prints the Python traceback first, so
+    # such a death at least says which line and which array (issue #19).
+    # It writes to a real file descriptor, which a captured or wrapped stderr
+    # does not have -- and a missing crash dump is not worth failing over.
+    try:
+        faulthandler.enable()
+    except (AttributeError, ValueError, io.UnsupportedOperation):
+        pass
+
     # Python block-buffers stdout when it is not a terminal, so under a job
     # scheduler or through a pipe none of the progress appears until the run
     # ends -- which looks exactly like a command producing no output at all.
@@ -673,11 +687,12 @@ def main(argv=None) -> int:
         parser.print_help()
         return 0
 
+    from .mesh import MeshCacheError
     from .remap import RemapError
 
     try:
         return args.func(args)
-    except RemapError as exc:
+    except (RemapError, MeshCacheError) as exc:
         print(f"\ngmpas: {exc}", file=sys.stderr)
         return 1
     except (FileNotFoundError, KeyError, ValueError) as exc:

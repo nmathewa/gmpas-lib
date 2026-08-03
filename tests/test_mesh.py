@@ -351,10 +351,12 @@ def test_an_interrupted_build_leaves_no_usable_cache(tmp_path):
     # .undo() on that would also revert the autouse GMPAS_CACHE_DIR
     # isolation and write the retry into the real user cache
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(mesh_mod, "_open_memmap", explode)
+        mp.setattr(mesh_mod, "_NpyWriter", explode)
         with pytest.raises(RuntimeError):
             MpasMesh.load(path)
         assert not (cache / "meta.json").exists()
+        # and nothing partial left behind on a filesystem that may be full
+        assert not cache.with_name(cache.name + ".partial").exists()
 
     assert MpasMesh.load(path).n_cells == 2      # recovers on the next try
     assert cache.is_relative_to(tmp_path)        # and stayed inside the sandbox
@@ -453,3 +455,88 @@ def test_reconstruction_is_zero_for_zero_flow(simple_mesh):
                                                np.zeros(simple_mesh.n_edges))
     assert zonal == pytest.approx(0.0)
     assert meridional == pytest.approx(0.0)
+
+
+# --------------------------------------------------------- running out of room
+
+
+def test_cache_files_are_not_sparse(tmp_path):
+    """The cache must occupy the blocks it claims, not promise them.
+
+    `open_memmap(mode="w+")` reserves nothing: the file is created at full size
+    and sparse, the writes into the mapping report success whatever the
+    filesystem can actually take, and the allocation failure lands later in
+    page writeback -- as SIGBUS on Linux, and as silently zeroed data on macOS.
+    Asking that the blocks are really allocated is what pins the write path to
+    ordinary writes, which fail loudly and in the caller's own frame.
+    """
+    import os
+
+    path = write_mesh(tmp_path / "solid.nc", [(float(i), 0.0) for i in range(200)])
+    MpasMesh.load(path)
+
+    cache = cache_path(path)
+    for name in ("cell_verts.npy", "edge_segs.npy"):
+        f = cache / name
+        allocated = os.stat(f).st_blocks * 512
+        assert allocated >= os.path.getsize(f) * 0.9, f"{name} is sparse"
+
+
+def test_a_build_that_cannot_fit_says_so_before_it_starts(tmp_path, monkeypatch):
+    """Better a sentence about free space than a build that dies mid-way."""
+    from gmpas import mesh as mesh_mod
+
+    path = write_mesh(tmp_path / "toobig.nc", [(0.0, 0.0), (10.0, 0.0)])
+
+    Usage = type("Usage", (), {"free": 1024})           # 1 KB free
+    monkeypatch.setattr(mesh_mod.shutil, "disk_usage", lambda p: Usage())
+
+    with pytest.raises(mesh_mod.MeshCacheError) as exc:
+        MpasMesh.load(path)
+
+    msg = str(exc.value)
+    assert "toobig.nc" in msg                            # which mesh
+    assert "GMPAS_CACHE_DIR" in msg                      # and what to do
+    assert "quota" in msg                                # and the trap it hides
+
+
+def test_predicted_cache_size_matches_what_is_written(tmp_path):
+    """The preflight is only worth having if its number is the real one."""
+    import netCDF4
+
+    from gmpas.mesh import _cache_bytes
+
+    path = write_mesh(tmp_path / "sized.nc",
+                      [(float(i), 0.0) for i in range(500)])
+    with netCDF4.Dataset(path) as nc:
+        predicted = _cache_bytes(nc)
+
+    cache = cache_path(MpasMesh.load(path).path)
+    written = sum(f.stat().st_size for f in cache.glob("*.npy"))
+
+    # headers are the only difference: 11 arrays, 128 bytes of header at most
+    assert predicted <= written <= predicted + 11 * 128
+
+
+def test_streaming_writer_refuses_a_short_array(tmp_path):
+    """A file with fewer rows than its header claims would map as garbage."""
+    from gmpas.mesh import MeshCacheError, _NpyWriter
+
+    w = _NpyWriter(tmp_path / "short.npy", np.float64, (10, 2))
+    w.append(np.zeros((4, 2)))
+    with pytest.raises(MeshCacheError, match="4 rows of 10"):
+        w.close()
+
+
+def test_streamed_cache_round_trips_exactly(tmp_path):
+    """Switching off the writable mapping must not change a single byte."""
+    path = write_mesh(tmp_path / "exact.nc",
+                      [(float(i), float(i % 30) - 15.0) for i in range(400)],
+                      n_verts=[4 + (i % 3) for i in range(400)])
+
+    built = MpasMesh.load(path, use_cache=False)
+    cached = MpasMesh.load(path)
+
+    for field in ("cell_verts", "cell_wrapped", "edge_segs", "edge_wrapped"):
+        assert np.array_equal(np.asarray(getattr(cached, field)),
+                              getattr(built, field), equal_nan=False)
