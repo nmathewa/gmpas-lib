@@ -278,3 +278,37 @@ def test_gif_export_holds_every_step(tmp_path):
             assert im.n_frames == 4
     finally:
         v.series.close()
+
+
+def test_coastlines_stay_at_their_own_latitudes_past_a_pole():
+    """Frames are rendered 1.4x wider than the window, so every global view
+    asks for latitudes past +-90. `set_extent` used to clamp those to +-90 and
+    then stretch the result to fill the figure, drawing the coastlines about
+    1.4x too tall while the data raster spanned the box it was asked for. The
+    two slid apart, and because the overshoot changes with zoom, they slid by a
+    different amount at every zoom level.
+    """
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    from gmpas.viewer import _overlay
+
+    nx, ny = 400, 300
+    lat_max = 126.0
+    png = _overlay((-252.0, 252.0, -lat_max, lat_max), nx, ny)
+    ink = np.array(Image.open(io.BytesIO(png)).convert("RGBA"))[..., 3] > 0
+
+    rows = np.where(ink.any(axis=1))[0]
+    top = lat_max - (rows.min() + 0.5) / ny * 2 * lat_max
+    bottom = lat_max - (rows.max() + 0.5) / ny * 2 * lat_max
+
+    # no land is drawn past a pole, so no ink may appear there either
+    assert abs(top) <= 90.0
+    assert abs(bottom) <= 90.0
+    # and the band that is inked has to be real: northern Greenland reaches
+    # into the 80s, so a coastline drawn only within +-60 would mean the
+    # opposite mistake -- squashed rather than stretched
+    assert top > 60.0
+    assert bottom < -60.0

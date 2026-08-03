@@ -127,7 +127,16 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
 
     fig = plt.figure(figsize=(nx / 100, ny / 100), dpi=100)
     ax = fig.add_axes([0, 0, 1, 1], projection=src)
-    ax.set_extent((lon_min - central, lon_max - central, lat_min, lat_max), crs=src)
+
+    # Limits set directly, NOT through set_extent. set_extent clamps latitude
+    # to the projection's valid domain, so a box reaching past a pole -- which
+    # every global view does, because frames are rendered 1.4x wider than the
+    # window -- came back covering only +-90 but still stretched to fill the
+    # figure. The data raster spans the box it was asked for, so the two
+    # disagreed by the amount of overshoot, and since that amount changes with
+    # zoom the coastlines appeared to slide over the field as you zoomed.
+    ax.set_xlim(lon_min - central, lon_max - central)
+    ax.set_ylim(lat_min, lat_max)
 
     # GeoAxes defaults to aspect="equal", which letterboxes the extent inside
     # the figure box and leaves margins. The data raster spans the extent
@@ -351,25 +360,39 @@ class Viewer:
 # ----------------------------------------------------------------- serving
 
 
-def _handler(viewer: Viewer):
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):          # keep the console quiet
-            pass
+class PageHandler(BaseHTTPRequestHandler):
+    """What every gmpas page handler has in common.
 
-        def _send(self, body: bytes, ctype: str):
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+    Shared rather than copied because the dashboard mounts these handlers
+    behind a prefix by calling one's `do_GET` with another's `self`. That only
+    works if `_send` is part of the contract between them, so it lives here
+    instead of being repeated identically in each.
+    """
 
+    def log_message(self, *a):              # keep the console quiet
+        pass
+
+    def _send(self, body: bytes, ctype: str):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _handler(viewer: Viewer, html: str = ""):
+    """Routes for one run. `html` overrides the page, which is how the
+    dashboard splices its source switcher in without forking `PAGE`."""
+    html = html or PAGE
+
+    class Handler(PageHandler):
         def do_GET(self):
             url = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             try:
                 if url.path == "/":
-                    return self._send(PAGE.encode(), "text/html; charset=utf-8")
+                    return self._send(html.encode(), "text/html; charset=utf-8")
                 if url.path == "/api/status":
                     # cheap: how the time axis stands while the scan runs
                     return self._send(json.dumps({
@@ -729,7 +752,7 @@ function clamp(){
 }
 
 async function boot(){
-  M = await (await fetch("/api/meta")).json();
+  M = await (await fetch("api/meta")).json();
   $("#title").textContent = M.file;
   M.cmaps.forEach(c=>{const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
   home = fit(M.home); view = {...home}; rendered = null;
@@ -766,7 +789,7 @@ function pick(name){
 }
 async function pollScan(){
   if(!M||!M.scanning) return;
-  const s=await (await fetch("/api/status")).json();
+  const s=await (await fetch("api/status")).json();
   const keep=$("#time").value;
   M.steps=s.steps; M.labels=s.labels; M.scanning=s.scanning;
   $("#time").max=M.steps-1; $("#time").value=keep;
@@ -776,7 +799,7 @@ async function pollScan(){
 
 async function overlay(){
   const b=outset(boxOf(view));
-  $("#over").src=`/api/overlay?extent=${b.join(",")}`+
+  $("#over").src=`api/overlay?extent=${b.join(",")}`+
                  `&nx=${Math.round(M.nx*OUTSET)}&ny=${Math.round(M.ny*OUTSET)}`;
 }
 
@@ -896,7 +919,7 @@ async function draw(){
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
   const t0=performance.now();
-  const r=await fetch("/api/frame?"+p);
+  const r=await fetch("api/frame?"+p);
   if(!r.ok){ say((await r.json()).error); return; }
   const [lo,hi]=r.headers.get("X-Range").split(",").map(Number);
   const url=URL.createObjectURL(await r.blob());
@@ -959,7 +982,7 @@ async function animLoad(){
       const p=new URLSearchParams({var:cur.name, time:i, level:$("#level").value,
         extent:b.join(","), cmap:$("#cmap").value, nx, ny, vmin:lo, vmax:hi,
         compress:$("#quality").value});
-      const r=await fetch("/api/frame?"+p);
+      const r=await fetch("api/frame?"+p);
       if(!r.ok) throw new Error((await r.json()).error);
       urls[i]=URL.createObjectURL(await r.blob());
       await new Promise(res=>{ const im=new Image(); im.onload=im.onerror=res; im.src=urls[i]; });
@@ -1049,7 +1072,7 @@ async function exportAs(kind, label){
   }
   const t0=performance.now();
   try{
-    const r=await fetch(`/api/export/${kind}?`+p);
+    const r=await fetch(`api/export/${kind}?`+p);
     if(!r.ok) throw new Error((await r.json()).error);
     const blob=await r.blob();
     const name=(r.headers.get("Content-Disposition")||"").match(/filename="(.+?)"/);
@@ -1133,7 +1156,7 @@ $("#wrap").onpointerup = async ev=>{
   const lat=b[3]-((ev.clientY-r.top)/r.height)*(b[3]-b[2]);
   const q=new URLSearchParams({lon,lat,var:cur.name,
     time:$("#time").value,level:$("#level").value});
-  const d=await (await fetch("/api/probe?"+q)).json();
+  const d=await (await fetch("api/probe?"+q)).json();
   $("#probe2").innerHTML=`cell ${d.cell}<br>${d.lat}\u00b0, ${d.lon}\u00b0<br>`+
                          `<b>${d.value.toPrecision(6)}</b>`;
 };

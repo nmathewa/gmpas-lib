@@ -295,6 +295,32 @@ mesh generation is meant to be the third
 remapping tools, JIGSAW would be an external executable gmpas shells out to,
 not a Python dependency.
 
+### One server, one port
+
+A run, the mesh it is on, and the distance function behind that mesh are the
+three things one wants side by side, and they used to be three processes on
+three ports — three SSH tunnels from a compute node. They are now one:
+
+```bash
+gmpas view /path/to/run/ --hfun hfun.py     # data + mesh + hfun
+gmpas prep view mesh.nc --hfun hfun.py      # mesh + hfun
+gmpas prep hfun hfun.py --mesh mesh.nc      # hfun + mesh
+```
+
+```
+2 sources on one port:
+  /mesh  mesh — maritime.region.nc · 8,228 cells
+  /hfun  hfun — hfun.py · 12 to 60 km · gradient 0.0300
+```
+
+`/` lists what is available and each page carries a switcher, so one tunnel
+reaches all of them. Opening a run gives the mesh page for free — a run always
+brings its mesh with it. Every source is constructed before the server binds,
+so a bad path is an error at the prompt rather than a 500 in a browser tab.
+
+A single source is unchanged: it is served at the root, with no index and no
+switcher, on exactly the paths it always used.
+
 ### Looking at a mesh before it exists
 
 ```bash

@@ -280,3 +280,17 @@ def test_a_bad_hfun_file_is_reported_not_traced(tmp_path, capsys):
     path.write_text("hfun_min = 12.0\n")
     assert main(["prep", "hfun", str(path), "--check"]) == 1
     assert "get_hfun" in capsys.readouterr().err
+
+
+def test_nothing_is_drawn_past_a_pole(viewer):
+    """get_hfun answers for |lat| > 90 -- sin and cos are periodic, so it folds
+    back and mirrors the other hemisphere. There is no sphere there and no
+    coastline to sit under it, so the frame must be blank instead."""
+    values = viewer.values("cell_width_km", [-180.0, 180.0, -126.0, 126.0],
+                           40, 60)
+    lat = np.linspace(-126.0, 126.0, 60, endpoint=False) + 126.0 / 60
+
+    past = np.abs(lat) > 90.0
+    assert past.any()                              # the test is testing something
+    assert np.isnan(values[past]).all()
+    assert np.isfinite(values[~past]).all()
