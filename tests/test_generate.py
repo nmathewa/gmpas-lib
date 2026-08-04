@@ -53,8 +53,13 @@ def write_hfun_py(path, h_min=COARSE, h_max=400.0, t_end=20000.0):
 
 
 jigsaw_available = pytest.mark.skipif(
-    shutil.which("jigsaw") is None and not os.environ.get("JIGSAWDIR"),
-    reason="jigsaw is not installed (set JIGSAWDIR or put it on PATH)",
+    not os.environ.get("JIGSAWDIR"),
+    reason="jigsaw is not available (set JIGSAWDIR)",
+)
+
+mkgrid_available = pytest.mark.skipif(
+    not os.environ.get("MKGRIDFILE"),
+    reason="mkgrid is not available (set MKGRIDFILE)",
 )
 
 
@@ -195,7 +200,8 @@ def test_a_steep_transition_stops_the_run_before_jigsaw(tmp_path):
     steep = write_hfun_py(tmp_path / "steep" / "hfun.py",
                           h_max=400.0, t_end=2400.0)
     with pytest.raises(GenerateError) as exc:
-        generate(steep, out_dir=tmp_path / "out", jigsaw="/bin/echo")
+        generate(steep, out_dir=tmp_path / "out", jigsaw="/bin/echo",
+                 skip_mkgrid=True)
 
     msg = str(exc.value)
     assert "gradient" in msg
@@ -215,7 +221,8 @@ def test_the_executable_is_found_before_the_function_is_read(tmp_path, monkeypat
     monkey = tmp_path / "hfun.py"
     monkey.write_text("hfun_min = 12.0\n")
     with pytest.raises(GenerateError, match="dengwirda"):
-        generate(monkey, out_dir=tmp_path / "out", jigsaw=None)
+        generate(monkey, out_dir=tmp_path / "out", jigsaw=None,
+                 skip_mkgrid=True)
 
 
 # ------------------------------------------------------------------ real runs
@@ -229,7 +236,8 @@ def test_jigsaw_produces_a_sphere_triangulation(tmp_path):
     resolution, so it checks the run really produced a mesh rather than a file.
     """
     hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
-    result = generate(hfun, out_dir=tmp_path / "out", quiet=True)
+    result = generate(hfun, out_dir=tmp_path / "out", quiet=True,
+                      skip_mkgrid=True)
 
     assert result.points > 100
     assert result.triangles == 2 * result.points - 4
@@ -242,13 +250,14 @@ def test_a_second_run_reuses_the_mesh_unless_forced(tmp_path):
     hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
     out = tmp_path / "out"
 
-    first = generate(hfun, out_dir=out, quiet=True)
-    again = generate(hfun, out_dir=out, quiet=True)
+    first = generate(hfun, out_dir=out, quiet=True, skip_mkgrid=True)
+    again = generate(hfun, out_dir=out, quiet=True, skip_mkgrid=True)
     assert again.reused
     assert again.points == first.points
     assert again.seconds == 0.0
 
-    forced = generate(hfun, out_dir=out, quiet=True, force=True)
+    forced = generate(hfun, out_dir=out, quiet=True, force=True,
+                      skip_mkgrid=True)
     assert not forced.reused
 
 
@@ -262,7 +271,8 @@ def test_a_failing_jigsaw_is_reported_in_its_own_words(tmp_path):
 
     hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
     with pytest.raises(GenerateError) as exc:
-        generate(hfun, out_dir=tmp_path / "out", jigsaw=stub, quiet=True)
+        generate(hfun, out_dir=tmp_path / "out", jigsaw=stub, quiet=True,
+                 skip_mkgrid=True)
 
     msg = str(exc.value)
     assert "exit 3" in msg
@@ -277,7 +287,8 @@ def test_a_jigsaw_that_exits_cleanly_without_a_mesh_still_fails(tmp_path):
 
     hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
     with pytest.raises(GenerateError, match="exit 0"):
-        generate(hfun, out_dir=tmp_path / "out", jigsaw=stub, quiet=True)
+        generate(hfun, out_dir=tmp_path / "out", jigsaw=stub, quiet=True,
+                 skip_mkgrid=True)
 
 
 # ------------------------------------------------------- what mkgrid reads
@@ -410,7 +421,7 @@ def test_the_mkgrid_argument_is_in_metres(tmp_path):
 def test_a_whole_run_leaves_everything_mkgrid_needs(tmp_path):
     hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
     out = tmp_path / "out"
-    result = generate(hfun, out_dir=out, quiet=True)
+    result = generate(hfun, out_dir=out, quiet=True, skip_mkgrid=True)
 
     for name in ("MESH.msh", "SaveVertices", "SaveTriangles", "SaveDensity",
                  "SaveCode"):
@@ -422,3 +433,122 @@ def test_a_whole_run_leaves_everything_mkgrid_needs(tmp_path):
     assert len(verts) == result.points
     assert len(tris) == result.triangles
     assert len(density) == result.points        # one per generating point
+
+
+# ------------------------------------------- the tools are prerequisites now
+
+
+def test_a_missing_jigsawdir_names_the_variable(tmp_path, monkeypatch):
+    monkeypatch.delenv("JIGSAWDIR", raising=False)
+    with pytest.raises(GenerateError) as exc:
+        find_jigsaw()
+    msg = str(exc.value)
+    assert "$JIGSAWDIR is not set" in msg
+    assert "github.com/dengwirda/jigsaw" in msg      # where to get it
+    assert "--jigsaw" in msg                         # and the override
+
+
+def test_a_missing_mkgridfile_names_the_variable(monkeypatch):
+    from gmpas.prep.generate import find_mkgrid
+
+    monkeypatch.delenv("MKGRIDFILE", raising=False)
+    with pytest.raises(GenerateError) as exc:
+        find_mkgrid()
+    msg = str(exc.value)
+    assert "$MKGRIDFILE is not set" in msg
+    # mkgrid is not released anywhere -- the message has to say where it lives
+    assert "mpas_jigsaw_tutorial" in msg
+    assert "mkgrid.c" in msg
+    assert "--mkgrid" in msg
+
+
+def test_neither_tool_falls_back_to_path(tmp_path, monkeypatch):
+    """PATH is deliberately not consulted: silently picking up some other
+    binary called `jigsaw` is worse than a sentence naming the variable."""
+    from gmpas.prep.generate import find_mkgrid
+
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    for name in ("jigsaw", "mkgrid"):
+        exe = fake / name
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake))
+    monkeypatch.delenv("JIGSAWDIR", raising=False)
+    monkeypatch.delenv("MKGRIDFILE", raising=False)
+
+    with pytest.raises(GenerateError, match="JIGSAWDIR"):
+        find_jigsaw()
+    with pytest.raises(GenerateError, match="MKGRIDFILE"):
+        find_mkgrid()
+
+
+def test_both_tools_are_located_before_any_work(tmp_path, monkeypatch):
+    """mkgrid missing must not be discovered after JIGSAW has run for minutes,
+    so it is resolved up front -- before the output directory even exists."""
+    monkeypatch.setenv("JIGSAWDIR", str(tmp_path))
+    monkeypatch.delenv("MKGRIDFILE", raising=False)
+    exe = tmp_path / "jigsaw"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+
+    hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
+    out = tmp_path / "out"
+    with pytest.raises(GenerateError, match="MKGRIDFILE"):
+        generate(hfun, out_dir=out, quiet=True)
+    assert not out.exists()          # nothing was created
+
+
+def test_mkgridfile_may_be_the_directory_or_the_binary(tmp_path, monkeypatch):
+    from gmpas.prep.generate import find_mkgrid
+
+    exe = tmp_path / "mkgrid"
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+
+    monkeypatch.setenv("MKGRIDFILE", str(tmp_path))
+    assert find_mkgrid() == exe.resolve()
+    monkeypatch.setenv("MKGRIDFILE", str(exe))
+    assert find_mkgrid() == exe.resolve()
+
+
+def test_a_failing_mkgrid_is_reported_in_its_own_words(tmp_path):
+    stub_jig = tmp_path / "jigsaw"
+    stub_jig.write_text("#!/bin/sh\ncp MESH_STUB MESH.msh\n")
+    stub_jig.chmod(0o755)
+    stub_mk = tmp_path / "mkgrid"
+    stub_mk.write_text("#!/bin/sh\necho 'mkgrid: cannot read SaveDensity'\nexit 4\n")
+    stub_mk.chmod(0o755)
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "MESH_STUB").write_text(MSH)
+
+    hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
+    with pytest.raises(GenerateError) as exc:
+        generate(hfun, out_dir=out, jigsaw=stub_jig, mkgrid=stub_mk, quiet=True)
+
+    msg = str(exc.value)
+    assert "exit 4" in msg
+    assert "cannot read SaveDensity" in msg      # mkgrid's words, not ours
+
+
+@jigsaw_available
+@mkgrid_available
+def test_one_command_reaches_grid_nc(tmp_path):
+    """The whole point of the streamlining: hfun.py in, grid.nc out."""
+    hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
+    out = tmp_path / "out"
+    result = generate(hfun, out_dir=out, quiet=True)
+
+    assert result.grid_nc is not None
+    assert result.grid_nc.exists()
+    assert result.graph_info is not None and result.graph_info.exists()
+    # mkgrid builds one cell per generating point
+    assert result.cells == result.points
+
+    # and gmpas can open what it just built
+    from gmpas import MpasMesh
+
+    mesh = MpasMesh.load(result.grid_nc)
+    assert mesh.n_cells == result.points

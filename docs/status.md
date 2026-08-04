@@ -14,11 +14,10 @@ everything `mkgrid` reads.
 
 ## Not implemented
 
-- **`mkgrid`**, the last leg from JIGSAW's output to an MPAS `grid.nc`
-  ([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)). It needs MPI
-  and PnetCDF, so it cannot simply be vendored. Everything feeding it is
-  produced by `gmpas prep generate`, and the command prints the exact
-  `mkgrid` line to run, with `nominalMinDc` already converted to metres.
+- **Bundling JIGSAW or mkgrid.** Both are external executables gmpas shells
+  out to, named by `$JIGSAWDIR` and `$MKGRIDFILE`. `gmpas prep generate` runs
+  the whole chain through to `grid.nc`, but only if you have built them
+  ([issue 30](https://github.com/nmathewa/gmpas-lib/issues/30)).
 - **Applying weights from the command line**
   ([issue 2](https://github.com/nmathewa/gmpas-lib/issues/2)). `ncremap -m`
   does it today.

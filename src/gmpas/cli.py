@@ -123,8 +123,9 @@ one time series across files, which is how MPAS writes output.
 environment:
   GMPAS_CACHE_DIR   where cached mesh geometry goes (default ~/.cache/gmpas/mesh)
   GMPAS_DATA_DIR    tried first when resolving relative paths
-  JIGSAWDIR         the jigsaw executable, or the directory holding it,
-                    for `gmpas prep generate`
+  JIGSAWDIR         the jigsaw executable, or the directory holding it
+  MKGRIDFILE        the mkgrid executable, or the directory holding it
+                    both required by `gmpas prep generate`
 """
 
 
@@ -566,7 +567,8 @@ def _prep_generate(args) -> int:
     print(f"generating a mesh from {args.hfun_file}")
     result = generate(args.hfun_file, out_dir=args.out, jigsaw=args.jigsaw,
                       qlim=args.qlim, init=args.init, force=args.force,
-                      allow_steep=args.allow_steep)
+                      allow_steep=args.allow_steep, mkgrid=args.mkgrid,
+                      skip_mkgrid=args.skip_mkgrid)
     print(next_steps(result, args.out))
     return 0
 
@@ -729,9 +731,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "get_hfun(lon, lat)")
     pg.add_argument("-o", "--out", default="mesh",
                    help="directory for the JIGSAW files (default: mesh/)")
-    pg.add_argument("--jigsaw", help="path to the jigsaw executable, or the "
-                                     "directory holding it. Defaults to "
-                                     "$JIGSAWDIR, then PATH")
+    pg.add_argument("--jigsaw", help="the jigsaw executable, or the directory "
+                                     "holding it. Overrides $JIGSAWDIR, which "
+                                     "is otherwise required")
+    pg.add_argument("--mkgrid", help="the mkgrid executable, or the directory "
+                                     "holding it. Overrides $MKGRIDFILE, which "
+                                     "is otherwise required")
+    pg.add_argument("--skip-mkgrid", action="store_true",
+                    help="stop after the Save* files, without building "
+                         "grid.nc (then $MKGRIDFILE is not needed)")
     pg.add_argument("--init", help="a JIGSAW mesh file of initial points, for "
                                    "a quasi-uniform mesh with icosahedral "
                                    "structure (INIT_FILE)")

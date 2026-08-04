@@ -1,7 +1,7 @@
 # gmpas
 
 [![tests](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml/badge.svg)](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml)
-[![version](https://img.shields.io/badge/version-0.4.0-blue)](docs/status.md)
+[![version](https://img.shields.io/badge/version-0.4.1-blue)](docs/status.md)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](docs/installation.md)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -58,7 +58,7 @@ gmpas view          /path/to/run/
 gmpas remap         history.*.nc -o out/
 gmpas prep view     mesh.nc
 gmpas prep hfun     hfun.py --check
-gmpas prep generate hfun.py -o mesh/
+gmpas prep generate hfun.py -o mesh/     # needs $JIGSAWDIR and $MKGRIDFILE
 ```
 
 Any path may be a file, a directory, or a glob; a directory or glob is read as
