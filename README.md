@@ -1,7 +1,7 @@
 # gmpas
 
 [![tests](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml/badge.svg)](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml)
-[![version](https://img.shields.io/badge/version-0.3.0-blue)](docs/status.md)
+[![version](https://img.shields.io/badge/version-0.4.0-blue)](docs/status.md)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](docs/installation.md)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
