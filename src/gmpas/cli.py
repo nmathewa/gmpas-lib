@@ -107,6 +107,9 @@ examples:
   gmpas view  run/                          browse interactively in a browser
   gmpas view  run/ --host 0.0.0.0 --no-browser   on an HPC compute node
 
+  gmpas prep hfun     hfun.py --check     the mesh you are about to build
+  gmpas prep generate hfun.py -o mesh/    run JIGSAW and build it
+
 on a cluster the job runs on a compute node but your tunnel lands on the login
 node, so bind all interfaces and tunnel to the node by name:
 
@@ -120,6 +123,8 @@ one time series across files, which is how MPAS writes output.
 environment:
   GMPAS_CACHE_DIR   where cached mesh geometry goes (default ~/.cache/gmpas/mesh)
   GMPAS_DATA_DIR    tried first when resolving relative paths
+  JIGSAWDIR         the jigsaw executable, or the directory holding it,
+                    for `gmpas prep generate`
 """
 
 
@@ -554,6 +559,18 @@ def _prep_hfun(args) -> int:
                       hfun_path=args.hfun_file)
 
 
+def _prep_generate(args) -> int:
+    from .prep.generate import generate, next_steps
+
+    print(banner())
+    print(f"generating a mesh from {args.hfun_file}")
+    result = generate(args.hfun_file, out_dir=args.out, jigsaw=args.jigsaw,
+                      qlim=args.qlim, init=args.init, force=args.force,
+                      allow_steep=args.allow_steep)
+    print(next_steps(result, args.out))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gmpas",
@@ -657,7 +674,7 @@ def build_parser() -> argparse.ArgumentParser:
     pre = sub.add_parser("prep", help="preprocessing: inspect and build meshes",
                          description="Preprocessing steps, which run before "
                                      "there is any model output to plot.")
-    presub = pre.add_subparsers(dest="prep_cmd", metavar="{view,hfun}")
+    presub = pre.add_subparsers(dest="prep_cmd", metavar="{view,hfun,generate}")
     # a bare `gmpas prep` should list its steps, not error
     pre.set_defaults(func=lambda _a, _p=pre: (_p.print_help(), 0)[1])
 
@@ -704,6 +721,29 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--no-browser", action="store_true",
                     help="do not open a browser (useful over an SSH tunnel)")
     ph.set_defaults(func=_prep_hfun)
+
+    pg = presub.add_parser("generate", help="run JIGSAW to build a mesh from "
+                                            "an hfun.py")
+    pg.add_argument("hfun_file", metavar="HFUN",
+                    help="a JIGSAW hfun.py defining hfun_min and "
+                         "get_hfun(lon, lat)")
+    pg.add_argument("-o", "--out", default="mesh",
+                   help="directory for the JIGSAW files (default: mesh/)")
+    pg.add_argument("--jigsaw", help="path to the jigsaw executable, or the "
+                                     "directory holding it. Defaults to "
+                                     "$JIGSAWDIR, then PATH")
+    pg.add_argument("--init", help="a JIGSAW mesh file of initial points, for "
+                                   "a quasi-uniform mesh with icosahedral "
+                                   "structure (INIT_FILE)")
+    pg.add_argument("--qlim", type=float, default=0.9375,
+                    help="JIGSAW's OPTM_QLIM mesh-quality limit "
+                         "(default 0.9375)")
+    pg.add_argument("--force", action="store_true",
+                    help="regenerate even if MESH.msh already exists")
+    pg.add_argument("--allow-steep", action="store_true",
+                    help="generate even if the cell size gradient is above "
+                         "the guideline")
+    pg.set_defaults(func=_prep_generate)
     return p
 
 
@@ -737,11 +777,12 @@ def main(argv=None) -> int:
         return 0
 
     from .mesh import MeshCacheError
+    from .prep.generate import GenerateError
     from .remap import RemapError
 
     try:
         return args.func(args)
-    except (RemapError, MeshCacheError) as exc:
+    except (RemapError, MeshCacheError, GenerateError) as exc:
         print(f"\ngmpas: {exc}", file=sys.stderr)
         return 1
     except (FileNotFoundError, KeyError, ValueError) as exc:

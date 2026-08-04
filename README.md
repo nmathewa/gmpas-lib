@@ -112,6 +112,7 @@ gmpas scrip      history.2012-02-25_12.00.00.nc -o src.scrip.nc
 gmpas target     -o dst.scrip.nc
 gmpas prep view  mesh.nc
 gmpas prep hfun  hfun.py
+gmpas prep generate hfun.py -o mesh/
 ```
 
 `info` summarises the mesh and lists variables grouped by the element they
@@ -320,6 +321,60 @@ so a bad path is an error at the prompt rather than a 500 in a browser tab.
 
 A single source is unchanged: it is served at the root, with no index and no
 switcher, on exactly the paths it always used.
+
+### Generating a mesh with JIGSAW
+
+```bash
+export JIGSAWDIR=/path/to/jigsaw/build/src     # or wherever it installed
+gmpas prep generate hfun.py -o mesh/
+```
+
+Same division of labour as the remapping side: gmpas does not generate the mesh
+itself, it prepares every input JIGSAW needs, shells out, and reads the result
+back. What it adds is everything around the call.
+
+```
+  hfun.py: 12 to 60 km, max gradient 0.0300
+  sampling hfun onto 3336 x 1668 (5.6M points)
+  wrote GEOM.msh, HFUN.msh (32 MB) and MESH.jig
+  running jigsaw — this is the slow part
+  MESH.msh: 9,734 generating points, 19,464 triangles in 8.7 s
+```
+
+`HFUN.msh` is written the way `create_hfun.py` writes it — the same grid, the
+same `meshgrid(lats, lons)` argument order, and therefore the same
+longitude-major value ordering. Getting that order wrong would transpose the
+distance function and refine the wrong part of the planet *without failing*, so
+there is a test comparing the file back against the function elementwise.
+
+**The distance function is checked before any time is spent.** Generation takes
+minutes; measuring the gradient takes a second. A transition steeper than the
+0.03 guideline stops the run rather than producing a mesh you would throw away:
+
+```
+gmpas: hfun.py has a maximum cell size gradient of 0.0501 at 41.2, -95.0,
+above the 0.03 guideline. A mesh built from it will change cell size too
+quickly to be well behaved.
+  Widen the transition region, or raise hfun_min.
+  Pass --allow-steep to generate it anyway.
+```
+
+JIGSAW is found by `--jigsaw`, then `$JIGSAWDIR`, then `PATH` — in that order.
+PATH is last because JIGSAW installs wherever `CMAKE_INSTALL_PREFIX` pointed
+and its build tree leaves the binary in `build/src/`, so on most machines it is
+not on PATH at all. `$JIGSAWDIR` accepts either the binary or the directory
+holding it.
+
+`MESH.msh` is reused if it is already there, unless `--force`. `--init` passes
+an initial point set through to `INIT_FILE`, which is what gives a
+quasi-uniform mesh icosahedral structure — a constant `HFUN` alone produces
+7-sided cells.
+
+**This is the first half of the workflow.** Turning `MESH.msh` into an MPAS
+`grid.nc` still needs `convert_jigsaw.py`, `create_density.py` and then
+`mkgrid`, and gmpas does not run those yet — `mkgrid` needs MPI and PnetCDF,
+which is a separate problem from running JIGSAW. The command says so when it
+finishes.
 
 ### Looking at a mesh before it exists
 
@@ -554,10 +609,12 @@ KD-tree gives area weights by supersampling a target cell and counting which
 source cells the samples land in, which — unlike barycentric sampling —
 actually conserves cell integrals.
 
-Preprocessing has begun: `gmpas prep view` and `gmpas prep hfun` are
-implemented — the two ends of looking at a mesh, one after it exists and one
-before. `gmpas prep generate` — actually running JIGSAW — is not
-([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)). That one is
-blocked on a question rather than on effort: JIGSAW writes its own `.msh`
-format, and converting it to a mesh `MpasMesh.load()` can open conventionally
-needs `mkgrid`, which wants MPI and PnetCDF.
+Preprocessing now covers `prep view`, `prep hfun` and `prep generate` — looking
+at a mesh after it exists, looking at one before it exists, and running JIGSAW
+to get from the second to the first.
+
+What is still missing is the last leg, from JIGSAW's `MESH.msh` to an MPAS
+`grid.nc` ([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)).
+`convert_jigsaw.py` and `create_density.py` are small and pure Python;
+`mkgrid` is the real obstacle, since it needs MPI and PnetCDF and so cannot
+simply be vendored.
