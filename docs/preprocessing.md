@@ -74,21 +74,65 @@ switcher, on exactly the paths it always used.
 ### Generating a mesh with JIGSAW
 
 ```bash
-export JIGSAWDIR=/path/to/jigsaw/build/src     # or wherever it installed
+export JIGSAWDIR=/path/to/jigsaw/build/src            # or .../bin
+export MKGRIDFILE=/path/to/mpas_jigsaw_tutorial/mkgrid
 gmpas prep generate hfun.py -o mesh/
 ```
 
-Same division of labour as the remapping side: gmpas does not generate the mesh
-itself, it prepares every input JIGSAW needs, shells out, and reads the result
-back. What it adds is everything around the call.
+One command from a distance function to an MPAS `grid.nc`:
 
 ```
-  hfun.py: 12 to 60 km, max gradient 0.0300
-  sampling hfun onto 3336 x 1668 (5.6M points)
-  wrote GEOM.msh, HFUN.msh (32 MB) and MESH.jig
+  hfun_uniform.py: 120 to 120 km, max gradient 0.0000
+  sampling hfun onto 334 x 167 (0.1M points)
+  wrote GEOM.msh, HFUN.msh (0 MB) and MESH.jig
   running jigsaw — this is the slow part
-  MESH.msh: 9,734 generating points, 19,464 triangles in 8.7 s
+  MESH.msh: 41,225 generating points, 82,446 triangles in 37.4 s
+  SaveVertices (41,225) and SaveTriangles (82,446)
+  SaveDensity (1 to 1)
+  running mkgrid 120000 (nominalMinDc in metres = hfun_min * 1000)
+  grid.nc: 41,225 cells (49 MB) in 0.4 s
 ```
+
+Same division of labour as the remapping side: gmpas does not generate the mesh
+itself, it prepares every input the external tools need, shells out, and reads
+the result back.
+
+#### Both executables are prerequisites
+
+`$JIGSAWDIR` and `$MKGRIDFILE` must be set, or the run stops before it starts.
+Either variable takes the executable itself or the directory holding it, and
+`--jigsaw` / `--mkgrid` override them.
+
+**There is deliberately no `PATH` fallback.** Both tools are built by hand into
+a location of the builder's choosing — JIGSAW wherever `CMAKE_INSTALL_PREFIX`
+pointed, `mkgrid` wherever the tutorial repository was cloned — so `PATH` is the
+exception rather than the rule, and silently picking up some other binary of the
+same name is a worse outcome than a sentence naming the variable to set.
+
+Both are resolved **before any work**, because discovering that `mkgrid` is
+missing after JIGSAW has run for five minutes helps nobody:
+
+```
+gmpas: $MKGRIDFILE is not set, so mkgrid cannot be run.
+  It is mkgrid.c in the mini-tutorial repository, and has to be built:
+    git clone https://github.com/mgduda/mpas_jigsaw_tutorial.git
+    cd mpas_jigsaw_tutorial
+    export PNETCDF=$(brew --prefix pnetcdf)   # or your PnetCDF prefix
+    make                                      # needs mpicc
+  then:
+    export MKGRIDFILE=<path>/mpas_jigsaw_tutorial/mkgrid
+  or pass --mkgrid.
+```
+
+`mkgrid` is not released anywhere on its own — it is `mkgrid.c` in the
+[mini-tutorial repository](https://github.com/mgduda/mpas_jigsaw_tutorial),
+built against MPI and PnetCDF. JIGSAW is also on conda-forge
+(`conda install -c conda-forge jigsaw`) if you would rather not build it.
+
+Use `--skip-mkgrid` to stop after the `Save*` files; `$MKGRIDFILE` is then not
+needed.
+
+#### What it writes
 
 `HFUN.msh` is written the way `create_hfun.py` writes it — the same grid, the
 same `meshgrid(lats, lons)` argument order, and therefore the same
@@ -96,9 +140,24 @@ longitude-major value ordering. Getting that order wrong would transpose the
 distance function and refine the wrong part of the planet *without failing*, so
 there is a test comparing the file back against the function elementwise.
 
-**The distance function is checked before any time is spent.** Generation takes
-minutes; measuring the gradient takes a second. A transition steeper than the
-0.03 guideline stops the run rather than producing a mesh you would throw away:
+`SaveVertices` and `SaveTriangles` carry the file's own tokens rather than
+floats reformatted by us, so JIGSAW's precision survives and the triangle
+indices stay exactly as written — 0-based, which is what `mkgrid` expects.
+`SaveDensity` is MPAS's `meshDensity`, `(h_fine / h(x)) ** 4`, one value per
+generating point. All three were checked **byte for byte** against the
+tutorial's own scripts.
+
+A real `MESH.msh` has a `POWER` block between `POINT` and `TRIA3` — per-point
+weights for a power diagram — which `convert_jigsaw.py` skips only as a side
+effect of its counter staying at the limit across those lines. gmpas dispatches
+on section headers instead, so an unfamiliar block is ignored because it is
+unfamiliar rather than by luck.
+
+#### Checked before any time is spent
+
+Generation takes minutes; measuring the gradient takes a second. A transition
+steeper than the 0.03 guideline stops the run rather than producing a mesh you
+would throw away:
 
 ```
 gmpas: hfun.py has a maximum cell size gradient of 0.0501 at 41.2, -95.0,
@@ -108,59 +167,27 @@ quickly to be well behaved.
   Pass --allow-steep to generate it anyway.
 ```
 
-JIGSAW is found by `--jigsaw`, then `$JIGSAWDIR`, then `PATH` — in that order.
-PATH is last because JIGSAW installs wherever `CMAKE_INSTALL_PREFIX` pointed
-and its build tree leaves the binary in `build/src/`, so on most machines it is
-not on PATH at all. `$JIGSAWDIR` accepts either the binary or the directory
-holding it.
+`MESH.msh` and `grid.nc` are reused if already present, unless `--force`.
+`--init` passes an initial point set through to `INIT_FILE`, which is what
+gives a quasi-uniform mesh icosahedral structure — a constant `HFUN` alone
+produces 7-sided cells.
 
-`MESH.msh` is reused if it is already there, unless `--force`. `--init` passes
-an initial point set through to `INIT_FILE`, which is what gives a
-quasi-uniform mesh icosahedral structure — a constant `HFUN` alone produces
-7-sided cells.
+#### A trap worth knowing
 
-After JIGSAW, the run continues into the two conversion steps, so the output
-directory ends up holding everything `mkgrid` reads:
+`MESH.jig` names `GEOM.msh` and `HFUN.msh` **relatively**, and JIGSAW resolves
+those against its *working directory* — not the `.jig` file's directory, and not
+the executable's. Measured:
 
-```
-  SaveVertices   9,734 generating points
-  SaveTriangles  19,464 triangles
-  SaveDensity    the mesh density at each point
-  SaveCode       a copy of the hfun.py that produced them
-```
+| setup | result |
+|---|---|
+| cwd = the files' directory, binary called by absolute path | works |
+| cwd elsewhere, `.jig` passed by absolute path | fails |
+| cwd elsewhere, binary symlinked into cwd | fails |
+| cwd elsewhere, absolute paths written inside `MESH.jig` | works |
 
-`SaveVertices` and `SaveTriangles` carry the file's own tokens rather than
-floats reformatted by us, so JIGSAW's precision survives the trip, and the
-triangle indices are left exactly as JIGSAW wrote them — 0-based, which is what
-`mkgrid` expects. `SaveDensity` is MPAS's `meshDensity`:
-
-```
-rho(x) = (h_fine / h(x)) ** 4
-```
-
-one value per generating point, 1.0 where the mesh is finest.
-
-Two details are worth knowing. A real `MESH.msh` has a `POWER` block between
-`POINT` and `TRIA3` — the per-point weights for a power diagram — which
-`convert_jigsaw.py` skips only as a side effect of its counter staying at the
-limit across those lines; gmpas dispatches on section headers instead, so an
-unfamiliar block is ignored because it is unfamiliar rather than by luck. And
-`create_density` reuses the coordinates already parsed out of `MESH.msh`
-instead of reading back the `SaveVertices` it just wrote with `np.loadtxt`.
-
-All three files were checked **byte for byte** against the tutorial's own
-scripts run on the same mesh with the same interpreter.
-
-**The one step gmpas does not take is `mkgrid`**, which needs MPI and PnetCDF:
-
-```bash
-cd mesh/ && mkgrid 12000
-```
-
-That argument is `nominalMinDc` in **metres** while `hfun.py` works in km
-throughout — the one unit seam in this workflow, and an easy factor of a
-thousand to get wrong — so the command computes it for you and prints the line
-to run.
+gmpas always runs it in the output directory, so this cannot bite here. It is
+recorded because it does bite when running JIGSAW by hand: it prints
+`**parse error: file not found!` and exits 2.
 
 ### Looking at a mesh before it exists
 

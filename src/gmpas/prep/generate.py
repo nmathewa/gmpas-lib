@@ -35,6 +35,11 @@ from .hfun import GRADIENT_GUIDELINE, R_EARTH_KM, Hfun, analysis_grid, diagnose
 #: said. Either the executable itself or the directory holding it.
 JIGSAW_ENV = "JIGSAWDIR"
 
+#: environment variable pointing at mkgrid. mkgrid is not released anywhere on
+#: its own -- it is mkgrid.c in the mini-tutorial repository, built against MPI
+#: and PnetCDF -- so there is no package to depend on and no PATH convention.
+MKGRID_ENV = "MKGRIDFILE"
+
 #: what `MESH.jig` says. Straight from the tutorial; MESH_FILE and the two
 #: input files are filled in per run.
 JIG_TEMPLATE = """# written by gmpas prep generate
@@ -68,6 +73,10 @@ class Generated:
     reused: bool
     out_dir: Path = Path(".")
     hfun_min_km: float = 0.0
+    grid_nc: Path | None = None      # set once mkgrid has run
+    graph_info: Path | None = None
+    cells: int = 0
+    mkgrid_seconds: float = 0.0
 
     @property
     def nominal_min_dc(self) -> float:
@@ -83,47 +92,73 @@ class Generated:
 # ------------------------------------------------------------- the executable
 
 
-def find_jigsaw(explicit: str | Path | None = None) -> Path:
-    """Locate the JIGSAW executable: `--jigsaw`, then `$JIGSAWDIR`, then PATH.
+def _resolve_tool(explicit, env_var: str, name: str, how: str) -> Path:
+    """An external executable, from `--flag` or from the environment.
 
-    PATH last, not first. JIGSAW installs wherever `CMAKE_INSTALL_PREFIX`
-    pointed and its build tree leaves the binary in `build/src/`, so on most
-    machines it is not on PATH at all and `$JIGSAWDIR` is how you say where it
-    went. Either form works — the directory holding it, or the binary itself —
-    because both are things people reasonably put in that variable.
+    Deliberately no PATH fallback. Both of these are built by hand into a
+    location of the builder's choosing -- JIGSAW wherever CMAKE_INSTALL_PREFIX
+    pointed, mkgrid wherever the tutorial repository was cloned -- so PATH is
+    the exception rather than the rule, and silently picking up some other
+    binary of the same name is a worse outcome than a sentence saying which
+    variable to set. Naming the tool is a prerequisite, like a compiler.
     """
-    if explicit:
-        p = Path(explicit).expanduser()
-        if p.is_dir():                       # a build directory, not the binary
-            p = p / "jigsaw"
-        if not p.exists():
-            raise GenerateError(
-                f"no jigsaw executable at {p}. Point --jigsaw or "
-                f"${JIGSAW_ENV} at the binary, or at the directory holding it."
-            )
-        if not os.access(p, os.X_OK):
-            raise GenerateError(f"{p} is not executable")
-        return p.resolve()
+    if not explicit:
+        explicit = os.environ.get(env_var)
+    if not explicit:
+        raise GenerateError(
+            f"${env_var} is not set, so {name} cannot be run.\n{how}"
+        )
 
-    env = os.environ.get(JIGSAW_ENV)
-    if env:
-        return find_jigsaw(env)
+    p = Path(explicit).expanduser()
+    if p.is_dir():                    # the directory holding it, not the binary
+        p = p / name
+    if not p.exists():
+        raise GenerateError(
+            f"no {name} executable at {p}\n"
+            f"  Point ${env_var} at the binary, or at the directory holding it."
+        )
+    if not os.access(p, os.X_OK):
+        raise GenerateError(
+            f"{p} is not executable\n"
+            f"  chmod +x it, or point ${env_var} somewhere else."
+        )
+    return p.resolve()
 
-    found = shutil.which("jigsaw")
-    if found:
-        return Path(found).resolve()
 
-    raise GenerateError(
-        f"jigsaw is not on your PATH and ${JIGSAW_ENV} is not set, so the "
-        f"mesh cannot be generated. Build it with:\n"
-        f"    git clone https://github.com/dengwirda/jigsaw.git\n"
-        f"    cd jigsaw && mkdir build && cd build\n"
-        f"    cmake .. -DCMAKE_BUILD_TYPE=Release "
-        f"-DCMAKE_INSTALL_PREFIX=<where>\n"
-        f"    make -j 4 install\n"
-        f"then point gmpas at it:\n"
-        f"    export {JIGSAW_ENV}=<where>/bin          # or .../build/src\n"
-        f"or pass --jigsaw. gmpas deliberately does not generate meshes itself."
+def find_jigsaw(explicit: str | Path | None = None) -> Path:
+    """The JIGSAW executable, from `--jigsaw` or `$JIGSAWDIR`."""
+    return _resolve_tool(
+        explicit, JIGSAW_ENV, "jigsaw",
+        "  Build it:\n"
+        "    git clone https://github.com/dengwirda/jigsaw.git\n"
+        "    cd jigsaw && mkdir build && cd build\n"
+        "    cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=<where>\n"
+        "    make -j 4 install\n"
+        "  then:\n"
+        f"    export {JIGSAW_ENV}=<where>/bin        # or .../jigsaw/build/src\n"
+        "  or pass --jigsaw. It is also on conda-forge: conda install -c "
+        "conda-forge jigsaw",
+    )
+
+
+def find_mkgrid(explicit: str | Path | None = None) -> Path:
+    """The mkgrid executable, from `--mkgrid` or `$MKGRIDFILE`.
+
+    mkgrid is not released anywhere on its own -- it is `mkgrid.c` in the
+    MPAS/WRF mini-tutorial repository, built against MPI and PnetCDF -- so
+    there is nowhere for gmpas to fetch it from and nothing to fall back on.
+    """
+    return _resolve_tool(
+        explicit, MKGRID_ENV, "mkgrid",
+        "  It is mkgrid.c in the mini-tutorial repository, and has to be "
+        "built:\n"
+        "    git clone https://github.com/mgduda/mpas_jigsaw_tutorial.git\n"
+        "    cd mpas_jigsaw_tutorial\n"
+        "    export PNETCDF=$(brew --prefix pnetcdf)   # or your PnetCDF prefix\n"
+        "    make                                      # needs mpicc\n"
+        "  then:\n"
+        f"    export {MKGRID_ENV}=<path>/mpas_jigsaw_tutorial/mkgrid\n"
+        "  or pass --mkgrid.",
     )
 
 
@@ -302,15 +337,19 @@ def read_msh_counts(path: Path) -> tuple[int, int]:
 def generate(hfun_path, out_dir="mesh", jigsaw: str | Path | None = None,
              qlim: float = DEFAULT_QLIM, init: str | None = None,
              force: bool = False, quiet: bool = False,
-             allow_steep: bool = False) -> Generated:
-    """Take an `hfun.py` all the way to a JIGSAW `MESH.msh`.
+             allow_steep: bool = False, mkgrid: str | Path | None = None,
+             skip_mkgrid: bool = False) -> Generated:
+    """Take an `hfun.py` all the way to an MPAS `grid.nc`.
 
-    Everything is checked before anything is spent: the executable is located,
-    the distance function is loaded and measured, and a transition steeper than
-    the guideline stops the run rather than producing a mesh that has to be
-    thrown away. Generation takes minutes and the check takes a second.
+    Everything is checked before anything is spent: BOTH executables are
+    located, the distance function is loaded and measured, and a transition
+    steeper than the guideline stops the run rather than producing a mesh that
+    has to be thrown away. Generation takes minutes; the checks take a second,
+    and finding out that mkgrid is missing after JIGSAW has run for five
+    minutes helps nobody.
     """
     tool = find_jigsaw(jigsaw)
+    mkgrid_tool = None if skip_mkgrid else find_mkgrid(mkgrid)
     hfun = Hfun.load(hfun_path)
 
     out = Path(out_dir)
@@ -324,6 +363,7 @@ def generate(hfun_path, out_dir="mesh", jigsaw: str | Path | None = None,
         result = Generated(mesh_msh, points, triangles, 0.0, reused=True,
                            out_dir=out, hfun_min_km=hfun.hfun_min)
         _mkgrid_inputs(hfun, result, out, quiet=quiet)
+        run_mkgrid(mkgrid_tool, result, out, force=force, quiet=quiet)
         return result
 
     d = diagnose(hfun)
@@ -369,6 +409,7 @@ def generate(hfun_path, out_dir="mesh", jigsaw: str | Path | None = None,
     result = Generated(mesh_msh, points, triangles, seconds, reused=False,
                        out_dir=out, hfun_min_km=hfun.hfun_min)
     _mkgrid_inputs(hfun, result, out, quiet=quiet)
+    run_mkgrid(mkgrid_tool, result, out, force=force, quiet=quiet)
     return result
 
 
@@ -380,23 +421,90 @@ def _mkgrid_inputs(hfun: Hfun, result: Generated, out: Path,
     save_code(hfun, out)
 
 
-def next_steps(result: Generated, out_dir=None) -> str:
-    """The one step gmpas cannot take for you, spelled out.
+def run_mkgrid(tool: Path | None, result: Generated, out: Path,
+               force: bool = False, quiet: bool = False) -> None:
+    """The last leg: generating points and their triangulation -> grid.nc.
 
-    The argument mkgrid wants is in metres while hfun.py is in km throughout,
-    so it is computed here rather than left as an exercise.
+    mkgrid takes one argument, `nominalMinDc` in METRES, while hfun.py works in
+    km throughout. That factor of a thousand is the only unit seam in the
+    workflow, so it is computed rather than typed.
+
+    Like jigsaw, it insists on running where its inputs are: the Save* names it
+    opens are relative to the working directory.
     """
+    if tool is None:
+        return
+
+    grid = out / "grid.nc"
+    graph = out / "graph.info"
+    if grid.exists() and not force:
+        if not quiet:
+            print(f"  reusing {grid}")
+    else:
+        nominal = result.nominal_min_dc
+        if not quiet:
+            print(f"  running {tool.name} {nominal:g} "
+                  f"(nominalMinDc in metres = hfun_min * 1000)")
+        grid.unlink(missing_ok=True)
+
+        t0 = time.perf_counter()
+        done = subprocess.run([str(tool), f"{nominal:g}"], cwd=out,
+                              capture_output=True, text=True)
+        result.mkgrid_seconds = time.perf_counter() - t0
+
+        if done.returncode != 0 or not grid.exists():
+            tail = (done.stdout or done.stderr or "").strip().splitlines()[-8:]
+            raise GenerateError(
+                f"mkgrid failed (exit {done.returncode}) after "
+                f"{result.mkgrid_seconds:.1f} s.\n"
+                + "\n".join(f"    {line}" for line in tail)
+            )
+
+    result.grid_nc = grid
+    result.graph_info = graph if graph.exists() else None
+    result.cells = _cell_count(grid)
+    if not quiet:
+        size = grid.stat().st_size / 1e6
+        print(f"  grid.nc: {result.cells:,} cells ({size:.0f} MB)"
+              + (f" in {result.mkgrid_seconds:.1f} s"
+                 if result.mkgrid_seconds else ""))
+
+
+def _cell_count(grid: Path) -> int:
+    """nCells straight from the netCDF header -- no data is read."""
+    try:
+        import netCDF4
+
+        with netCDF4.Dataset(grid) as nc:
+            return len(nc.dimensions.get("nCells", ()))
+    except Exception:
+        return 0
+
+
+def next_steps(result: Generated, out_dir=None) -> str:
+    """What was produced, and what to do with it."""
     out = Path(out_dir) if out_dir is not None else result.out_dir
+
+    if result.grid_nc is None:
+        # --skip-mkgrid: say exactly what is left, with the units already done
+        return (
+            f"\n{out}/ holds everything mkgrid reads:\n"
+            f"    SaveVertices   {result.points:,} generating points\n"
+            f"    SaveTriangles  {result.triangles:,} triangles\n"
+            f"    SaveDensity    the mesh density at each point\n"
+            f"    SaveCode       a copy of the hfun.py that produced them\n"
+            f"\nmkgrid was skipped. To finish by hand:\n"
+            f"    cd {out} && mkgrid {result.nominal_min_dc:g}\n"
+            f"That argument is nominalMinDc in METRES; hfun.py works in km, "
+            f"so it is hfun_min * 1000."
+        )
+
+    graph = (f"    {result.graph_info}   METIS input: "
+             f"gpmetis graph.info <nparts>\n" if result.graph_info else "")
     return (
-        f"\n{out}/ now holds everything mkgrid reads:\n"
-        f"    SaveVertices   {result.points:,} generating points\n"
-        f"    SaveTriangles  {result.triangles:,} triangles\n"
-        f"    SaveDensity    the mesh density at each point\n"
-        f"    SaveCode       a copy of the hfun.py that produced them\n"
-        f"\nThe last step is mkgrid, which gmpas does not run — it needs MPI "
-        f"and PnetCDF:\n"
-        f"    cd {out} && mkgrid {result.nominal_min_dc:g}\n"
-        f"That argument is nominalMinDc in METRES; hfun.py works in km, so it "
-        f"is hfun_min * 1000.\nIt writes grid.nc and graph.info, and "
-        f"`gmpas prep view {out}/grid.nc` will open the result."
+        f"\n{result.grid_nc}   {result.cells:,} cells\n"
+        f"{graph}"
+        f"\nLook at it:\n"
+        f"    gmpas info      {result.grid_nc} --mesh-only\n"
+        f"    gmpas prep view {result.grid_nc}"
     )
