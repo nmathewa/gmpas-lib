@@ -15,6 +15,15 @@ coloured by width, so where the mesh refines is visible at a glance.
 listening on 127.0.0.1:8765 — this machine only
 ```
 
+![how gmpas prep view works](mesh-viewer.svg)
+
+The geometry is built once and cached as a directory of `.npy`, then
+memory-mapped on every later load, so pages arrive only for the arrays
+something actually touches. `meta.json` carries the derived scalars — extent,
+coverage, cell count — so reading them never pulls in the largest array. The
+KD-tree turns each view box into a pixel-to-cell index once, and every field
+and every frame at that extent is then a gather.
+
 Same flags as `view` for tunnelling and size: `-p/--port`, `--host`,
 `--width`, `--height`, `--no-browser`. On a compute node use `--host 0.0.0.0`
 and tunnel, exactly as for `view`.
@@ -78,6 +87,8 @@ export JIGSAWDIR=/path/to/jigsaw/build/src            # or .../bin
 export MKGRIDFILE=/path/to/mpas_jigsaw_tutorial/mkgrid
 gmpas prep generate hfun.py -o mesh/
 ```
+
+![how gmpas prep generate works](mesh-generation.svg)
 
 One command from a distance function to an MPAS `grid.nc`:
 
@@ -208,10 +219,16 @@ max cell size gradient 0.0300 at 75.64, -95.05 (within the 0.03 guideline)
 measured on the 3336 x 1668 lat-lon grid create_hfun.py would write (12 km spacing)
 ```
 
+![how gmpas prep hfun works](hfun-viewer.svg)
+
 The contract is the mini-tutorial's: a module-level `hfun_min` in km, and
 `get_hfun(lon, lat)` taking **radians** and returning **km**. That function is
 called once with whole arrays and may do expensive setup — a real one might
 interpolate a raster — so it is called once per view here, never per pixel.
+
+The whole-sphere pass at startup does double duty: it produces the gradient
+measured against the guideline, and it fixes the colour limits, which is why a
+refinement band keeps its colour while you pan.
 
 **The gradient is the number worth having.** The tutorial's guidance is to keep
 cell size changing by no more than a few percent per km of distance, with 0.03
