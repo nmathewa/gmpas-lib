@@ -278,3 +278,147 @@ def test_a_jigsaw_that_exits_cleanly_without_a_mesh_still_fails(tmp_path):
     hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
     with pytest.raises(GenerateError, match="exit 0"):
         generate(hfun, out_dir=tmp_path / "out", jigsaw=stub, quiet=True)
+
+
+# ------------------------------------------------------- what mkgrid reads
+
+#: a MESH.msh in JIGSAW's real shape -- including the POWER block that sits
+#: between POINT and TRIA3, which is the part a naive parser walks straight
+#: into. `convert_jigsaw.py` skips it only as a side effect of its counter
+#: staying at the limit across those lines.
+MSH = """# MESH.msh; created by JIGSAW VERSION 1.1.0
+MSHID=3;EUCLIDEAN-MESH 
+NDIMS=3 
+POINT=3
+-3881.1824500587131;-4376.3194278168248;2525.2346476140142;0
+6371.229;0.0;0.0;0
+0.0;0.0;6371.229;0
+POWER=3;1
+0.5
+0.25
+0.125
+TRIA3=2
+0;1;2;0
+2;1;0;0
+"""
+
+
+@pytest.fixture
+def msh(tmp_path):
+    p = tmp_path / "MESH.msh"
+    p.write_text(MSH)
+    return p
+
+
+def test_the_power_block_is_skipped_not_read_as_points(msh, tmp_path):
+    """A real MESH.msh has POWER between POINT and TRIA3."""
+    from gmpas.prep.generate import convert_jigsaw
+
+    verts, tris, xyz = convert_jigsaw(msh, tmp_path, quiet=True)
+
+    assert xyz.shape == (3, 3)
+    assert verts.read_text().splitlines() == [
+        "-3881.1824500587131 -4376.3194278168248 2525.2346476140142",
+        "6371.229 0.0 0.0",
+        "0.0 0.0 6371.229",
+    ]
+    assert tris.read_text().splitlines() == ["0 1 2", "2 1 0"]
+    assert "0.5" not in verts.read_text()          # no POWER value leaked in
+
+
+def test_coordinates_pass_through_as_written(msh, tmp_path):
+    """The file's own tokens, not floats reformatted by us -- so JIGSAW's
+    precision survives the trip to mkgrid intact."""
+    from gmpas.prep.generate import convert_jigsaw
+
+    verts, _, _ = convert_jigsaw(msh, tmp_path, quiet=True)
+    assert "-3881.1824500587131" in verts.read_text()
+
+
+def test_triangle_indices_are_left_alone(msh, tmp_path):
+    """JIGSAW writes them 0-based and mkgrid expects what convert_jigsaw
+    hands over, so renumbering here would silently corrupt the mesh."""
+    from gmpas.prep.generate import convert_jigsaw
+
+    _, tris, _ = convert_jigsaw(msh, tmp_path, quiet=True)
+    idx = [int(v) for line in tris.read_text().split() for v in [line]]
+    assert min(idx) == 0
+    assert max(idx) == 2                            # nPoints - 1
+
+
+def test_a_mesh_without_the_sections_is_refused(tmp_path):
+    from gmpas.prep.generate import convert_jigsaw
+
+    bad = tmp_path / "MESH.msh"
+    bad.write_text("MSHID=3;EUCLIDEAN-MESH\nNDIMS=3\n")
+    with pytest.raises(GenerateError, match="no POINT section"):
+        convert_jigsaw(bad, tmp_path, quiet=True)
+
+
+def test_density_is_one_where_the_mesh_is_finest(msh, tmp_path):
+    """MPAS's meshDensity: rho(x) = (h_fine / h(x)) ** 4, so 1.0 at hfun_min."""
+    from gmpas.prep.generate import convert_jigsaw, create_density
+
+    # the refinement centre of GENTLE is (0, 0), which is the second point
+    hfun = Hfun.load(write_hfun_py(tmp_path / "hfun.py"))
+    _, _, xyz = convert_jigsaw(msh, tmp_path, quiet=True)
+    path = create_density(hfun, xyz, tmp_path, quiet=True)
+
+    density = np.array([float(v) for v in path.read_text().split()])
+    assert density.size == 3
+    assert density[1] == pytest.approx(1.0)         # at the centre, h = hfun_min
+    assert (density <= 1.0).all()
+    assert (density > 0.0).all()
+
+
+def test_density_recovers_the_distance_function(msh, tmp_path):
+    """Inverting rho = (h_min/h)**4 must give back what get_hfun said."""
+    from gmpas.prep.generate import convert_jigsaw, create_density
+
+    hfun = Hfun.load(write_hfun_py(tmp_path / "hfun.py"))
+    _, _, xyz = convert_jigsaw(msh, tmp_path, quiet=True)
+    density = np.array([float(v) for v in
+                        create_density(hfun, xyz, tmp_path,
+                                       quiet=True).read_text().split()])
+
+    unit = xyz / 6371.229
+    expected = hfun.sample_radians(np.atan2(unit[:, 1], unit[:, 0]),
+                                   np.asin(np.clip(unit[:, 2], -1, 1)))
+    assert hfun.hfun_min / density ** 0.25 == pytest.approx(expected)
+
+
+def test_save_code_is_the_hfun_that_produced_it(msh, tmp_path):
+    from gmpas.prep.generate import save_code
+
+    src = write_hfun_py(tmp_path / "hfun.py")
+    hfun = Hfun.load(src)
+    assert save_code(hfun, tmp_path).read_text() == src.read_text()
+
+
+def test_the_mkgrid_argument_is_in_metres(tmp_path):
+    """hfun.py is in km throughout and mkgrid wants metres -- the one unit
+    seam in the workflow, and a factor of a thousand to get wrong by hand."""
+    from gmpas.prep.generate import Generated, next_steps
+
+    result = Generated(tmp_path / "MESH.msh", 10, 16, 1.0, False,
+                       out_dir=tmp_path, hfun_min_km=12.0)
+    assert result.nominal_min_dc == 12000.0
+    assert "mkgrid 12000" in next_steps(result)
+
+
+@jigsaw_available
+def test_a_whole_run_leaves_everything_mkgrid_needs(tmp_path):
+    hfun = write_hfun_py(tmp_path / "hfun.py", h_min=400.0, h_max=800.0)
+    out = tmp_path / "out"
+    result = generate(hfun, out_dir=out, quiet=True)
+
+    for name in ("MESH.msh", "SaveVertices", "SaveTriangles", "SaveDensity",
+                 "SaveCode"):
+        assert (out / name).exists(), name
+
+    verts = (out / "SaveVertices").read_text().splitlines()
+    tris = (out / "SaveTriangles").read_text().splitlines()
+    density = (out / "SaveDensity").read_text().split()
+    assert len(verts) == result.points
+    assert len(tris) == result.triangles
+    assert len(density) == result.points        # one per generating point
