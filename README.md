@@ -370,11 +370,48 @@ an initial point set through to `INIT_FILE`, which is what gives a
 quasi-uniform mesh icosahedral structure — a constant `HFUN` alone produces
 7-sided cells.
 
-**This is the first half of the workflow.** Turning `MESH.msh` into an MPAS
-`grid.nc` still needs `convert_jigsaw.py`, `create_density.py` and then
-`mkgrid`, and gmpas does not run those yet — `mkgrid` needs MPI and PnetCDF,
-which is a separate problem from running JIGSAW. The command says so when it
-finishes.
+After JIGSAW, the run continues into the two conversion steps, so the output
+directory ends up holding everything `mkgrid` reads:
+
+```
+  SaveVertices   9,734 generating points
+  SaveTriangles  19,464 triangles
+  SaveDensity    the mesh density at each point
+  SaveCode       a copy of the hfun.py that produced them
+```
+
+`SaveVertices` and `SaveTriangles` carry the file's own tokens rather than
+floats reformatted by us, so JIGSAW's precision survives the trip, and the
+triangle indices are left exactly as JIGSAW wrote them — 0-based, which is what
+`mkgrid` expects. `SaveDensity` is MPAS's `meshDensity`:
+
+```
+rho(x) = (h_fine / h(x)) ** 4
+```
+
+one value per generating point, 1.0 where the mesh is finest.
+
+Two details are worth knowing. A real `MESH.msh` has a `POWER` block between
+`POINT` and `TRIA3` — the per-point weights for a power diagram — which
+`convert_jigsaw.py` skips only as a side effect of its counter staying at the
+limit across those lines; gmpas dispatches on section headers instead, so an
+unfamiliar block is ignored because it is unfamiliar rather than by luck. And
+`create_density` reuses the coordinates already parsed out of `MESH.msh`
+instead of reading back the `SaveVertices` it just wrote with `np.loadtxt`.
+
+All three files were checked **byte for byte** against the tutorial's own
+scripts run on the same mesh with the same interpreter.
+
+**The one step gmpas does not take is `mkgrid`**, which needs MPI and PnetCDF:
+
+```bash
+cd mesh/ && mkgrid 12000
+```
+
+That argument is `nominalMinDc` in **metres** while `hfun.py` works in km
+throughout — the one unit seam in this workflow, and an easy factor of a
+thousand to get wrong — so the command computes it for you and prints the line
+to run.
 
 ### Looking at a mesh before it exists
 
@@ -613,8 +650,7 @@ Preprocessing now covers `prep view`, `prep hfun` and `prep generate` — lookin
 at a mesh after it exists, looking at one before it exists, and running JIGSAW
 to get from the second to the first.
 
-What is still missing is the last leg, from JIGSAW's `MESH.msh` to an MPAS
-`grid.nc` ([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)).
-`convert_jigsaw.py` and `create_density.py` are small and pure Python;
-`mkgrid` is the real obstacle, since it needs MPI and PnetCDF and so cannot
-simply be vendored.
+What is still missing is `mkgrid`, the last leg from JIGSAW's output to an
+MPAS `grid.nc` ([issue 15](https://github.com/nmathewa/gmpas-lib/issues/15)).
+It needs MPI and PnetCDF, so it cannot simply be vendored; everything feeding
+it is now produced by `gmpas prep generate`.

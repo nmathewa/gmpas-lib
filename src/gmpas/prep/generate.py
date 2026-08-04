@@ -66,6 +66,18 @@ class Generated:
     triangles: int
     seconds: float
     reused: bool
+    out_dir: Path = Path(".")
+    hfun_min_km: float = 0.0
+
+    @property
+    def nominal_min_dc(self) -> float:
+        """`mkgrid`'s one argument: the finest grid distance, in METRES.
+
+        hfun.py works in km throughout and mkgrid wants metres, which is the
+        one unit seam in this workflow and an easy factor of a thousand to get
+        wrong by hand.
+        """
+        return self.hfun_min_km * 1000.0
 
 
 # ------------------------------------------------------------- the executable
@@ -174,6 +186,103 @@ def write_jig(path: Path, geom: str, hfun: str, mesh: str,
 # --------------------------------------------------------------- the mesh out
 
 
+def convert_jigsaw(mesh_msh: Path, out_dir: Path,
+                   quiet: bool = False) -> tuple[Path, Path, np.ndarray]:
+    """MESH.msh -> SaveVertices, SaveTriangles, and the coordinates in memory.
+
+    This is `convert_jigsaw.py`. It differs from that script in two ways, both
+    deliberate.
+
+    It dispatches on the section headers it knows rather than on a running
+    counter. A real MESH.msh has a POWER block between POINT and TRIA3 -- the
+    per-point weights for a power diagram -- which the script skips only as a
+    side effect of `i >= n` staying true across it. Reading headers means an
+    unfamiliar section is ignored because it is unfamiliar, not by luck.
+
+    And it keeps the coordinates it parsed, so `create_density` does not have to
+    read the file it just wrote back off disk with `np.loadtxt`. The written
+    columns are still the file's own tokens rather than reformatted floats, so
+    no precision is lost passing through.
+    """
+    vertices = out_dir / "SaveVertices"
+    triangles = out_dir / "SaveTriangles"
+    xyz: list[tuple[float, float, float]] = []
+    n_tri = 0
+
+    with open(mesh_msh) as msh:
+        for line in msh:
+            if line.startswith("POINT="):
+                n = int(line.split("=", 1)[1])
+                with open(vertices, "w") as out:
+                    for _ in range(n):
+                        parts = next(msh).split(";")
+                        out.write(f"{parts[0]} {parts[1]} {parts[2]}\n")
+                        xyz.append((float(parts[0]), float(parts[1]),
+                                    float(parts[2])))
+            elif line.startswith("TRIA3="):
+                n_tri = int(line.split("=", 1)[1])
+                with open(triangles, "w") as out:
+                    for _ in range(n_tri):
+                        parts = next(msh).split(";")
+                        out.write(f"{parts[0]} {parts[1]} {parts[2]}\n")
+
+    if not xyz:
+        raise GenerateError(f"{mesh_msh} carries no POINT section")
+    if not n_tri:
+        raise GenerateError(f"{mesh_msh} carries no TRIA3 section")
+
+    if not quiet:
+        print(f"  SaveVertices ({len(xyz):,}) and SaveTriangles ({n_tri:,})")
+    return vertices, triangles, np.asarray(xyz, dtype=np.float64)
+
+
+def create_density(hfun: Hfun, xyz: np.ndarray, out_dir: Path,
+                   radius_km: float = R_EARTH_KM,
+                   quiet: bool = False) -> Path:
+    """SaveDensity: the mesh density function at each generating point.
+
+    This is `create_density.py`. MPAS's meshDensity is
+
+        rho(x) = (h_fine / h(x)) ** 4
+
+    which is 1 where the mesh is finest and falls off as the fourth power --
+    the relation between cell size and density in a centroidal Voronoi
+    tessellation. `mkgrid` combines it with nominalMinDc to recover a smooth
+    nominal cell size anywhere on the mesh.
+    """
+    unit = xyz / radius_km
+    lon = np.atan2(unit[:, 1], unit[:, 0])
+    lat = np.asin(np.clip(unit[:, 2], -1.0, 1.0))
+
+    dx = hfun.sample_radians(lon, lat)
+
+    # Written the way create_density.py writes it, and not simplified to the
+    # algebraically identical (hfun_min / dx) ** 4. The two differ in the last
+    # bit or two, and matching the reference implementation exactly is worth
+    # more than the tidier expression: it lets the output be checked against
+    # the script byte for byte, which is a far stronger test than "close".
+    density = (1.0 / (dx / hfun.hfun_min)) ** 4
+
+    path = out_dir / "SaveDensity"
+    with open(path, "w") as f:
+        f.write("\n".join(map(str, density.tolist())))
+        f.write("\n")
+    if not quiet:
+        print(f"  SaveDensity ({density.min():.4g} to {density.max():.4g})")
+    return path
+
+
+def save_code(hfun: Hfun, out_dir: Path) -> Path:
+    """SaveCode: the hfun.py that produced all this, carried alongside it.
+
+    `mkgrid` wants it there, and it doubles as the record of what the mesh was
+    asked to be -- which is the one thing a grid.nc cannot tell you afterwards.
+    """
+    path = out_dir / "SaveCode"
+    shutil.copyfile(hfun.path, path)
+    return path
+
+
 def read_msh_counts(path: Path) -> tuple[int, int]:
     """POINT= and TRIA3= from a JIGSAW mesh file, without reading the body."""
     points = triangles = 0
@@ -212,7 +321,10 @@ def generate(hfun_path, out_dir="mesh", jigsaw: str | Path | None = None,
         points, triangles = read_msh_counts(mesh_msh)
         if not quiet:
             print(f"  reusing {mesh_msh} ({points:,} points)")
-        return Generated(mesh_msh, points, triangles, 0.0, reused=True)
+        result = Generated(mesh_msh, points, triangles, 0.0, reused=True,
+                           out_dir=out, hfun_min_km=hfun.hfun_min)
+        _mkgrid_inputs(hfun, result, out, quiet=quiet)
+        return result
 
     d = diagnose(hfun)
     if not quiet:
@@ -253,18 +365,38 @@ def generate(hfun_path, out_dir="mesh", jigsaw: str | Path | None = None,
     if not quiet:
         print(f"  {mesh_msh.name}: {points:,} generating points, "
               f"{triangles:,} triangles in {seconds:.1f} s")
-    return Generated(mesh_msh, points, triangles, seconds, reused=False)
+
+    result = Generated(mesh_msh, points, triangles, seconds, reused=False,
+                       out_dir=out, hfun_min_km=hfun.hfun_min)
+    _mkgrid_inputs(hfun, result, out, quiet=quiet)
+    return result
 
 
-def next_steps(result: Generated, out_dir) -> str:
-    """What still has to happen to get an MPAS `grid.nc`, and honestly why."""
+def _mkgrid_inputs(hfun: Hfun, result: Generated, out: Path,
+                   quiet: bool = False) -> None:
+    """Everything `mkgrid` reads, beside the mesh JIGSAW just produced."""
+    _, _, xyz = convert_jigsaw(result.mesh_msh, out, quiet=quiet)
+    create_density(hfun, xyz, out, quiet=quiet)
+    save_code(hfun, out)
+
+
+def next_steps(result: Generated, out_dir=None) -> str:
+    """The one step gmpas cannot take for you, spelled out.
+
+    The argument mkgrid wants is in metres while hfun.py is in km throughout,
+    so it is computed here rather than left as an exercise.
+    """
+    out = Path(out_dir) if out_dir is not None else result.out_dir
     return (
-        f"\n{result.mesh_msh} holds the generating points and their "
-        f"triangulation.\nTurning it into an MPAS grid.nc still needs the "
-        f"tutorial's remaining steps:\n"
-        f"    convert_jigsaw.py  MESH.msh -> SaveVertices, SaveTriangles\n"
-        f"    create_density.py  -> SaveDensity\n"
-        f"    cp hfun.py SaveCode\n"
-        f"    mkgrid <nominalMinDc_metres>  -> grid.nc, graph.info\n"
-        f"gmpas does not run these yet: mkgrid needs MPI and PnetCDF."
+        f"\n{out}/ now holds everything mkgrid reads:\n"
+        f"    SaveVertices   {result.points:,} generating points\n"
+        f"    SaveTriangles  {result.triangles:,} triangles\n"
+        f"    SaveDensity    the mesh density at each point\n"
+        f"    SaveCode       a copy of the hfun.py that produced them\n"
+        f"\nThe last step is mkgrid, which gmpas does not run — it needs MPI "
+        f"and PnetCDF:\n"
+        f"    cd {out} && mkgrid {result.nominal_min_dc:g}\n"
+        f"That argument is nominalMinDc in METRES; hfun.py works in km, so it "
+        f"is hfun_min * 1000.\nIt writes grid.nc and graph.info, and "
+        f"`gmpas prep view {out}/grid.nc` will open the result."
     )
