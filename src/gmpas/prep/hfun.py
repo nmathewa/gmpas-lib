@@ -249,6 +249,16 @@ def diagnose(hfun: Hfun) -> Diagnosis:
     # cos(lat), which is what makes a degree of longitude worth less near a pole
     dh_dy = np.gradient(h, axis=1) / (dlat * R_EARTH_KM)
     dh_dlon = np.gradient(h, axis=0) / dlon
+
+    # Longitude is periodic, so the ends of the array are not a boundary and
+    # `np.gradient`'s one-sided difference there is simply wrong -- it is first
+    # order where the interior is second, and the error shows up as a spurious
+    # maximum sitting exactly on the antimeridian. The grid runs -pi to +pi
+    # inclusive, so its first and last columns are the same meridian and the
+    # true neighbours of column 0 are columns 1 and -2.
+    dh_dlon[0] = (h[1] - h[-2]) / (2.0 * dlon)
+    dh_dlon[-1] = dh_dlon[0]
+
     dh_dx = dh_dlon / (R_EARTH_KM * np.cos(latgrid))
 
     grad = np.hypot(dh_dx, dh_dy)[:, 1:-1]          # drop the polar rows
