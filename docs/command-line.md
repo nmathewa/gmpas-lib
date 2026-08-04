@@ -13,6 +13,15 @@ gmpas prep generate hfun.py -o mesh/
 
 `info` summarises the mesh and lists variables grouped by the element they
 live on. `plot` renders one field. `view` opens the interactive browser.
+
+![how gmpas view works](viewer.svg)
+
+A run is opened as a `Series` across however many files it spans, scanned in
+the background so the page appears immediately. The mesh beside it goes through
+the same cached geometry and KD-tree as `prep view`. Each request names a
+variable, timestep, level and view box; only the file holding that step is
+opened, and the values are gathered through the view index straight into a
+palette PNG.
 `scrip` and `target` prepare the two grid files a conservative remapper needs
 — see [Conservative remapping](./remapping.md).
 
