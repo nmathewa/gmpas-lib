@@ -8,7 +8,9 @@ import xarray as xr
 
 from conftest import write_mesh
 from gmpas.config import TargetDomain
-from gmpas.remap import RemapError, Weights, ensure_weights, level_dim, remappable
+from gmpas.remap import (RemapError, Weights, _esmf_supports_mpi,
+                         _mpi_launch_prefix, ensure_weights, level_dim,
+                         remappable)
 
 
 def _weight_file(path, row, col, S, area_a, area_b, frac_a, frac_b):
@@ -172,6 +174,239 @@ def test_a_crashing_esmf_is_retried_then_reported(tmp_path, monkeypatch):
     with pytest.raises(RemapError, match="segfaulted"):
         ensure_weights(tmp_path / "m.nc", domain, tmp_path / "w", quiet=True)
     assert len(calls) == remap_mod.WEIGHT_ATTEMPTS
+
+
+# -------------------------------------------------- ESMF's own MPI awareness
+
+
+def _write_esmf_mk(path, comm=None, style="comment-colon"):
+    """A minimal stand-in for ESMF's build-info makefile fragment.
+
+    Real esmf.mk files bury `-DESMF_COMM=...` inside long *COMPILECPPFLAGS
+    lines too -- `_esmf_supports_mpi` must not be fooled by those, so the
+    fixture includes one, matching the real file this was written against
+    (conda-forge esmf 8.9.1's mpiuni build).
+    """
+    lines = [
+        "ESMF_F90COMPILECPPFLAGS=-DESMF_NO_INTEGER_1_BYTE "
+        "-DESMF_COMM=not_the_real_value -DESMF_DIR=/wherever",
+    ]
+    if comm is not None:
+        line = {"comment-colon": f"# ESMF_COMM: {comm}",
+                "comment-equals": f"#  ESMF_COMM={comm}"}[style]
+        lines.append(line)
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_a_mpiuni_build_is_not_mpi_capable(tmp_path, monkeypatch):
+    monkeypatch.delenv("ESMFMKFILE", raising=False)
+    tool = tmp_path / "bin" / "ESMF_RegridWeightGen"
+    tool.parent.mkdir()
+    (tmp_path / "lib").mkdir()
+    _write_esmf_mk(tmp_path / "lib" / "esmf.mk", comm="mpiuni")
+
+    assert _esmf_supports_mpi(str(tool)) is False
+
+
+def test_a_real_mpi_build_is_detected(tmp_path, monkeypatch):
+    monkeypatch.delenv("ESMFMKFILE", raising=False)
+    tool = tmp_path / "bin" / "ESMF_RegridWeightGen"
+    tool.parent.mkdir()
+    (tmp_path / "lib").mkdir()
+    _write_esmf_mk(tmp_path / "lib" / "esmf.mk", comm="mpich",
+                   style="comment-equals")
+
+    assert _esmf_supports_mpi(str(tool)) is True
+
+
+def test_esmfmkfile_env_var_wins_over_the_relative_path(tmp_path, monkeypatch):
+    tool = tmp_path / "bin" / "ESMF_RegridWeightGen"
+    tool.parent.mkdir()
+    (tmp_path / "lib").mkdir()
+    _write_esmf_mk(tmp_path / "lib" / "esmf.mk", comm="mpiuni")   # would say False
+
+    elsewhere = tmp_path / "elsewhere.mk"
+    _write_esmf_mk(elsewhere, comm="openmpi")
+    monkeypatch.setenv("ESMFMKFILE", str(elsewhere))
+
+    assert _esmf_supports_mpi(str(tool)) is True
+
+
+def test_unknown_when_no_esmf_mk_can_be_found(tmp_path, monkeypatch):
+    monkeypatch.delenv("ESMFMKFILE", raising=False)
+    tool = tmp_path / "bin" / "ESMF_RegridWeightGen"
+    tool.parent.mkdir()   # no lib/esmf.mk beside it
+
+    assert _esmf_supports_mpi(str(tool)) is None
+
+
+def test_unknown_when_esmf_mk_never_states_esmf_comm(tmp_path, monkeypatch):
+    monkeypatch.delenv("ESMFMKFILE", raising=False)
+    tool = tmp_path / "bin" / "ESMF_RegridWeightGen"
+    tool.parent.mkdir()
+    (tmp_path / "lib").mkdir()
+    _write_esmf_mk(tmp_path / "lib" / "esmf.mk", comm=None)   # only the flags line
+
+    assert _esmf_supports_mpi(str(tool)) is None
+
+
+# --------------------------------------------------------------- MPI launcher
+
+
+def test_a_single_rank_needs_no_launcher():
+    assert _mpi_launch_prefix(1, "/fake/esmf") == ([], None)
+    assert _mpi_launch_prefix(0, "/fake/esmf") == ([], None)
+
+
+def test_mpirun_is_used_outside_a_slurm_allocation(monkeypatch):
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda name: "/opt/mpirun" if name == "mpirun" else None)
+
+    assert _mpi_launch_prefix(64, "/fake/esmf") == (["/opt/mpirun", "-np", "64"], None)
+
+
+def test_mpiexec_is_used_when_mpirun_is_absent(monkeypatch):
+    """mpiexec is the HPE Cray name for the same launcher."""
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda name: "/opt/cray/mpiexec" if name == "mpiexec" else None)
+
+    assert _mpi_launch_prefix(64, "/fake/esmf") == (["/opt/cray/mpiexec", "-np", "64"], None)
+
+
+def test_srun_is_preferred_inside_an_active_slurm_allocation(monkeypatch):
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda name: f"/opt/{name}")   # srun and mpirun both "exist"
+
+    assert _mpi_launch_prefix(64, "/fake/esmf") == (["/opt/srun", "-n", "64"], None)
+
+
+def test_srun_is_not_used_outside_an_allocation_even_if_installed(monkeypatch):
+    """A laptop can have Slurm client tools on PATH with no job running."""
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda name: f"/opt/{name}")
+
+    assert _mpi_launch_prefix(64, "/fake/esmf") == (["/opt/mpirun", "-np", "64"], None)
+
+
+def test_no_launcher_on_path_falls_back_to_a_bare_command(monkeypatch):
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.setattr(remap_mod.shutil, "which", lambda name: None)
+
+    prefix, note = _mpi_launch_prefix(64, "/fake/esmf")
+    assert prefix == []
+    assert "no srun/mpirun/mpiexec" in note
+
+
+def test_a_mpiuni_build_declines_the_launcher_with_a_reason(monkeypatch):
+    """The gate that matters: don't corrupt output on a build that can't
+    coordinate ranks, and don't do it silently either."""
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: False)
+    monkeypatch.setattr(remap_mod.shutil, "which", lambda name: f"/opt/{name}")
+
+    prefix, note = _mpi_launch_prefix(64, "/fake/esmf")
+    assert prefix == []
+    assert "mpiuni" in note
+
+
+def test_an_undetectable_build_declines_the_launcher_too(monkeypatch):
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: None)
+    monkeypatch.setattr(remap_mod.shutil, "which", lambda name: f"/opt/{name}")
+
+    prefix, note = _mpi_launch_prefix(64, "/fake/esmf")
+    assert prefix == []
+    assert "could not tell" in note
+
+
+def test_ensure_weights_wraps_the_esmf_call_with_the_launcher(tmp_path, monkeypatch):
+    import gmpas.remap as remap_mod
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_which(name):
+        return {"ESMF_RegridWeightGen": "/fake/esmf",
+                "mpirun": "/fake/mpirun"}.get(name)
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        (tmp_path / "w" / "map_conserve.nc").write_bytes(b"weights")
+        return Result()
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    monkeypatch.setattr(remap_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(remap_mod.subprocess, "run", fake_run)
+    write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (5.0, 0.0)])
+    domain = TargetDomain(4, 8, -2.0, 2.0, 0.0, 8.0)
+
+    (tmp_path / "w").mkdir()
+    ensure_weights(tmp_path / "m.nc", domain, tmp_path / "w",
+                   ranks=8, quiet=True)
+
+    assert len(calls) == 1
+    assert calls[0][:3] == ["/fake/mpirun", "-np", "8"]
+    assert "/fake/esmf" in calls[0]
+
+
+def test_ensure_weights_declines_the_launcher_on_a_mpiuni_build(tmp_path, monkeypatch):
+    import gmpas.remap as remap_mod
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_which(name):
+        return {"ESMF_RegridWeightGen": "/fake/esmf",
+                "mpirun": "/fake/mpirun"}.get(name)
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        (tmp_path / "w" / "map_conserve.nc").write_bytes(b"weights")
+        return Result()
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: False)
+    monkeypatch.setattr(remap_mod.shutil, "which", fake_which)
+    monkeypatch.setattr(remap_mod.subprocess, "run", fake_run)
+    write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (5.0, 0.0)])
+    domain = TargetDomain(4, 8, -2.0, 2.0, 0.0, 8.0)
+
+    (tmp_path / "w").mkdir()
+    ensure_weights(tmp_path / "m.nc", domain, tmp_path / "w",
+                   ranks=8, quiet=True)
+
+    assert calls[0] == ["/fake/esmf", "-s", "src.scrip.nc", "-d", "dst.scrip.nc",
+                        "-w", "map_conserve.nc", "-m", "conserve",
+                        "--src_regional", "--dst_regional", "--ignore_unmapped"]
 
 
 # ------------------------------------------------------- output construction

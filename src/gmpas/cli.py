@@ -430,9 +430,18 @@ def _remap(args) -> int:
             raise SystemExit("gmpas: no fields selected — check include_fields")
 
         work = Path(args.out)
+
+        # One number for how much of the machine this run gets: -j if given,
+        # otherwise whatever the scheduler/affinity mask reports. It sizes
+        # both the MPI ranks ESMF_RegridWeightGen gets below and the worker
+        # pool that converts files in [3/3] -- not two separate knobs.
+        detected, source = detect_cores()
+        requested = args.jobs if args.jobs > 0 else detected
+
         print(f"\n[2/3] weights")
         weights_path, built = ensure_weights(
-            mesh_path, domain, work, method=args.method, force=args.force_weights
+            mesh_path, domain, work, method=args.method,
+            force=args.force_weights, ranks=requested,
         )
         weights = Weights.load(weights_path)
         if weights.n_a != series.mesh.n_cells:
@@ -451,9 +460,7 @@ def _remap(args) -> int:
     else:
         existing = []
 
-    detected, source = detect_cores()
-    workers = args.jobs if args.jobs > 0 else detected
-    workers = max(1, min(workers, len(todo) or 1))
+    workers = max(1, min(requested, len(todo) or 1))
 
     print(f"\n[3/3] remapping {len(todo)} file(s) -> {work}/")
     if existing:
@@ -647,8 +654,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--overwrite", action="store_true",
                    help="rewrite output files that already exist")
     r.add_argument("-j", "--jobs", type=int, default=0,
-                   help="parallel workers (default: the cores this job was "
-                        "given, from the scheduler or the affinity mask)")
+                   help="parallel workers, and MPI ranks for weight "
+                        "generation if srun/mpirun is available (default: "
+                        "the cores this job was given, from the scheduler "
+                        "or the affinity mask)")
     r.set_defaults(func=_remap)
 
     v = sub.add_parser("view", help="browse a file interactively in a browser")

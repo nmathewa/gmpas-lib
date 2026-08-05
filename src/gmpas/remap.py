@@ -92,13 +92,108 @@ class Weights:
         return abs(i_dst - i_src) / abs(i_src) if i_src else 0.0
 
 
+def _esmf_supports_mpi(tool: str) -> bool | None:
+    """Whether this ESMF build can coordinate more than one rank.
+
+    Only rules out the case actually observed: a `mpiuni` build -- ESMF's
+    internal stub for "compiled with no real MPI library" -- identified from
+    ESMF's own build-info makefile fragment, `esmf.mk`. `module load esmf`
+    conventionally sets `$ESMFMKFILE` to it; failing that, it lives at
+    `<prefix>/lib/esmf.mk` next to the binary.
+
+    Measured directly, not assumed: launching a `mpiuni` ESMF_RegridWeightGen
+    (the conda-forge build) under `mpirun -np 2` did not parallelize it -- it
+    ran two uncoordinated copies that both wrote the same output files in the
+    same directory and corrupted each other, both failing with a nonsense
+    NetCDF error. A build that doesn't declare itself `mpiuni` might still be
+    unsafe to launch this way, for a different reason this check cannot see:
+    if the launcher on PATH is a different MPI implementation than the one
+    ESMF was linked against (e.g. a Homebrew/Open MPI `mpirun` in front of a
+    conda/MPICH-linked ESMF), the ranks are just as uncoordinated and fail the
+    same way. This function only answers "is it mpiuni," not "will this
+    specific launcher work with it" -- see the HPC TODO on issue 34.
+
+    Returns `None`, not `False`, when `esmf.mk` cannot be found or parsed:
+    "unknown" and "known not to work" get different messages upstream.
+    """
+    import os
+
+    candidates = []
+    mkfile = os.environ.get("ESMFMKFILE")
+    if mkfile:
+        candidates.append(Path(mkfile))
+    candidates.append(Path(tool).resolve().parent.parent / "lib" / "esmf.mk")
+
+    for mk in candidates:
+        try:
+            text = mk.read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            stripped = line.lstrip("#").strip()
+            if not stripped.startswith("ESMF_COMM"):
+                continue
+            _, _, value = stripped.partition("=")
+            if not value:
+                _, _, value = stripped.partition(":")
+            if value.strip():
+                return value.strip() != "mpiuni"
+    return None
+
+
+def _mpi_launch_prefix(ranks: int, tool: str) -> tuple[list[str], str | None]:
+    """How to run `ranks` copies of `tool`, or `[]` for one rank.
+
+    ESMF_RegridWeightGen's search and polygon intersection is genuinely
+    MPI-parallel, but gmpas invoking it bare only ever gave it one rank --
+    see issue 34. srun and mpirun expect different flags and suit different
+    schedulers: srun only works inside an active Slurm allocation, so it is
+    tried first only when one is actually detected (`SLURM_JOB_ID`); mpirun
+    (or mpiexec, the HPE Cray name for the same thing) is the fallback
+    everywhere else, including PBS sites like Derecho.
+
+    Returns `(prefix, note)`. `note` is set whenever `ranks > 1` was asked
+    for but declined -- silently running single-rank when more was requested
+    is exactly the confusion that started this. See `_esmf_supports_mpi` for
+    why declining is sometimes the safe choice, not just the cautious one.
+    """
+    if ranks <= 1:
+        return [], None
+
+    supports_mpi = _esmf_supports_mpi(tool)
+    if supports_mpi is False:
+        return [], ("this ESMF build has no real MPI (ESMF_COMM=mpiuni) -- "
+                    "running single-rank instead of corrupting output "
+                    "across uncoordinated ranks")
+    if supports_mpi is None:
+        return [], ("could not tell whether this ESMF build supports MPI "
+                    "(no esmf.mk found) -- running single-rank")
+
+    import os
+
+    srun = shutil.which("srun") if os.environ.get("SLURM_JOB_ID") else None
+    if srun:
+        return [srun, "-n", str(ranks)], None
+
+    launcher = shutil.which("mpirun") or shutil.which("mpiexec")
+    if launcher:
+        return [launcher, "-np", str(ranks)], None
+
+    return [], "no srun/mpirun/mpiexec on PATH -- running single-rank"
+
+
 def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
                    method: str = "conserve", force: bool = False,
-                   quiet: bool = False) -> tuple[Path, bool]:
+                   ranks: int = 1, quiet: bool = False) -> tuple[Path, bool]:
     """Return a weight file for this mesh and target, building it if needed.
 
     Weights depend only on the two grids, never on the data, so this runs once
     for a whole run. Returns the path and whether it had to be generated.
+
+    `ranks` is how many MPI ranks to ask for -- see `_mpi_launch_prefix`. It
+    is the same count `gmpas remap` uses for its own worker pool (`-j`), not
+    a separate knob: one number describes how much of the machine this run
+    gets to use.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -130,10 +225,15 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
         print(f"    normalised {wrapped:,} longitudes onto [0, 2pi)")
     domain.to_scrip(dst_scrip)
 
-    cmd = [tool, "-s", src_scrip.name, "-d", dst_scrip.name, "-w", weights.name,
-           "-m", method, "--src_regional", "--dst_regional", "--ignore_unmapped"]
+    launch, note = _mpi_launch_prefix(ranks, tool)
+    cmd = launch + [tool, "-s", src_scrip.name, "-d", dst_scrip.name,
+                    "-w", weights.name, "-m", method,
+                    "--src_regional", "--dst_regional", "--ignore_unmapped"]
     if not quiet:
-        print(f"  generating weights: {' '.join(cmd[:1])} ... -m {method}")
+        if note:
+            print(f"  {note}")
+        prefix = f"{' '.join(launch)} " if launch else ""
+        print(f"  generating weights: {prefix}{Path(tool).name} ... -m {method}")
     # ESMF 8.9.1 on macOS segfaults intermittently -- measured at roughly one
     # run in five on byte-identical inputs that succeed the other four times.
     # Weights are generated once for a whole run, so retrying is cheap; it is
