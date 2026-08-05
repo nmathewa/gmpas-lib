@@ -23,5 +23,8 @@ venv/
 *.npz
 *.png
 
+# ESMF_RegridWeightGen writes these into its cwd on every run
+PET*.RegridWeightGen.Log
+
 # OS
 .DS_Store

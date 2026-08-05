@@ -113,8 +113,11 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
     if tool is None:
         raise RemapError(
             "ESMF_RegridWeightGen is not on your PATH, so the weights cannot "
-            "be generated. Install it with:\n"
-            "    conda install -c conda-forge esmf nco\n"
+            "be generated. gmpas does not install ESMF itself -- load your "
+            "system's build (e.g. `module load esmf` on an HPC site) before "
+            "running this. A site-provided build is usually already tuned "
+            "for the local MPI/interconnect; installing a second copy from "
+            "conda-forge into this environment would only compete with it. "
             "gmpas deliberately does not compute conservative weights itself."
         )
 
