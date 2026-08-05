@@ -97,9 +97,21 @@ def _esmf_supports_mpi(tool: str) -> bool | None:
 
     Only rules out the case actually observed: a `mpiuni` build -- ESMF's
     internal stub for "compiled with no real MPI library" -- identified from
-    ESMF's own build-info makefile fragment, `esmf.mk`. `module load esmf`
-    conventionally sets `$ESMFMKFILE` to it; failing that, it lives at
-    `<prefix>/lib/esmf.mk` next to the binary.
+    ESMF's own build-info makefile fragment, `esmf.mk`.
+
+    Checked next to `tool` first (`<prefix>/lib/esmf.mk`), `$ESMFMKFILE`
+    only as a fallback when that can't be read or has no ESMF_COMM line --
+    deliberately the opposite of the order `module load esmf` usually
+    implies. `$ESMFMKFILE` describes whichever module was last loaded, not
+    necessarily the binary `tool` actually resolved to: this is the same
+    shadowing issue 34 is about, one level down. `module load esmf` (real
+    MPI) followed by `conda activate` (PATH now finds the conda mpiuni
+    copy) leaves a stale `$ESMFMKFILE` pointing at a build that is not the
+    one about to run. Trusting it first would call a mpiuni binary
+    MPI-capable because a *different*, no-longer-relevant build says so --
+    reintroducing the exact corruption this function exists to prevent.
+    The file next to the resolved binary is the one description of that
+    binary that can't be shadowed this way.
 
     Measured directly, not assumed: launching a `mpiuni` ESMF_RegridWeightGen
     (the conda-forge build) under `mpirun -np 2` did not parallelize it -- it
@@ -118,11 +130,10 @@ def _esmf_supports_mpi(tool: str) -> bool | None:
     """
     import os
 
-    candidates = []
+    candidates = [Path(tool).resolve().parent.parent / "lib" / "esmf.mk"]
     mkfile = os.environ.get("ESMFMKFILE")
     if mkfile:
         candidates.append(Path(mkfile))
-    candidates.append(Path(tool).resolve().parent.parent / "lib" / "esmf.mk")
 
     for mk in candidates:
         try:

@@ -219,11 +219,29 @@ def test_a_real_mpi_build_is_detected(tmp_path, monkeypatch):
     assert _esmf_supports_mpi(str(tool)) is True
 
 
-def test_esmfmkfile_env_var_wins_over_the_relative_path(tmp_path, monkeypatch):
+def test_the_path_beside_the_resolved_tool_wins_over_esmfmkfile(tmp_path, monkeypatch):
+    """The bug this guards against: `module load esmf` (real MPI) sets
+    $ESMFMKFILE, then `conda activate` shadows PATH so the resolved tool is
+    actually the conda mpiuni copy. $ESMFMKFILE is now stale -- it describes
+    a build that isn't the one about to run. Trusting it over the file next
+    to the *actual* resolved binary would call the mpiuni copy MPI-capable
+    and reintroduce the corruption this function exists to prevent."""
     tool = tmp_path / "bin" / "ESMF_RegridWeightGen"
     tool.parent.mkdir()
     (tmp_path / "lib").mkdir()
-    _write_esmf_mk(tmp_path / "lib" / "esmf.mk", comm="mpiuni")   # would say False
+    _write_esmf_mk(tmp_path / "lib" / "esmf.mk", comm="mpiuni")   # the real answer
+
+    stale_module = tmp_path / "elsewhere.mk"
+    _write_esmf_mk(stale_module, comm="openmpi")   # describes a *different* build
+    monkeypatch.setenv("ESMFMKFILE", str(stale_module))
+
+    assert _esmf_supports_mpi(str(tool)) is False
+
+
+def test_esmfmkfile_is_used_only_when_the_local_path_has_nothing(tmp_path, monkeypatch):
+    tool = tmp_path / "bin" / "ESMF_RegridWeightGen"
+    tool.parent.mkdir()
+    # no lib/esmf.mk beside the tool at all
 
     elsewhere = tmp_path / "elsewhere.mk"
     _write_esmf_mk(elsewhere, comm="openmpi")
