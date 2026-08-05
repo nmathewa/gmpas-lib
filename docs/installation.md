@@ -20,19 +20,15 @@ pip install -e ".[dev]" --no-deps
 ```
 
 Conservative remapping additionally needs `ESMF_RegridWeightGen`, and
-optionally NCO for `ncremap`. **gmpas does not install ESMF itself** — on an
-HPC site, load whatever build the site provides (`module load esmf`) rather
-than pulling one from conda-forge into this environment: a site build is
-tuned for the local MPI/interconnect, and a second copy in this environment
-would only compete with it on `PATH`/`LD_LIBRARY_PATH` (see
-docs/REMAPPING.md and [issue 34](https://github.com/nmathewa/gmpas-lib/issues/34)).
-On a laptop with no site module to load, `conda install -c conda-forge esmf`
-into a *separate* environment (not this one) works fine. NCO is lower-risk
-and can go straight into this environment if you want it:
-
-```bash
-conda install -c conda-forge nco
-```
+optionally NCO for `ncremap`. **gmpas does not install either itself** — on an
+HPC site, load whatever build the site provides (`module load esmf`, `module
+load nco`) rather than pulling a copy from conda-forge into this environment:
+a site build is tuned for the local MPI/interconnect, and a second copy in
+this environment would only compete with it on `PATH`/`LD_LIBRARY_PATH`,
+whether gmpas shells out to it (ESMF) or you run it yourself (`ncremap`) —
+see docs/REMAPPING.md and [issue 34](https://github.com/nmathewa/gmpas-lib/issues/34).
+On a laptop with no site module to load, `conda install -c conda-forge esmf
+nco` into a *separate* environment (not this one) works fine.
 
 These are programs rather than Python packages, so pip cannot provide them and
 they are not in `pyproject.toml`. Skip them if you only plot and view.

@@ -9,15 +9,17 @@ remapper computes the weights.
 Both are executables rather than Python packages, so they cannot come from pip
 and are not declared in `pyproject.toml`.
 
-**gmpas does not install ESMF itself, on purpose.** `environment.yml` only
-brings in `nco`. On an HPC site, load the site's own ESMF build instead —
-`module load esmf` — rather than adding a conda-forge copy to this
-environment: the site build is tuned for the local MPI/interconnect, and a
-second copy here would compete with it on `PATH`/`LD_LIBRARY_PATH` rather than
-help (see [issue 34](https://github.com/nmathewa/gmpas-lib/issues/34)). On a
-machine with no module system, `conda install -c conda-forge esmf` into a
-separate environment works fine — just don't add it to the one gmpas itself
-runs in. A `command not found: ESMF_RegridWeightGen` means neither is loaded.
+**gmpas does not install either itself, on purpose.** `environment.yml` brings
+in only gmpas's own Python dependencies. On an HPC site, load the site's own
+builds instead — `module load esmf`, `module load nco` — rather than adding
+conda-forge copies to this environment: a site build is tuned for the local
+MPI/interconnect, and a second copy here would compete with it on
+`PATH`/`LD_LIBRARY_PATH` rather than help, whether gmpas shells out to it
+(ESMF) or you run it yourself (`ncremap`) — see
+[issue 34](https://github.com/nmathewa/gmpas-lib/issues/34). On a machine with
+no module system, `conda install -c conda-forge esmf nco` into a separate
+environment works fine — just don't add it to the one gmpas itself runs in. A
+`command not found: ESMF_RegridWeightGen` means neither is loaded.
 
 ![conservative remapping workflow](remapping-workflow.svg)
 
