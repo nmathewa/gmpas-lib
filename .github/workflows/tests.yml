@@ -45,7 +45,10 @@ jobs:
         run: pip install -e . --no-deps
 
       - name: Report what is actually installed
-        # a failure three steps down is much easier to read with this above it
+        # a failure three steps down is much easier to read with this above it.
+        # ESMF_RegridWeightGen is *expected* to be missing here -- environment.yml
+        # deliberately does not install it (see docs/REMAPPING.md and issue 34),
+        # and every remap test that would shell out to it mocks the call instead.
         run: |
           python -c "import gmpas; print('gmpas', gmpas.__version__)"
           python -c "import numpy, scipy, xarray, netCDF4, matplotlib, cartopy; print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'xarray', xarray.__version__, 'netCDF4', netCDF4.__version__, 'matplotlib', matplotlib.__version__, 'cartopy', cartopy.__version__)"

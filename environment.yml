@@ -24,9 +24,13 @@ dependencies:
   - cartopy >=0.22
   - pillow                # palette PNG encoding for the viewer
 
-  # conservative remapping. Optional: needed only for `gmpas scrip` /
-  # `gmpas target` workflows, not for plotting or the viewer.
-  - esmf                  # provides ESMF_RegridWeightGen
+  # conservative remapping needs ESMF_RegridWeightGen on PATH, but gmpas does
+  # not install it here. HPC sites provide their own build tuned for the
+  # local MPI/interconnect (`module load esmf`), and a conda-forge copy
+  # sitting in this same environment competes with it on PATH/LD_LIBRARY_PATH
+  # rather than helping -- see docs/REMAPPING.md and issue 34. Load your
+  # system's ESMF before running `gmpas remap`; this environment only needs
+  # to provide gmpas itself.
   - nco                   # provides ncremap
 
   # development

@@ -148,7 +148,7 @@ def test_a_missing_esmf_says_how_to_install_it(tmp_path, monkeypatch):
     write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (5.0, 0.0)])
     domain = TargetDomain(4, 8, -2.0, 2.0, 0.0, 8.0)
 
-    with pytest.raises(RemapError, match="conda install -c conda-forge esmf"):
+    with pytest.raises(RemapError, match="module load esmf"):
         ensure_weights(tmp_path / "m.nc", domain, tmp_path / "w", quiet=True)
 
 
