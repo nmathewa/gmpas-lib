@@ -5,9 +5,18 @@
 #   pip install -e . --no-deps
 #
 # The scientific stack comes from conda-forge because cartopy and netCDF4 are
-# much easier to install that way than from pip. The remapping tools are not
-# Python packages at all -- ESMF_RegridWeightGen and ncremap are executables
-# gmpas shells out to -- so they can only come from conda, not from pyproject.
+# much easier to install that way than from pip. All of it below is a Python
+# library imported straight into the gmpas process -- gmpas's own code has a
+# real version dependency on it (numpy>=1.24, etc.), and there is no separate
+# binary for a shell to resolve, so bundling it here is the right call.
+#
+# Deliberately NOT here: ESMF_RegridWeightGen and ncremap. Both are standalone
+# executables an HPC site typically ships as a module, tuned for the local
+# MPI/interconnect -- a conda-forge copy sitting in *this* environment would
+# compete with the site's on PATH/LD_LIBRARY_PATH rather than help, whether
+# gmpas shells out to it (ESMF) or you run it yourself in the same shell
+# (ncremap). Load whichever your work needs from your system; see
+# docs/REMAPPING.md and issue 34.
 name: gmpas
 channels:
   - conda-forge
@@ -23,15 +32,6 @@ dependencies:
   - matplotlib >=3.7
   - cartopy >=0.22
   - pillow                # palette PNG encoding for the viewer
-
-  # conservative remapping needs ESMF_RegridWeightGen on PATH, but gmpas does
-  # not install it here. HPC sites provide their own build tuned for the
-  # local MPI/interconnect (`module load esmf`), and a conda-forge copy
-  # sitting in this same environment competes with it on PATH/LD_LIBRARY_PATH
-  # rather than helping -- see docs/REMAPPING.md and issue 34. Load your
-  # system's ESMF before running `gmpas remap`; this environment only needs
-  # to provide gmpas itself.
-  - nco                   # provides ncremap
 
   # development
   - pytest >=7.0

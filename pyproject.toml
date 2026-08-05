@@ -36,9 +36,9 @@ gmpas = "gmpas.cli:main"
 # in a headless pipeline that never draws anything.
 plot = ["matplotlib>=3.7", "cartopy>=0.22", "pillow>=9.0"]
 # Conservative remapping needs ESMF_RegridWeightGen on PATH and optionally
-# ncremap (conda-forge `nco`). Both are executables, not Python packages, so
-# pip cannot install them. ESMF deliberately is not brought in here or by
-# environment.yml -- load your system's build instead; see docs/REMAPPING.md.
+# ncremap. Both are executables, not Python packages, so pip cannot install
+# them, and neither is brought in by environment.yml either -- load your
+# system's builds instead; see docs/REMAPPING.md.
 test = ["pytest>=7.0"]
 dev = ["gmpas[plot,test]", "ruff>=0.4"]
 
