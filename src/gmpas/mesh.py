@@ -263,7 +263,7 @@ class MpasMesh:
 
     @classmethod
     def _build(cls, path: Path) -> "MpasMesh":
-        ds = xr.open_dataset(path, decode_timedelta=False)
+        ds = xr.open_dataset(path, decode_timedelta=False, engine="netcdf4")
         if not has_mesh(ds):
             missing = [v for v in MESH_VARS if v not in ds.variables]
             ds.close()
@@ -683,7 +683,7 @@ def reconstruct_cell_winds(mesh: MpasMesh,
     Reads `edgesOnCell` from the mesh file, which the cached geometry does not
     carry.
     """
-    with xr.open_dataset(mesh.path, decode_timedelta=False) as ds:
+    with xr.open_dataset(mesh.path, decode_timedelta=False, engine="netcdf4") as ds:
         eoc = ds.edgesOnCell.values.astype(np.int64) - 1
         nedges = ds.nEdgesOnCell.values.astype(np.int64)
 

@@ -29,7 +29,7 @@ def open_data(data_path: str | Path,
     dpath = resolve_path(data_path)
     if not dpath.exists():
         raise FileNotFoundError(f"No such data file: {dpath}")
-    ds = xr.open_dataset(dpath, decode_timedelta=False)
+    ds = xr.open_dataset(dpath, decode_timedelta=False, engine="netcdf4")
 
     if mesh_path:
         return ds, MpasMesh.load(resolve_path(mesh_path))
@@ -52,7 +52,7 @@ def find_mesh_beside(dpath: Path, n_cells: int) -> Path | None:
         if cand == dpath:
             continue
         try:
-            with xr.open_dataset(cand, decode_timedelta=False) as c:
+            with xr.open_dataset(cand, decode_timedelta=False, engine="netcdf4") as c:
                 if has_mesh(c) and int(c.sizes.get("nCells", -1)) == n_cells:
                     return cand
         except Exception:

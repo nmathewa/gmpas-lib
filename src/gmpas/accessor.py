@@ -36,6 +36,7 @@ def open_mpas(data_path: str, mesh: str = "", **kwargs) -> xr.Dataset:
     when a mesh file with a matching cell count sits in the same directory.
     """
     kwargs.setdefault("decode_timedelta", False)
+    kwargs.setdefault("engine", "netcdf4")
     path = resolve_path(data_path)
     ds = xr.open_dataset(path, **kwargs)
 

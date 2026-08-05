@@ -64,7 +64,7 @@ def write_scrip(mesh_path: str | Path, out_path: str | Path,
     if not src.exists():
         raise FileNotFoundError(f"No such mesh file: {src}")
 
-    with xr.open_dataset(src, decode_timedelta=False) as ds:
+    with xr.open_dataset(src, decode_timedelta=False, engine="netcdf4") as ds:
         missing = [v for v in (*MESH_VARS, *SCRIP_SOURCE_VARS)
                    if v not in ds.variables]
         if missing:
@@ -156,5 +156,5 @@ def coverage_of(scrip_path: str | Path) -> float:
     1.0, and a regional one at its real fraction. Anything wildly off means the
     areas or the sphere radius went in wrong.
     """
-    with xr.open_dataset(resolve_path(scrip_path)) as ds:
+    with xr.open_dataset(resolve_path(scrip_path), engine="netcdf4") as ds:
         return float(ds.grid_area.values.sum() / (4.0 * np.pi))

@@ -201,7 +201,7 @@ class Series:
             self._open.move_to_end(path)
             return self._open[path]
 
-        ds = xr.open_dataset(path, decode_timedelta=False)
+        ds = xr.open_dataset(path, decode_timedelta=False, engine="netcdf4")
         self._open[path] = ds
         while len(self._open) > LRU_SIZE:
             _, old = self._open.popitem(last=False)
