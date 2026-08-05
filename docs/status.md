@@ -1,11 +1,19 @@
 # Status
 
-As of 0.4.0, gmpas covers the pipeline from both ends.
+As of 0.4.2, gmpas covers the pipeline from both ends.
 
 **Postprocessing** — plotting, the interactive viewer, and conservative
-remapping — is implemented. gmpas does not compute remapping weights itself;
-it writes the grid files ESMF or TempestRemap need, applies the result and
-checks that it conserved. See [REMAPPING.md](./REMAPPING.md).
+remapping — is implemented. `gmpas remap` writes the grid files ESMF needs,
+runs it, applies the result and checks that it conserved, all from the
+command line; gmpas does not compute the weights itself. On a machine with
+`srun` or `mpirun`/`mpiexec` available and an MPI-capable ESMF build, weight
+generation uses `-j` ranks instead of one. See [REMAPPING.md](./REMAPPING.md).
+
+gmpas does not install ESMF (or NCO) itself, on purpose — see
+[issue 34](https://github.com/nmathewa/gmpas-lib/issues/34). On an HPC site,
+load the site's own build (`module load esmf`) rather than a conda-forge copy
+in gmpas's own environment; the two compete on `PATH`/`LD_LIBRARY_PATH`
+rather than help.
 
 **Preprocessing** covers `prep view`, `prep hfun` and `prep generate`: looking
 at a mesh after it exists, looking at a distance function before any mesh
@@ -18,11 +26,14 @@ everything `mkgrid` reads.
   out to, named by `$JIGSAWDIR` and `$MKGRIDFILE`. `gmpas prep generate` runs
   the whole chain through to `grid.nc`, but only if you have built them
   ([issue 30](https://github.com/nmathewa/gmpas-lib/issues/30)).
-- **Applying weights from the command line**
-  ([issue 2](https://github.com/nmathewa/gmpas-lib/issues/2)). `ncremap -m`
-  does it today.
 - **Comparing a generated mesh against the `hfun.py` that asked for it** —
   the two are one click apart in the viewer, but nothing yet differences them.
+- **Confirming the MPI launcher and the ESMF build it runs actually match**
+  on real HPC hardware. The `esmf.mk`-based check only rules out a build with
+  no MPI at all (`mpiuni`); a real-MPI build launched by a *different* MPI
+  implementation than it was linked against fails the same uncoordinated-rank
+  way and cannot be detected from outside
+  ([issue 34](https://github.com/nmathewa/gmpas-lib/issues/34)).
 
 ## Known rough edges
 
