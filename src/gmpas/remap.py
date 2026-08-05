@@ -54,7 +54,7 @@ class Weights:
     @classmethod
     def load(cls, path: str | Path) -> "Weights":
         p = Path(path)
-        with xr.open_dataset(p) as w:
+        with xr.open_dataset(p, engine="netcdf4") as w:
             return cls(
                 row=w.row.values - 1,        # SCRIP indices are 1-based
                 col=w.col.values - 1,
@@ -318,7 +318,7 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
     slabs = 0
     worst = 0.0
 
-    with xr.open_dataset(path, decode_timedelta=False) as ds:
+    with xr.open_dataset(path, decode_timedelta=False, engine="netcdf4") as ds:
         keep, skip = remappable(ds, fields)
         n_time = int(ds.sizes.get("Time", 1))
 
