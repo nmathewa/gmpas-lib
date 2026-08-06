@@ -450,7 +450,8 @@ def test_ensure_weights_declines_the_launcher_on_a_mpiuni_build(tmp_path, monkey
 
     assert calls[0] == ["/fake/esmf", "-s", "src.scrip.nc", "-d", "dst.scrip.nc",
                         "-w", "map_conserve.nc", "-m", "conserve",
-                        "--src_regional", "--dst_regional", "--ignore_unmapped"]
+                        "--src_regional", "--dst_regional", "--ignore_unmapped",
+                        "--no_log"]
 
 
 # ------------------------------------------------------- output construction
