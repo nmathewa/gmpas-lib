@@ -334,6 +334,40 @@ def read_msh_counts(path: Path) -> tuple[int, int]:
 # ------------------------------------------------------------------- the run
 
 
+#: lines of a tool's output kept for the error message when it fails
+TAIL_LINES = 8
+
+
+def _run_streaming(cmd, cwd, quiet: bool = False,
+                   prefix: str = "    ") -> tuple[int, list[str]]:
+    """Run a tool, echoing its output live, and keep the tail for errors.
+
+    `subprocess.run(capture_output=True)` swallows everything until the
+    process exits, which for JIGSAW means one line of "this is the slow
+    part" and then total silence for however many minutes it runs -- no way
+    to tell progress from a stall. MESH.jig asks for VERBOSITY=1, so JIGSAW
+    is emitting progress the whole time; this stops throwing it away.
+
+    Returns (returncode, last TAIL_LINES lines), so a failure still reports
+    the tail even though the output has already been shown.
+    """
+    from collections import deque
+
+    tail: deque[str] = deque(maxlen=TAIL_LINES)
+    proc = subprocess.Popen(
+        [str(c) for c in cmd], cwd=cwd, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        bufsize=1,                       # line buffered: progress as it happens
+    )
+    with proc.stdout:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            tail.append(line)
+            if not quiet:
+                print(f"{prefix}{line}", flush=True)
+    return proc.wait(), list(tail)
+
+
 def generate(hfun_path, out_dir="mesh", jigsaw: str | Path | None = None,
              qlim: float = DEFAULT_QLIM, init: str | None = None,
              force: bool = False, quiet: bool = False,
@@ -390,14 +424,12 @@ def generate(hfun_path, out_dir="mesh", jigsaw: str | Path | None = None,
         print(f"  running {tool.name} — this is the slow part")
 
     t0 = time.perf_counter()
-    done = subprocess.run([str(tool), "MESH.jig"], cwd=out,
-                          capture_output=True, text=True)
+    code, tail = _run_streaming([tool, "MESH.jig"], cwd=out, quiet=quiet)
     seconds = time.perf_counter() - t0
 
-    if done.returncode != 0 or not mesh_msh.exists():
-        tail = (done.stdout or done.stderr or "").strip().splitlines()[-8:]
+    if code != 0 or not mesh_msh.exists():
         raise GenerateError(
-            f"jigsaw failed (exit {done.returncode}) after {seconds:.1f} s.\n"
+            f"jigsaw failed (exit {code}) after {seconds:.1f} s.\n"
             + "\n".join(f"    {line}" for line in tail)
         )
 
@@ -448,14 +480,12 @@ def run_mkgrid(tool: Path | None, result: Generated, out: Path,
         grid.unlink(missing_ok=True)
 
         t0 = time.perf_counter()
-        done = subprocess.run([str(tool), f"{nominal:g}"], cwd=out,
-                              capture_output=True, text=True)
+        code, tail = _run_streaming([tool, f"{nominal:g}"], cwd=out, quiet=quiet)
         result.mkgrid_seconds = time.perf_counter() - t0
 
-        if done.returncode != 0 or not grid.exists():
-            tail = (done.stdout or done.stderr or "").strip().splitlines()[-8:]
+        if code != 0 or not grid.exists():
             raise GenerateError(
-                f"mkgrid failed (exit {done.returncode}) after "
+                f"mkgrid failed (exit {code}) after "
                 f"{result.mkgrid_seconds:.1f} s.\n"
                 + "\n".join(f"    {line}" for line in tail)
             )
