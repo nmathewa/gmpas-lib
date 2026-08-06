@@ -118,7 +118,23 @@ class Series:
         self.files = expand(paths)
         self._open: OrderedDict[Path, xr.Dataset] = OrderedDict()
 
-        first = self._dataset(self.files[0])
+        # netCDF4/HDF5 is not safe for concurrent access from multiple
+        # threads, and the viewer serves every HTTP request on its own
+        # thread (ThreadingHTTPServer) -- a request scrubbing the time slider
+        # can run at the same moment as an animation's frame-by-frame loop,
+        # which nothing in the UI serializes. Every read through this Series
+        # -- cache lookup, LRU eviction, and the disk read itself -- happens
+        # under this one lock, held for the read's full duration rather than
+        # just around the dict bookkeeping: releasing it as soon as a cached
+        # handle is returned would still let one thread's eviction close a
+        # dataset another thread is mid-read on, corrupting or NaN-ing that
+        # frame rather than raising. `_scan`'s own handles are included, even
+        # though they never touch this cache, because the race is in the
+        # underlying C library, not just this dict.
+        self._lock = threading.Lock()
+
+        with self._lock:
+            first = self._dataset(self.files[0])
 
         if mesh_path:
             self.mesh = MpasMesh.load(resolve_path(mesh_path))
@@ -175,7 +191,13 @@ class Series:
 
         Uses netCDF4 rather than xarray -- 1.6 ms per file against 7.3 ms,
         because reading one dimension does not need xarray's decoding. Keeps
-        its own handles so it never touches the LRU another thread is using.
+        its own handles so it never touches the LRU another thread is using
+        -- but still takes `self._lock` per file, held only for that one
+        open+read: the cache dict is not the only thing at risk here, the
+        underlying netCDF4/HDF5 library itself is not safe under concurrent
+        access from another thread, whether or not the two sides share a
+        handle. Locked per file rather than for the whole scan so a frame
+        request only ever waits as long as one file's dimension read.
         """
         import netCDF4
 
@@ -184,7 +206,7 @@ class Series:
             if path in counts:
                 continue
             try:
-                with netCDF4.Dataset(path) as nc:
+                with self._lock, netCDF4.Dataset(path) as nc:
                     dim = nc.dimensions.get("Time")
                     counts[path] = len(dim) if dim is not None else 1
             except Exception:
@@ -197,6 +219,7 @@ class Series:
     # -- files -----------------------------------------------------------
 
     def _dataset(self, path: Path) -> xr.Dataset:
+        """Caller must hold `self._lock` -- see the note in `__init__`."""
         if path in self._open:
             self._open.move_to_end(path)
             return self._open[path]
@@ -209,9 +232,10 @@ class Series:
         return ds
 
     def close(self) -> None:
-        for ds in self._open.values():
-            ds.close()
-        self._open.clear()
+        with self._lock:
+            for ds in self._open.values():
+                ds.close()
+            self._open.clear()
 
     # -- access ----------------------------------------------------------
 
@@ -231,7 +255,8 @@ class Series:
     @property
     def first(self) -> xr.Dataset:
         """The dataset backing step 0 -- what to introspect for variables."""
-        return self._dataset(self.files[0])
+        with self._lock:
+            return self._dataset(self.files[0])
 
     @property
     def n_files(self) -> int:
@@ -241,19 +266,31 @@ class Series:
         return self.groups.get(dim, [])
 
     def dataarray(self, var: str, step: int = 0) -> xr.DataArray:
+        """A lazy reference -- `.attrs`/`.dims`/`.sizes` are safe to read
+        afterward, but not `.values`: the file behind it can be evicted and
+        closed by another thread before you get to it. Use `values()` to
+        actually read data."""
         path, _ = self.steps[step]
-        ds = self._dataset(path)
-        if var not in ds:
-            raise KeyError(f"{var!r} not in {path.name}")
-        return ds[var]
+        with self._lock:
+            ds = self._dataset(path)
+            if var not in ds:
+                raise KeyError(f"{var!r} not in {path.name}")
+            return ds[var]
 
     def values(self, var: str, step: int = 0, level: int = 0) -> np.ndarray:
-        """One field at one step in the series, as a flat per-element array."""
+        """One field at one step in the series, as a flat per-element array.
+
+        The actual disk read (`select` materialises `.values`) happens
+        inside the lock along with the cache lookup, not after it -- the
+        returned array is a plain, fully detached numpy array, so nothing
+        else needs to hold the lock once this returns.
+        """
         path, local = self.steps[step]
-        ds = self._dataset(path)
-        if var not in ds:
-            raise KeyError(f"{var!r} not in {path.name}")
-        return select(ds[var], time=local, level=level)
+        with self._lock:
+            ds = self._dataset(path)
+            if var not in ds:
+                raise KeyError(f"{var!r} not in {path.name}")
+            return select(ds[var], time=local, level=level)
 
     def __repr__(self) -> str:
         return (f"<Series {len(self.steps)} steps across {self.n_files} files"

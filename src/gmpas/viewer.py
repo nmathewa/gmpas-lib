@@ -20,6 +20,7 @@ import io
 import json
 import threading
 import webbrowser
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -34,6 +35,13 @@ from .series import Series
 #: colormaps offered in the picker, chosen to cover the usual field kinds
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo",
          "RdBu_r", "coolwarm", "BrBG", "Blues", "Spectral_r"]
+
+#: distinct view boxes to keep a ViewIndex/overlay cached for. Each entry is
+#: an nx*ny array pair (~7.5 MB at the 1200x700 default), and nothing evicted
+#: this before -- panning and zooming around over a long session, which is
+#: exactly what building up several animations for different variables looks
+#: like, grew both dicts without bound for the life of the server process.
+VIEW_LRU_SIZE = 12
 
 
 def ramp(name: str, n: int = 32) -> list[str]:
@@ -168,8 +176,8 @@ class Viewer:
         self.mesh = self.series.mesh
         self.nx, self.ny = nx, ny
         self.home = self.mesh.extent
-        self._views: dict[tuple, ViewIndex] = {}
-        self._overlays: dict[tuple, bytes] = {}
+        self._views: OrderedDict[tuple, ViewIndex] = OrderedDict()
+        self._overlays: OrderedDict[tuple, bytes] = OrderedDict()
         self._lock = threading.Lock()
 
     # -- variables -------------------------------------------------------
@@ -221,17 +229,27 @@ class Viewer:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
         with self._lock:
-            if key not in self._views:
-                self._views[key] = ViewIndex(self.mesh, extent, nx, ny)
-            return self._views[key]
+            if key in self._views:
+                self._views.move_to_end(key)
+                return self._views[key]
+            index = ViewIndex(self.mesh, extent, nx, ny)
+            self._views[key] = index
+            if len(self._views) > VIEW_LRU_SIZE:
+                self._views.popitem(last=False)
+            return index
 
     def overlay(self, extent, nx=None, ny=None) -> bytes:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
         with self._lock:
-            if key not in self._overlays:
-                self._overlays[key] = _overlay(extent, nx, ny)
-            return self._overlays[key]
+            if key in self._overlays:
+                self._overlays.move_to_end(key)
+                return self._overlays[key]
+            png = _overlay(extent, nx, ny)
+            self._overlays[key] = png
+            if len(self._overlays) > VIEW_LRU_SIZE:
+                self._overlays.popitem(last=False)
+            return png
 
     def values(self, var: str, time: int, level: int) -> np.ndarray:
         """`time` indexes the whole series, across files, not one file."""
