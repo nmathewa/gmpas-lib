@@ -261,7 +261,15 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
     launch, note = _mpi_launch_prefix(ranks, tool)
     cmd = launch + [tool, "-s", src_scrip.name, "-d", dst_scrip.name,
                     "-w", weights.name, "-m", method,
-                    "--src_regional", "--dst_regional", "--ignore_unmapped"]
+                    "--src_regional", "--dst_regional", "--ignore_unmapped",
+                    # ESMF's own default logs every message from every rank,
+                    # and warns that this "may cause slowdown in performance"
+                    # -- real cost under -np 64+ on a shared/parallel
+                    # filesystem, not just noise. gmpas's own error handling
+                    # only reads captured stdout/stderr (below), never these
+                    # per-PET log files, so there is nothing here that relies
+                    # on them existing.
+                    "--no_log"]
     if not quiet:
         if note:
             print(f"  {note}")
