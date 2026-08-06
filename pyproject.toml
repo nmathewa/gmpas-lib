@@ -26,6 +26,7 @@ dependencies = [
     "scipy>=1.10",        # cKDTree: exact Voronoi cell lookup
     "xarray>=2023.1",
     "netCDF4>=1.6",
+    "cftime>=1.6",         # calendar-aware Time encoding in `gmpas remap` output
 ]
 
 [project.scripts]

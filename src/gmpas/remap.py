@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,7 @@ import xarray as xr
 
 from .config import TargetDomain
 from .scrip import write_scrip
+from .series import parse_time
 
 #: dimensions a field may be stacked along, beyond Time
 LEVEL_PREFIXES = ("nVert", "nSoil", "nIso")
@@ -424,9 +426,59 @@ def remap_many(jobs, weights: "Weights", weights_path, workers: int = 1,
 # --------------------------------------------------------------------- file
 
 
+def _decode_xtime(value) -> str:
+    """One `xtime` entry -- a fixed-width byte string -- as plain text."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8").strip()
+    return str(value).strip()
+
+
+def valid_times(ds: xr.Dataset, path, n_time: int) -> np.ndarray | None:
+    """Valid time for each of a file's Time steps, or None if none is known.
+
+    `xtime` is MPAS's own record and is preferred when present: it can
+    disagree with the filename (a restart run stamped with its start time,
+    for instance), and unlike the filename it carries one value per step, not
+    just one for the whole file. The filename is the fallback, and only
+    usable at all for a single-step file -- there is no way to recover
+    several steps' worth of times from one timestamp.
+
+    Returns None rather than raising on a date `datetime` cannot represent
+    (some idealised runs use a 360-day or no-leap calendar, where `xtime`
+    can contain a date like day 30 of February) -- see the calendar note on
+    `remap_file`.
+    """
+    if "xtime" in ds.variables:
+        try:
+            return np.array(
+                [datetime.strptime(_decode_xtime(v), "%Y-%m-%d_%H:%M:%S")
+                 for v in np.asarray(ds["xtime"].values)],
+                dtype="datetime64[ns]",
+            )
+        except ValueError:
+            pass   # not a calendar datetime can represent -- try the filename
+
+    if n_time == 1:
+        t = parse_time(Path(path))
+        if t is not None:
+            return np.array([t], dtype="datetime64[ns]")
+
+    return None
+
+
 def remap_file(path, weights: Weights, domain: TargetDomain, fields,
                out_path) -> dict:
-    """Remap one file's selected fields and write one netCDF beside it."""
+    """Remap one file's selected fields and write one netCDF beside it.
+
+    Attaches a real CF `Time` coordinate when the source's valid time can be
+    determined (see `valid_times`), under the source's own declared calendar
+    (`config_calendar_type`, MPAS's own namelist-derived attribute; "gregorian"
+    -- MPAS's own default -- when the source doesn't carry one). An idealised
+    run on a non-standard calendar (360-day, no-leap) can carry an `xtime`
+    date that plain Gregorian arithmetic cannot represent at all; `valid_times`
+    returns None rather than guessing in that case, and the output is written
+    exactly as before this existed -- no Time coordinate, not a wrong one.
+    """
     lat, lon = domain.lats(), domain.lons()
     result: dict[str, xr.DataArray] = {}
     slabs = 0
@@ -435,6 +487,11 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
     with xr.open_dataset(path, decode_timedelta=False, engine="netcdf4") as ds:
         keep, skip = remappable(ds, fields)
         n_time = int(ds.sizes.get("Time", 1))
+        has_source_time = "Time" in ds.dims
+        times = valid_times(ds, path, n_time) if has_source_time else None
+        xtime = (np.array(ds["xtime"].values)
+                if has_source_time and "xtime" in ds.variables else None)
+        calendar = ds.attrs.get("config_calendar_type") or "gregorian"
 
         for name in keep:
             da = ds[name]
@@ -475,10 +532,22 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
 
             result[name] = xr.DataArray(block, dims=dims, attrs=dict(da.attrs))
 
+    coords = {"lat": ("lat", lat, {"units": "degrees_north"}),
+             "lon": ("lon", lon, {"units": "degrees_east"})}
+    encoding = {}
+    if times is not None:
+        coords["Time"] = ("Time", times)
+        encoding["Time"] = {"units": "hours since 1970-01-01", "calendar": calendar}
+    if xtime is not None:
+        result["xtime"] = xr.DataArray(
+            xtime, dims=("Time",),
+            attrs={"note": "MPAS's own record of the valid time, carried "
+                           "through unchanged"},
+        )
+
     out = xr.Dataset(
         result,
-        coords={"lat": ("lat", lat, {"units": "degrees_north"}),
-                "lon": ("lon", lon, {"units": "degrees_east"})},
+        coords=coords,
         attrs={
             "title": "MPAS output remapped to a regular lat-lon grid",
             "source_file": Path(path).name,
@@ -491,6 +560,6 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
     )
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out.to_netcdf(out_path)
+    out.to_netcdf(out_path, encoding=encoding or None)
     return {"out": out_path, "fields": len(result), "slabs": slabs,
-            "skipped": skip, "conservation": worst}
+            "skipped": skip, "conservation": worst, "time_coord": times is not None}

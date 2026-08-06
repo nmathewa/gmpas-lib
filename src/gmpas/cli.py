@@ -501,6 +501,10 @@ def _remap(args) -> int:
             for name, why in info["skipped"]:
                 print(f"  not remapped — {name}: {why}")
             print(f"  conservation error {info['conservation']:.1e} (0 is exact)")
+            if not info.get("time_coord"):
+                print("  no Time coordinate attached — the source carries no "
+                      "xtime and its filename has no timestamp gmpas can read; "
+                      "output cannot be sorted/concatenated by time")
     if bar:
         bar.close()
 

@@ -10,7 +10,7 @@ from conftest import write_mesh
 from gmpas.config import TargetDomain
 from gmpas.remap import (RemapError, Weights, _esmf_supports_mpi,
                          _mpi_launch_prefix, ensure_weights, level_dim,
-                         remappable)
+                         remappable, remap_file, valid_times)
 
 
 def _weight_file(path, row, col, S, area_a, area_b, frac_a, frac_b):
@@ -436,9 +436,6 @@ def test_each_vertical_dimension_keeps_its_own_name(tmp_path):
     nVertLevels (55), nVertLevelsP1 (56) and nSoilLevels (4) appear in one
     file. Calling them all "lev" makes xarray try to align them and refuse.
     """
-    from conftest import write_mesh
-    from gmpas.remap import remap_file
-
     path = tmp_path / "h.nc"
     write_mesh(path, [(0.0, 0.0), (2.0, 0.0), (0.0, 2.0)])
     with xr.open_dataset(path) as d:
@@ -471,6 +468,153 @@ def test_each_vertical_dimension_keeps_its_own_name(tmp_path):
         assert out.sizes["nVertLevels"] == 5
         assert out.sizes["nVertLevelsP1"] == 6
         assert out.sizes["nSoilLevels"] == 2
+
+
+# --------------------------------------------------------------- valid_times
+
+
+def _xtime_ds(*stamps):
+    """A bare Dataset carrying only what `valid_times` looks at."""
+    raw = np.array([s.ljust(64).encode() for s in stamps], dtype="S64")
+    return xr.Dataset({"xtime": ("Time", raw)})
+
+
+def test_valid_times_reads_xtime():
+    ds = _xtime_ds("2012-02-25_12:00:00", "2012-02-25_13:00:00")
+    got = valid_times(ds, "irrelevant.nc", n_time=2)
+    expected = np.array(["2012-02-25T12:00:00", "2012-02-25T13:00:00"],
+                        dtype="datetime64[ns]")
+    assert (got == expected).all()
+
+
+def test_valid_times_prefers_xtime_over_the_filename():
+    """xtime is MPAS's own record and can legitimately disagree with the
+    filename -- e.g. a restart run stamped with its start time."""
+    ds = _xtime_ds("2012-02-25_12:00:00")
+    got = valid_times(ds, "history.2012-02-20_00.00.00.nc", n_time=1)
+    assert got == np.array(["2012-02-25T12:00:00"], dtype="datetime64[ns]")
+
+
+def test_valid_times_falls_back_to_the_filename_without_xtime():
+    ds = xr.Dataset({"t2m": ("nCells", [1.0, 2.0])})
+    got = valid_times(ds, "history.2012-02-25_12.00.00.nc", n_time=1)
+    assert got == np.array(["2012-02-25T12:00:00"], dtype="datetime64[ns]")
+
+
+def test_valid_times_cannot_recover_several_steps_from_one_filename():
+    """One timestamp in a filename cannot stand in for several real steps."""
+    ds = xr.Dataset({"t2m": ("Time", [1.0, 2.0])})
+    assert valid_times(ds, "history.2012-02-25_12.00.00.nc", n_time=2) is None
+
+
+def test_valid_times_is_none_with_neither_source():
+    ds = xr.Dataset({"t2m": ("nCells", [1.0, 2.0])})
+    assert valid_times(ds, "h.nc", n_time=1) is None
+
+
+def test_valid_times_falls_back_when_xtime_is_not_a_gregorian_date():
+    """An idealised run on a 360-day or no-leap calendar can write an xtime
+    date plain Gregorian arithmetic cannot represent (day 30 of February).
+    Falling back to the filename, when it can help, beats raising."""
+    ds = _xtime_ds("0001-02-30_00:00:00")
+    got = valid_times(ds, "history.2012-02-25_12.00.00.nc", n_time=1)
+    assert got == np.array(["2012-02-25T12:00:00"], dtype="datetime64[ns]")
+
+
+def test_valid_times_is_none_when_nothing_can_be_parsed():
+    ds = _xtime_ds("0001-02-30_00:00:00")
+    assert valid_times(ds, "h.nc", n_time=1) is None
+
+
+# -------------------------------------------------- remap_file: Time output
+
+
+def _write_time_varying(tmp_path, xtime=None, calendar=None, name="h.nc"):
+    """A mesh file with one time-varying field, optionally carrying xtime
+    and a calendar attribute, saved under `name`."""
+    path = tmp_path / name
+    write_mesh(path, [(0.0, 0.0), (2.0, 0.0), (0.0, 2.0)])
+    with xr.open_dataset(path) as d:
+        ds = d.load()
+    ds["t2m"] = (("Time", "nCells"), np.array([[1.0, 2.0, 3.0]], dtype="f4"))
+    if xtime is not None:
+        ds["xtime"] = ("Time", np.array([xtime.ljust(64).encode()], dtype="S64"))
+    if calendar is not None:
+        ds.attrs["config_calendar_type"] = calendar
+    ds.to_netcdf(path, mode="w")
+    return path
+
+
+def _domain_and_weights(tmp_path):
+    weights = _weight_file(
+        tmp_path / "map.nc",
+        row=[1, 2, 3], col=[1, 2, 3], S=[1.0, 1.0, 1.0],
+        area_a=[1.0, 1.0, 1.0], area_b=[1.0, 1.0, 1.0],
+        frac_a=[1.0, 1.0, 1.0], frac_b=[1.0, 1.0, 1.0],
+    )
+    domain = TargetDomain(nlat=1, nlon=3, startlat=-1.0, endlat=1.0,
+                          startlon=-1.0, endlon=5.0)
+    return domain, weights
+
+
+def test_remap_file_attaches_a_cf_time_coordinate_from_xtime(tmp_path):
+    path = _write_time_varying(tmp_path, xtime="2012-02-25_12:00:00")
+    domain, weights = _domain_and_weights(tmp_path)
+
+    info = remap_file(path, weights, domain, ["t2m"], tmp_path / "out.nc")
+    assert info["time_coord"] is True
+
+    with xr.open_dataset(tmp_path / "out.nc") as out:
+        assert out.Time.values == np.array(["2012-02-25T12:00:00"], dtype="datetime64[ns]")
+        assert out.xtime.values[0].decode().strip() == "2012-02-25_12:00:00"
+
+
+def test_remap_file_carries_the_source_calendar(tmp_path):
+    path = _write_time_varying(tmp_path, xtime="2012-02-25_12:00:00",
+                               calendar="360_day")
+    domain, weights = _domain_and_weights(tmp_path)
+
+    remap_file(path, weights, domain, ["t2m"], tmp_path / "out.nc")
+
+    with xr.open_dataset(tmp_path / "out.nc", decode_times=False) as out:
+        assert out.Time.attrs["calendar"] == "360_day"
+
+
+def test_remap_file_defaults_to_gregorian_without_a_source_calendar(tmp_path):
+    path = _write_time_varying(tmp_path, xtime="2012-02-25_12:00:00")
+    domain, weights = _domain_and_weights(tmp_path)
+
+    remap_file(path, weights, domain, ["t2m"], tmp_path / "out.nc")
+
+    with xr.open_dataset(tmp_path / "out.nc", decode_times=False) as out:
+        assert out.Time.attrs["calendar"] == "gregorian"
+
+
+def test_remap_file_falls_back_to_the_filename_without_xtime(tmp_path):
+    path = _write_time_varying(tmp_path, name="history.2012-02-25_12.00.00.nc")
+    domain, weights = _domain_and_weights(tmp_path)
+
+    info = remap_file(path, weights, domain, ["t2m"], tmp_path / "out.nc")
+    assert info["time_coord"] is True
+
+    with xr.open_dataset(tmp_path / "out.nc") as out:
+        assert out.Time.values == np.array(["2012-02-25T12:00:00"], dtype="datetime64[ns]")
+
+
+def test_remap_file_writes_without_a_time_coordinate_when_nothing_is_known(tmp_path):
+    """No xtime, no timestamp in the filename -- writes exactly as it always
+    did, just without the coordinate it has no way to determine."""
+    path = _write_time_varying(tmp_path, name="h.nc")
+    domain, weights = _domain_and_weights(tmp_path)
+
+    info = remap_file(path, weights, domain, ["t2m"], tmp_path / "out.nc")
+    assert info["time_coord"] is False
+    assert info["fields"] == 1
+
+    with xr.open_dataset(tmp_path / "out.nc") as out:
+        assert "Time" not in out.coords
+        assert "Time" in out.t2m.dims          # the dimension is still real
+        assert out.t2m.isel(Time=0).values.tolist() == [[1.0, 2.0, 3.0]]
 
 
 # ------------------------------------------------------------ core detection
