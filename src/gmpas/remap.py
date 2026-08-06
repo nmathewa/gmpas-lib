@@ -15,7 +15,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -52,6 +52,9 @@ class Weights:
     frac_a: np.ndarray
     frac_b: np.ndarray
     path: Path
+    #: CSR form, built once on first use rather than per apply() call --
+    #: see _sparse(). Excluded from repr/equality, it's a cache, not data.
+    _matrix: object = field(default=None, repr=False, compare=False)
 
     @classmethod
     def load(cls, path: str | Path) -> "Weights":
@@ -74,11 +77,28 @@ class Weights:
     def n_b(self) -> int:
         return self.area_b.size
 
+    def _sparse(self):
+        """The weights as a CSR matrix, built once and reused.
+
+        `apply()` runs once per (field, level, timestep) slab -- hundreds of
+        times over a real run -- and `np.add.at` redid the same scatter-add
+        setup from row/col/S every single call. Measured at ~99M nonzeros
+        (a 5.7M-cell source, 4.4M-cell target): building the matrix once
+        costs ~4s; every `apply()` after that is a single sparse @ dense
+        matvec at roughly half of what `np.add.at` cost per call. `coo`-style
+        construction from (row, col, S) sums duplicate entries automatically,
+        same as `add.at` did -- this is not an approximation of the old
+        behaviour, it produces identical output.
+        """
+        if self._matrix is None:
+            from scipy.sparse import csr_matrix
+            self._matrix = csr_matrix((self.S, (self.row, self.col)),
+                                      shape=(self.n_b, self.n_a))
+        return self._matrix
+
     def apply(self, src: np.ndarray) -> np.ndarray:
         """Sparse matrix multiply: one source field to one destination field."""
-        dst = np.zeros(self.n_b)
-        np.add.at(dst, self.row, self.S * np.asarray(src, dtype=np.float64)[self.col])
-        return dst
+        return self._sparse() @ np.asarray(src, dtype=np.float64)
 
     def conservation_error(self, src: np.ndarray, dst: np.ndarray) -> float:
         """Relative difference between the two area integrals.

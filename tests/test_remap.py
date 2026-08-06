@@ -76,6 +76,32 @@ def test_a_constant_field_stays_constant(weights):
     assert weights.apply(np.ones(2)) == pytest.approx([1.0, 1.0])
 
 
+def test_the_sparse_matrix_is_built_once_and_reused(weights):
+    """apply() runs once per field/level/timestep slab over a real run --
+    rebuilding the CSR matrix from row/col/S every call would throw away
+    the whole point of caching it."""
+    assert weights._matrix is None
+    weights.apply(np.array([4.0, 8.0]))
+    m = weights._matrix
+    assert m is not None
+    weights.apply(np.array([1.0, 2.0]))
+    assert weights._matrix is m
+
+
+def test_duplicate_row_col_pairs_accumulate_like_add_at_did(tmp_path):
+    """csr_matrix construction from (row, col, S) triples sums duplicates
+    automatically -- confirming that switching apply() from np.add.at to a
+    precomputed sparse matvec is not an approximation of the old behaviour,
+    it produces identical output. Two entries land on the same (row, col)."""
+    w = _weight_file(
+        tmp_path / "dup.nc",
+        row=[1, 1], col=[1, 1], S=[0.5, 0.25],   # same destination and source cell
+        area_a=[1.0], area_b=[1.0], frac_a=[1.0], frac_b=[1.0],
+    )
+    dst = w.apply(np.array([4.0]))
+    assert dst == pytest.approx([0.5 * 4.0 + 0.25 * 4.0])
+
+
 def test_the_area_integral_is_preserved(weights):
     for src in (np.ones(2), np.array([4.0, 8.0]), np.array([-1.5, 2.25])):
         dst = weights.apply(src)
