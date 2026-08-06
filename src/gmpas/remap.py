@@ -423,8 +423,22 @@ def remap_many(jobs, weights: "Weights", weights_path, workers: int = 1,
     `jobs` is (source, output, domain, fields) tuples. With one worker this
     runs in-process; with more it forks where possible so the weights are
     shared rather than copied.
+
+    Built here, before any forking, for the same reason: `apply()` builds
+    and caches the sparse matrix lazily on first use, which is fine for one
+    process, but under `-j N` with fork it would mean N workers each
+    independently building and allocating their own ~nnz-sized copy at the
+    same moment -- right as remapping starts, which is exactly the kind of
+    synchronized burst that looks like the run is stuck before it even
+    begins. Built here, forked workers inherit the same pages by
+    copy-on-write: one build, one allocation, genuinely shared -- not N
+    redundant ones. Spawn-context workers reload their own `Weights` from
+    disk regardless (see `_remap_one`), so this only helps fork, but fork is
+    what Linux -- every real HPC target -- actually uses.
     """
     jobs = list(jobs)
+    weights._sparse()
+
     if workers <= 1:
         _init_worker(weights_path, preloaded=weights)
         for job in jobs:

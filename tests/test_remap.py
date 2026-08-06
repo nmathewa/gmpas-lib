@@ -699,6 +699,25 @@ def test_a_nonsense_value_is_ignored(monkeypatch):
 # -------------------------------------------------------------- parallel run
 
 
+def test_remap_many_builds_the_sparse_matrix_before_any_job_runs(tmp_path, weights):
+    """The point of building it here rather than inside apply(): under -j N
+    with fork, N workers each independently building their own copy at the
+    moment remapping starts is a synchronized burst of cost and memory that
+    looks exactly like the run being stuck. Built once, before Pool forks,
+    every worker inherits the same pages instead."""
+    from gmpas.remap import remap_many
+
+    assert weights._matrix is None
+    domain = TargetDomain(nlat=1, nlon=2, startlat=-1.0, endlat=1.0,
+                          startlon=0.0, endlon=2.0)
+    jobs = [(tmp_path / "absent.nc", tmp_path / "a.nc", domain, ["x"])]
+
+    gen = remap_many(jobs, weights, weights.path, workers=1)
+    next(gen)                       # only the first item -- before any job
+    assert weights._matrix is not None
+    list(gen)                       # drain, so the generator closes cleanly
+
+
 def test_a_failing_file_does_not_stop_the_run(tmp_path, weights):
     """One bad file in two hundred must not lose the other 199."""
     from gmpas.remap import remap_many
