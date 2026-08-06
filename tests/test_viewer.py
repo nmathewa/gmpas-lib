@@ -153,6 +153,22 @@ def test_the_view_cache_keys_on_size_not_just_extent(small_viewer):
     assert small_viewer.view(box, 80, 50) is a       # still cached
 
 
+def test_the_view_cache_does_not_grow_without_bound(small_viewer):
+    """Nothing evicted this before: panning and zooming around over a long
+    session -- exactly what setting up several animations for different
+    variables looks like -- grew _views/_overlays forever, for the life of
+    the server process."""
+    from gmpas.viewer import VIEW_LRU_SIZE
+
+    box = small_viewer.home
+    for i in range(VIEW_LRU_SIZE + 8):
+        small_viewer.view(box, 80 + i, 50)
+        small_viewer.overlay(box, 80 + i, 50)
+
+    assert len(small_viewer._views) == VIEW_LRU_SIZE
+    assert len(small_viewer._overlays) == VIEW_LRU_SIZE
+
+
 def test_a_frame_can_be_asked_for_at_a_larger_size(small_viewer):
     """The margin is fetched at proportionally more pixels to stay sharp."""
     from PIL import Image
@@ -276,6 +292,67 @@ def test_gif_export_holds_every_step(tmp_path):
         gif = v.gif("fld", 0, v.home, "viridis", 0.0, 100.0, 60, 40, fps=5)
         with Image.open(io.BytesIO(gif)) as im:
             assert im.n_frames == 4
+    finally:
+        v.series.close()
+
+
+def test_concurrent_reads_do_not_corrupt_each_other(tmp_path, monkeypatch):
+    """The bug this guards against: an animation's frame-by-frame loop and
+    ordinary navigation (scrubbing, panning, a probe click) are never
+    serialized by the UI, and both end up calling Series.values() on their
+    own ThreadingHTTPServer request thread. Without a lock spanning the
+    whole read -- cache lookup, LRU eviction, and the disk read itself --
+    one thread's eviction can close a file another thread is mid-read on,
+    which came back as NaN or a neighbour's value rather than an exception.
+
+    Each file's field is a distinct, exactly-checkable constant so any
+    cross-contamination or NaN is caught rather than merely suspected. A
+    small LRU_SIZE against many more files forces the eviction this bug
+    needs to happen on nearly every read, not rarely.
+    """
+    import threading
+
+    import xarray as xr
+
+    import gmpas.series as series_mod
+    from conftest import write_mesh
+    from gmpas.viewer import Viewer
+
+    monkeypatch.setattr(series_mod, "LRU_SIZE", 2)
+
+    run = tmp_path / "run"
+    run.mkdir()
+    n_files = 10
+    for i in range(n_files):
+        fp = run / f"history.2012-02-{i + 1:02d}_00.00.00.nc"
+        write_mesh(fp, [(0.0, 0.0), (5.0, 0.0), (0.0, 5.0)])
+        with xr.open_dataset(fp) as d:
+            ds = d.load()
+        ds["fld"] = (("Time", "nCells"), np.full((1, 3), i * 1000.0, dtype="f8"))
+        ds.to_netcdf(fp, mode="w")
+
+    v = Viewer(run, nx=20, ny=20)
+    errors = []
+
+    def hammer(step):
+        try:
+            for _ in range(30):
+                got = v.series.values("fld", step=step, level=0)
+                expected = step * 1000.0
+                if not np.array_equal(got, np.full(3, expected)):
+                    errors.append(
+                        f"step {step}: expected all {expected}, got {got}")
+        except Exception as exc:                # a race must not raise either
+            errors.append(f"step {step}: {type(exc).__name__}: {exc}")
+
+    try:
+        threads = [threading.Thread(target=hammer, args=(i % n_files,))
+                  for i in range(32)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
     finally:
         v.series.close()
 
