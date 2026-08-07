@@ -72,9 +72,10 @@ def save_figure(fig, path: str | Path, style: Style | None = None) -> Path:
     Unlike the MCP server this grew out of, nothing here writes to a fixed
     project directory -- a library saves where the caller says.
 
-    Deliberately no bbox_inches="tight": these figures use constrained_layout,
-    and the two together crop a cartopy GeoAxes down to nothing but its
-    colorbar. constrained_layout already packs the figure.
+    Deliberately no bbox_inches="tight": constrained_layout already packs the
+    figure, so it buys nothing here. It also isn't a safe default in general
+    -- see the geo_labels note in `plot._basemap` for the cartopy bug it used
+    to trigger (title pinned at y=inf, cropping the figure to its colorbar).
     """
     import matplotlib.pyplot as plt
 

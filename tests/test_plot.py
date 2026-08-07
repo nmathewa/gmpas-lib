@@ -81,6 +81,38 @@ def test_mesh_structure_is_labelled_in_km(simple_mesh):
     matplotlib.pyplot.close(fig)
 
 
+def test_title_position_survives_notebook_style_tight_bbox(simple_mesh, values):
+    """Regression: a cartopy GeoAxes title can get pinned at y=inf.
+
+    `Gridliner.geo_labels` defaults True whenever `draw_labels=True` does,
+    even with top/right labels turned off. `GeoAxes._update_title_position`
+    then measures the (hidden) top label artists anyway; their null bbox's
+    `.ymax` comes back `inf` rather than the intended `-inf`, and the title
+    gets pinned there. A title at y=inf NaNs the axes' tight bbox, so
+    `bbox_inches="tight"` -- what Jupyter's inline backend uses by default
+    to auto-display a returned figure -- crops the map away entirely and
+    leaves only the colorbar. `_basemap` clears `geo_labels` too to avoid
+    this; guard both the position and the rendered size so a regression
+    here is caught without a notebook.
+    """
+    import io
+
+    fig, ax = cell_field(simple_mesh, values, method="poly")
+    assert ax.title.get_position()[1] == pytest.approx(1.0)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    matplotlib.pyplot.close(fig)
+
+    full = io.BytesIO()
+    fig2, _ = cell_field(simple_mesh, values, method="poly")
+    fig2.savefig(full, format="png")
+    matplotlib.pyplot.close(fig2)
+
+    # a crop-to-colorbar comes back at a few KB; the real map is much larger
+    assert buf.tell() > full.tell() * 0.5
+
+
 # -------------------------------------------------------------------- errors
 
 

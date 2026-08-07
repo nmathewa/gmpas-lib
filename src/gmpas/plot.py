@@ -63,6 +63,14 @@ def _basemap(mesh: MpasMesh, style: Style, extent, central_lon: float = 0.0,
     gl = ax.gridlines(draw_labels=True, linewidth=style.gridline_lw,
                       linestyle="--", alpha=0.5)
     gl.top_labels = gl.right_labels = False
+    # geo_labels defaults True whenever draw_labels does. GeoAxes title
+    # placement checks `top_labels or geo_labels` and, when true, measures
+    # gl.top_label_artists even though top_labels is off here -- those Texts
+    # are hidden, so matplotlib's null-bbox sentinel leaves .ymax == inf and
+    # the title gets pinned there (cartopy bug). A title stuck at y=inf NaNs
+    # the axes' tight bbox, so any inline display (Jupyter's default
+    # bbox_inches="tight") renders nothing but the colorbar.
+    gl.geo_labels = False
 
     if box[0] <= -179.9 and 179.9 <= box[1] <= 180.0:
         ax.set_global()
