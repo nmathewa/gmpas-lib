@@ -208,6 +208,7 @@ gmpas prep scale mesh.nc --scale-factor 2.0 --tan-lat 0 --tan-lon 125 -o scaled.
 
 ```
 mesh.nc -> scaled.nc  (x2 around 0N, 125E)
+comparison plot: scaled.compare.png
 ```
 
 Projects every cell/vertex/edge stereographically onto the plane tangent at
@@ -251,6 +252,23 @@ the boundary, `kiteAreasOnVertex` where a vertex's own neighbours run out —
 falls back to the old value scaled by `scale_factor` (or `scale_factor**2`
 for an area) instead. `dvEdge` has no such case: every edge always has
 exactly two vertices.
+
+#### The comparison plot
+
+By default, a successful scale also writes a before/after cell-width map —
+two panels on one shared colour scale, so a resolution change and a domain
+shift both show up at a glance, at `--plot-out` (default
+`<out stem>.compare.png`). This is a quick sanity check, not a saved
+artefact of the scale itself: pass `--no-plot` to skip it, which also skips
+importing matplotlib/cartopy entirely, so `gmpas prep scale` still works
+without the optional `plot` extra installed.
+
+Unaffected by the topology this scale never touches: the mesh's cell
+adjacency (`cellsOnCell`, `cellsOnEdge`, `verticesOnCell`, ...) passes
+through byte-for-byte unchanged, since only geometry is recomputed. A
+`graph.info` written by `gmpas prep generate` before scaling — and any
+partition file `gpmetis` derived from it — stays valid for the scaled mesh
+without regenerating either.
 
 ### Looking at a mesh before it exists
 

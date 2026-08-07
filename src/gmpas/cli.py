@@ -592,6 +592,18 @@ def _prep_scale(args) -> int:
                      args.tan_lat, args.tan_lon)
     print(f"{args.mesh_file} -> {out}  (x{args.scale_factor:g} around "
          f"{args.tan_lat:g}N, {args.tan_lon:g}E)")
+
+    if not args.no_plot:
+        from .prep.scale import plot_comparison
+
+        plot_out = args.plot_out or f"{out.with_suffix('')}.compare.png"
+        try:
+            png = plot_comparison(args.mesh_file, out, plot_out)
+            print(f"comparison plot: {png}")
+        except ModuleNotFoundError as exc:
+            print(f"gmpas: skipped the comparison plot -- {exc}. Rendering "
+                 f"needs the optional plot extra:  pip install gmpas[plot]  "
+                 f"(or pass --no-plot)", file=sys.stderr)
     return 0
 
 
@@ -792,6 +804,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="latitude of the tangent point, in degrees")
     ps.add_argument("--tan-lon", type=float, required=True,
                     help="longitude of the tangent point, in degrees")
+    ps.add_argument("--no-plot", action="store_true",
+                    help="skip the before/after cell-width comparison PNG")
+    ps.add_argument("--plot-out",
+                    help="comparison PNG path (default: <out stem>.compare.png)")
     ps.set_defaults(func=_prep_scale)
     return p
 

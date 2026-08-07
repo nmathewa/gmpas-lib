@@ -23,6 +23,12 @@ rather than mutating the input in place.
 The whole algorithm assumes `R = 1`; running it on an Earth-scaled mesh
 would silently corrupt every coordinate, so `scale_mesh` checks
 `sphere_radius` and refuses rather than guessing.
+
+`plot_comparison` renders a before/after cell-width map as a quick visual
+check that a scale did what was asked. matplotlib and cartopy are imported
+lazily inside it only, same as everywhere else in gmpas that draws --
+`scale_mesh` itself never needs them, and stays usable in a headless
+install.
 """
 
 from __future__ import annotations
@@ -33,7 +39,9 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from ..mesh import MpasMesh
 from ..paths import resolve_path
+from ..style import CMAPS
 
 #: variables scale_mesh reads and recomputes, beyond mesh identity
 REQUIRED_VARS = (
@@ -399,4 +407,75 @@ def scale_mesh(mesh_path: str | Path, out_path: str | Path,
     out = Path(out_path).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     ds.to_netcdf(out)
+    return out
+
+
+# --------------------------------------------------------------- comparison
+
+def plot_comparison(old_mesh_path: str | Path, new_mesh_path: str | Path,
+                    out_png: str | Path) -> Path:
+    """Before/after cell-width maps, side by side, on one shared colour
+    scale -- a quick visual check that a scale actually did what was asked:
+    resolution changed where expected, the domain pulled in toward the
+    tangent point, and so on. Returns the PNG path.
+
+    Deliberately not a full `plot.cell_field` reuse: this is a rough
+    sanity-check image, not a publication figure, and a self-contained
+    version here keeps this feature from touching the shared rendering path
+    every other plot goes through.
+    """
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import PolyCollection
+
+    before = MpasMesh.load(old_mesh_path)
+    after = MpasMesh.load(new_mesh_path)
+
+    lo = min(before.cell_width_km.min(), after.cell_width_km.min())
+    hi = max(before.cell_width_km.max(), after.cell_width_km.max())
+    cmap = CMAPS["sequential"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.5),
+                             subplot_kw={"projection": ccrs.PlateCarree()},
+                             constrained_layout=True)
+
+    pc = None
+    for ax, mesh, label in ((axes[0], before, "before"), (axes[1], after, "after")):
+        ax.add_feature(cfeature.COASTLINE, linewidth=0.6)
+        gl = ax.gridlines(draw_labels=True, linewidth=0.4, linestyle="--", alpha=0.5)
+        # geo_labels defaults True alongside draw_labels and, left alone,
+        # pins the title at y=inf when top_labels is off, which NaNs the
+        # axes' tight bbox and crops the figure to its colorbar under any
+        # bbox_inches="tight" render (Jupyter's inline backend defaults to
+        # exactly that). See plot._basemap for the full cartopy bug.
+        gl.top_labels = gl.right_labels = gl.geo_labels = False
+
+        if mesh.is_global:
+            ax.set_global()
+        else:
+            ax.set_extent(mesh.extent, crs=ccrs.PlateCarree())
+
+        pc = ax.add_collection(PolyCollection(
+            mesh.cell_verts, array=mesh.cell_width_km, cmap=cmap,
+            clim=(lo, hi), transform=ccrs.PlateCarree(), edgecolors="face"))
+        if mesh.cell_wrapped.any():
+            # a second copy 360 degrees west, so a cell straddling the
+            # antimeridian doesn't smear across the map -- see plot.cell_field
+            dup = mesh.cell_verts[mesh.cell_wrapped].copy()
+            dup[..., 0] -= 360.0
+            ax.add_collection(PolyCollection(
+                dup, array=mesh.cell_width_km[mesh.cell_wrapped], cmap=cmap,
+                clim=(lo, hi), transform=ccrs.PlateCarree(), edgecolors="face"))
+
+        ax.set_title(f"{label}: {mesh.n_cells:,} cells, "
+                    f"{mesh.cell_width_km.min():.1f}-{mesh.cell_width_km.max():.1f} km")
+
+    fig.colorbar(pc, ax=list(axes), shrink=0.8, pad=0.02, label="cell width [km]")
+
+    out = Path(out_png).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # deliberately no bbox_inches="tight" -- see the geo_labels note above
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
     return out

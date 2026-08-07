@@ -198,3 +198,69 @@ def test_cli_default_output_path_is_derived_from_the_input(tmp_path, monkeypatch
     assert main(["prep", "scale", str(path), "--scale-factor", "2.0",
                 "--tan-lat", "0", "--tan-lon", "105"]) == 0
     assert (tmp_path / "m.scaled.nc").exists()
+
+
+def test_cli_no_plot_skips_the_comparison(tmp_path):
+    """No matplotlib/cartopy import needed to get here -- this path stays
+    usable in a headless install."""
+    path = write_mesh(tmp_path / "m.nc", [(100.0, 0.0), (110.0, 5.0)],
+                      with_scale_vars=True, sphere_radius=1.0)
+    out = tmp_path / "scaled.nc"
+
+    assert main(["prep", "scale", str(path), "-o", str(out), "--no-plot",
+                "--scale-factor", "2.0", "--tan-lat", "0", "--tan-lon", "105"]) == 0
+    assert not (tmp_path / "scaled.compare.png").exists()
+
+
+# ---------------------------------------------------------------- comparison
+
+def test_plot_comparison_writes_a_png(tmp_path):
+    pytest.importorskip("matplotlib", reason="needs the `plot` extra")
+    pytest.importorskip("cartopy", reason="needs the `plot` extra")
+    import matplotlib
+    matplotlib.use("Agg")
+    from gmpas.prep.scale import plot_comparison
+
+    path = write_mesh(tmp_path / "m.nc",
+                      [(100.0, 0.0), (110.0, 5.0), (120.0, -5.0)],
+                      with_scale_vars=True, sphere_radius=1.0)
+    out = scale_mesh(path, tmp_path / "scaled.nc", 2.0, 0.0, 105.0)
+
+    png = plot_comparison(path, out, tmp_path / "compare.png")
+    assert png.exists()
+    assert png.stat().st_size > 0
+
+
+def test_cli_prep_scale_writes_a_comparison_plot_by_default(tmp_path, capsys):
+    pytest.importorskip("matplotlib", reason="needs the `plot` extra")
+    pytest.importorskip("cartopy", reason="needs the `plot` extra")
+    import matplotlib
+    matplotlib.use("Agg")
+
+    path = write_mesh(tmp_path / "m.nc",
+                      [(100.0, 0.0), (110.0, 5.0), (120.0, -5.0)],
+                      with_scale_vars=True, sphere_radius=1.0)
+    out = tmp_path / "scaled.nc"
+
+    assert main(["prep", "scale", str(path), "-o", str(out),
+                "--scale-factor", "2.0", "--tan-lat", "0", "--tan-lon", "105"]) == 0
+    assert (tmp_path / "scaled.compare.png").exists()
+    assert "comparison plot:" in capsys.readouterr().out
+
+
+def test_cli_plot_out_overrides_the_default_path(tmp_path):
+    pytest.importorskip("matplotlib", reason="needs the `plot` extra")
+    pytest.importorskip("cartopy", reason="needs the `plot` extra")
+    import matplotlib
+    matplotlib.use("Agg")
+
+    path = write_mesh(tmp_path / "m.nc",
+                      [(100.0, 0.0), (110.0, 5.0), (120.0, -5.0)],
+                      with_scale_vars=True, sphere_radius=1.0)
+    out = tmp_path / "scaled.nc"
+    plot_out = tmp_path / "custom_name.png"
+
+    assert main(["prep", "scale", str(path), "-o", str(out),
+                "--plot-out", str(plot_out), "--scale-factor", "2.0",
+                "--tan-lat", "0", "--tan-lon", "105"]) == 0
+    assert plot_out.exists()
