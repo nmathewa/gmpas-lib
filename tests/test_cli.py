@@ -53,6 +53,29 @@ def test_a_missing_file_is_reported_not_traced(capsys, tmp_path):
     assert "gmpas:" in capsys.readouterr().err
 
 
+def test_missing_plot_dependency_is_reported_not_traced(
+    capsys, tmp_path, simple_mesh_file, monkeypatch
+):
+    """matplotlib/cartopy are the optional `plot` extra -- point at it, don't trace."""
+    diag = write_diag(tmp_path / "diag.nc", n_cells=4, n_edges=24)
+
+    real_import = __import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "matplotlib":
+            raise ModuleNotFoundError("No module named 'matplotlib'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", blocked)
+
+    assert main(["plot", str(diag), "mslp", "--mesh", str(simple_mesh_file),
+                 "-o", str(tmp_path / "out.png")]) == 1
+
+    err = capsys.readouterr().err
+    assert "gmpas:" in err
+    assert "pip install gmpas[plot]" in err
+
+
 def test_all_steps_requires_a_step_placeholder(capsys, tmp_path, simple_mesh_file):
     """A format spec like {step:04d} must count -- it has no bare {step}."""
     diag = write_diag(tmp_path / "diag.nc", n_cells=4, n_edges=24)
