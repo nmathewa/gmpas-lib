@@ -40,4 +40,25 @@ values = run.values("precipw", step=7)   # opens only the file that step needs
 
 For time means, composites and anomalies across a run, use
 `xarray.open_mfdataset` with dask instead — that is what it is good at, and
-`Series` deliberately does not try to replace it.
+`Series` deliberately does not try to replace it:
+
+```python
+import glob
+import xarray as xr
+import gmpas
+
+# MPAS's own file naming sorts chronologically as plain text (zero-padded,
+# big-endian), so a lexicographic sort is a valid Time order here -- no
+# coordinate values to combine on, so combine="nested" rather than "by_coords"
+files = sorted(glob.glob("/path/to/run/history.*.nc"))
+ds = xr.open_mfdataset(files, combine="nested", concat_dim="Time")
+
+mean = ds["precipw"].mean("Time").compute()   # or an anomaly, a composite, ...
+
+mesh = gmpas.MpasMesh.load("/path/to/run/mesh.nc")
+fig, ax = gmpas.cell_field(mesh, mean.values)
+```
+
+`open_mfdataset` isn't routed through `open_mpas`, so there is no `.mpas`
+accessor here — attach the mesh and call `gmpas.cell_field`/`edge_field`
+directly, as above.
