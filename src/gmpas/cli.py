@@ -584,6 +584,17 @@ def _prep_generate(args) -> int:
     return 0
 
 
+def _prep_scale(args) -> int:
+    from .prep.scale import scale_mesh
+
+    out_path = args.out or f"{Path(args.mesh_file).stem}.scaled.nc"
+    out = scale_mesh(args.mesh_file, out_path, args.scale_factor,
+                     args.tan_lat, args.tan_lon)
+    print(f"{args.mesh_file} -> {out}  (x{args.scale_factor:g} around "
+         f"{args.tan_lat:g}N, {args.tan_lon:g}E)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gmpas",
@@ -689,7 +700,8 @@ def build_parser() -> argparse.ArgumentParser:
     pre = sub.add_parser("prep", help="preprocessing: inspect and build meshes",
                          description="Preprocessing steps, which run before "
                                      "there is any model output to plot.")
-    presub = pre.add_subparsers(dest="prep_cmd", metavar="{view,hfun,generate}")
+    presub = pre.add_subparsers(dest="prep_cmd",
+                                metavar="{view,hfun,generate,scale}")
     # a bare `gmpas prep` should list its steps, not error
     pre.set_defaults(func=lambda _a, _p=pre: (_p.print_help(), 0)[1])
 
@@ -765,6 +777,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="generate even if the cell size gradient is above "
                          "the guideline")
     pg.set_defaults(func=_prep_generate)
+
+    ps = presub.add_parser("scale", help="rescale a regional mesh around a "
+                                        "tangent point")
+    ps.add_argument("mesh_file", metavar="MESH",
+                    help="a unit-sphere mesh straight off JIGSAW/mkgrid "
+                         "(gmpas prep generate); not a mesh already run "
+                         "through init_atmosphere")
+    ps.add_argument("-o", "--out",
+                    help="output path (default: <mesh stem>.scaled.nc)")
+    ps.add_argument("--scale-factor", type=float, required=True,
+                    help="values > 1 increase resolution (shrink cells)")
+    ps.add_argument("--tan-lat", type=float, required=True,
+                    help="latitude of the tangent point, in degrees")
+    ps.add_argument("--tan-lon", type=float, required=True,
+                    help="longitude of the tangent point, in degrees")
+    ps.set_defaults(func=_prep_scale)
     return p
 
 

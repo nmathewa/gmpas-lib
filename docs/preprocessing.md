@@ -200,6 +200,58 @@ gmpas always runs it in the output directory, so this cannot bite here. It is
 recorded because it does bite when running JIGSAW by hand: it prints
 `**parse error: file not found!` and exits 2.
 
+### Rescaling a regional mesh
+
+```bash
+gmpas prep scale mesh.nc --scale-factor 2.0 --tan-lat 0 --tan-lon 125 -o scaled.nc
+```
+
+```
+mesh.nc -> scaled.nc  (x2 around 0N, 125E)
+```
+
+Projects every cell/vertex/edge stereographically onto the plane tangent at
+`--tan-lat/--tan-lon`, divides by `--scale-factor`, and projects back —
+values above 1 shrink cells (finer resolution), pulling the whole domain in
+toward the tangent point rather than resizing cells within a fixed extent.
+Everything derived from position (`dcEdge`, `dvEdge`, `areaCell`,
+`areaTriangle`, `kiteAreasOnVertex`, `weightsOnEdge`, `angleEdge`,
+`nominalMinDc`) is recomputed from the new coordinates. Ported from
+MPAS-Tools' `scale_regional_mesh.py`; ordinary MPAS's own dual-mesh
+formulas throughout (l'Huilier's theorem for spherical triangle area, the
+usual spherical-trig angle formula), vectorized with numpy rather than a
+per-cell/edge/vertex Python loop — the one exception is `weightsOnEdge`,
+which walks each cell's edges in rotated order and stays a loop over edges
+for that reason.
+
+Always writes a new file at `-o/--out` (default `<mesh stem>.scaled.nc`);
+`mesh.nc` is never touched.
+
+#### Only a unit-sphere mesh
+
+`gmpas prep scale` refuses a mesh whose `sphere_radius` isn't 1 — a mesh
+straight out of JIGSAW/`mkgrid` (`gmpas prep generate`), not one that has
+already been through `init_atmosphere`. The whole algorithm assumes `R = 1`;
+running it on an Earth-scaled mesh would silently corrupt every coordinate,
+so this is checked rather than assumed:
+
+```
+gmpas: mesh.nc has sphere_radius=6371229.0, not a unit sphere. gmpas prep
+scale only supports a mesh straight off JIGSAW/mkgrid, before
+init_atmosphere redimensionalizes it -- scaling a metres-scale mesh with
+this formula would silently corrupt its coordinates.
+```
+
+#### Boundary cells
+
+A regional mesh has cells/edges/vertices at its own boundary with no real
+neighbour on one side (MPAS's 1-based, 0-fill connectivity). Anything that
+would otherwise need a missing neighbour — `dcEdge` and `areaTriangle` at
+the boundary, `kiteAreasOnVertex` where a vertex's own neighbours run out —
+falls back to the old value scaled by `scale_factor` (or `scale_factor**2`
+for an area) instead. `dvEdge` has no such case: every edge always has
+exactly two vertices.
+
 ### Looking at a mesh before it exists
 
 ```bash

@@ -9,6 +9,7 @@ gmpas target     -o dst.scrip.nc
 gmpas prep view  mesh.nc
 gmpas prep hfun  hfun.py
 gmpas prep generate hfun.py -o mesh/
+gmpas prep scale mesh.nc --scale-factor 2.0 --tan-lat 0 --tan-lon 125
 ```
 
 `info` summarises the mesh and lists variables grouped by the element they
