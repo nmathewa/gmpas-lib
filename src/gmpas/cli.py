@@ -809,6 +809,11 @@ def main(argv=None) -> int:
     except (FileNotFoundError, KeyError, ValueError) as exc:
         print(f"gmpas: {exc}", file=sys.stderr)
         return 1
+    except ModuleNotFoundError as exc:
+        print(f"gmpas: {exc}. Rendering needs matplotlib and cartopy, which are "
+              f"an optional extra — install them with:  pip install gmpas[plot]",
+              file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
