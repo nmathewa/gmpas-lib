@@ -343,6 +343,12 @@ def write_grid_mesh(path, nrows, ncols, *, lon0_deg=0.0, lat0_deg=0.0,
         {
             "latCell": ("nCells", rad(lat_c)), "lonCell": ("nCells", rad360(lon_c)),
             "xCell": ("nCells", xc), "yCell": ("nCells", yc), "zCell": ("nCells", zc),
+            # a uniform solid-angle-rectangle approximation is plenty for a
+            # synthetic quad lattice -- nothing here checks areaCell's exact
+            # value, only that it exists and is positive (MpasMesh._build
+            # reads it unconditionally for cell_width_km)
+            "areaCell": ("nCells", np.full(
+                n_cells, np.radians(dlon_deg) * np.radians(dlat_deg) * sphere_radius ** 2)),
             "nEdgesOnCell": ("nCells", n_edges_on_cell),
             "cellsOnCell": (("nCells", "maxEdges"), coc),
             "verticesOnCell": (("nCells", "maxEdges"), voc),
@@ -357,6 +363,10 @@ def write_grid_mesh(path, nrows, ncols, *, lon0_deg=0.0, lat0_deg=0.0,
             "indexToVertexID": ("nVertices", np.arange(1, n_vertices + 1, dtype=np.int32)),
             "latEdge": ("nEdges", rad(lat_e)), "lonEdge": ("nEdges", rad360(lon_e)),
             "xEdge": ("nEdges", xe), "yEdge": ("nEdges", ye), "zEdge": ("nEdges", ze),
+            # not meaningful for a quad lattice's Hrow/Vcol edges (nothing
+            # here checks its value) -- present only because MpasMesh._build
+            # reads it unconditionally
+            "angleEdge": ("nEdges", np.zeros(n_edges)),
             "cellsOnEdge": (("nEdges", "TWO"), coe),
             "verticesOnEdge": (("nEdges", "TWO"), voe),
             "edgesOnEdge": (("nEdges", "maxEdges2"), eoe),

@@ -658,6 +658,18 @@ def _prep_create_region(args) -> int:
 
     graph = write_graph_info(out, f"{out.with_suffix('')}.graph.info")
     print(f"partition file: {graph}")
+
+    if not args.no_plot:
+        from .prep.region import plot_region
+
+        plot_out = args.plot_out or f"{out.with_suffix('')}.png"
+        try:
+            png = plot_region(out, plot_out)
+            print(f"region plot: {png}")
+        except ModuleNotFoundError as exc:
+            print(f"gmpas: skipped the region plot -- {exc}. Rendering "
+                 f"needs the optional plot extra:  pip install gmpas[plot]  "
+                 f"(or pass --no-plot)", file=sys.stderr)
     return 0
 
 
@@ -896,6 +908,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="a point known to be inside the boundary (default: "
                          "the polygon's spherical centroid -- only reliable "
                          "for a convex boundary)")
+    pc.add_argument("--no-plot", action="store_true",
+                    help="skip the boundary-zone PNG")
+    pc.add_argument("--plot-out",
+                    help="region plot path (default: <out stem>.png)")
     pc.set_defaults(func=_prep_create_region)
     return p
 

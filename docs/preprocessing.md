@@ -354,7 +354,14 @@ gmpas prep create-region mesh.nc \
 ```
 mesh.nc -> conus.region.nc  (4-point boundary)
 partition file: conus.region.graph.info
+region plot: conus.region.png
 ```
+
+Also writes a PNG of the cropped mesh coloured by boundary zone (0 for the
+untouched interior, up through 7 at the outer edge) by default -- a quick
+visual check that the kept cells and relaxation rings form actual rings, not
+a smear. `--no-plot` skips it (and the matplotlib/cartopy import, so the
+command still works headless); `--plot-out` overrides the default path.
 
 The step this package was previously missing entirely
 ([gmpas-lib#52](https://github.com/nmathewa/gmpas-lib/issues/52)): going

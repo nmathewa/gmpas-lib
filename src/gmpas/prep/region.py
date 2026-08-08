@@ -34,6 +34,15 @@ The shape:
    `write_graph_info` -- since there is no `mkgrid` run to produce one, as
    there is for a freshly generated global mesh.
 
+`plot_region` renders the cropped mesh coloured by `bdyMaskCell`, as a quick
+visual check that the kept cells and relaxation rings look right -- reusing
+`plot.cell_field` rather than a custom rendering path, unlike `scale.py`'s
+`plot_comparison`: that one needs two different meshes side by side on a
+shared colour scale, which `cell_field` doesn't support, but this is a
+single mesh and a single field, exactly `cell_field`'s own shape. matplotlib
+and cartopy are imported lazily inside it only, same as everywhere else in
+gmpas that draws -- `create_region` itself never needs them.
+
 A concave region (or one spanning a pole or a large longitude range on a
 `grid.nc`, before static interpolation) can produce incorrect terrain during
 `init_atmosphere`'s static-field interpolation -- a property of that
@@ -410,3 +419,29 @@ def write_graph_info(regional_mesh_path: str | Path, out_path: str | Path) -> Pa
             row = cells_on_cell[c, : n_edges_on_cell[c]]
             f.write(" ".join(str(int(n)) for n in row if n > 0) + "\n")
     return out_path
+
+
+# --------------------------------------------------------------- comparison
+
+def plot_region(regional_mesh_path: str | Path, out_png: str | Path) -> Path:
+    """Render the cropped mesh coloured by `bdyMaskCell` -- 0 for the
+    untouched interior, up through `N_BDY_LAYERS` at the outer edge -- a
+    quick visual check that `create_region` kept the right cells and that
+    the relaxation rings form actual rings, not a smear. Returns the PNG
+    path.
+    """
+    from ..mesh import MpasMesh
+    from ..plot import cell_field
+    from ..style import Style, save_figure
+
+    path = resolve_path(regional_mesh_path)
+    with xr.open_dataset(path, decode_timedelta=False, engine="netcdf4") as ds:
+        zone = ds["bdyMaskCell"].values
+
+    mesh = MpasMesh.load(path)
+    fig, _ = cell_field(
+        mesh, zone, style=Style.preset("mesh"), vmin=0, vmax=N_BDY_LAYERS,
+        label=f"boundary zone (0 = interior, {N_BDY_LAYERS} = edge)",
+        title=f"{mesh.n_cells:,} cells, {N_BDY_LAYERS} relaxation rings",
+    )
+    return save_figure(fig, out_png)

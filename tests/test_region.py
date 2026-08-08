@@ -173,6 +173,46 @@ def test_graph_info_header_matches_the_subset(tmp_path):
     assert len(lines) == n_cells + 1
 
 
+# --------------------------------------------------------------- comparison
+
+def test_plot_region_writes_a_png(tmp_path):
+    pytest.importorskip("matplotlib", reason="needs the `plot` extra")
+    pytest.importorskip("cartopy", reason="needs the `plot` extra")
+    import matplotlib
+    matplotlib.use("Agg")
+    from gmpas.prep.region import plot_region
+
+    path = write_grid_mesh(tmp_path / "m.nc", **GRID)
+    out = create_region(path, tmp_path / "region.nc", BOX_LAT, BOX_LON)
+
+    png = plot_region(out, tmp_path / "region.png")
+    assert png.exists()
+    assert png.stat().st_size > 0
+
+
+def test_cli_prep_create_region_writes_a_plot_by_default(tmp_path):
+    pytest.importorskip("matplotlib", reason="needs the `plot` extra")
+    pytest.importorskip("cartopy", reason="needs the `plot` extra")
+    import matplotlib
+    matplotlib.use("Agg")
+
+    path = write_grid_mesh(tmp_path / "m.nc", **GRID)
+    out = tmp_path / "region.nc"
+
+    assert main(["prep", "create-region", str(path), "-o", str(out),
+                "--polygon", "10,10", "10,28", "28,28", "28,10"]) == 0
+    assert (tmp_path / "region.png").exists()
+
+
+def test_cli_no_plot_skips_the_png(tmp_path):
+    path = write_grid_mesh(tmp_path / "m.nc", **GRID)
+    out = tmp_path / "region.nc"
+
+    assert main(["prep", "create-region", str(path), "-o", str(out), "--no-plot",
+                "--polygon", "10,10", "10,28", "28,28", "28,10"]) == 0
+    assert not (tmp_path / "region.png").exists()
+
+
 def test_at_least_three_boundary_points_are_required(tmp_path):
     path = write_grid_mesh(tmp_path / "m.nc", **GRID)
     with pytest.raises(ValueError, match="at least 3"):
