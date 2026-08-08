@@ -9,8 +9,10 @@ import xarray as xr
 from conftest import write_mesh
 from gmpas.cli import main
 from gmpas.prep.scale import (
+    REGIONAL_WARNING_DEG,
     great_circle_distance,
     lonlat_to_xyz,
+    max_angular_distance_deg,
     scale_mesh,
     spherical_angle,
     spherical_triangle_area,
@@ -175,6 +177,46 @@ def test_a_missing_variable_names_what_is_missing(tmp_path):
 def test_a_missing_mesh_file_is_reported(tmp_path):
     with pytest.raises(FileNotFoundError, match="No such mesh file"):
         scale_mesh(tmp_path / "absent.nc", tmp_path / "scaled.nc", 2.0, 0.0, 100.0)
+
+
+# ---------------------------------------------------------- regional check
+
+def test_angular_distance_at_the_tangent_point_is_zero(tmp_path):
+    path = write_mesh(tmp_path / "m.nc", [(100.0, 0.0)],
+                      with_scale_vars=True, sphere_radius=1.0)
+    assert max_angular_distance_deg(path, 0.0, 100.0) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_angular_distance_a_quarter_sphere_away(tmp_path):
+    path = write_mesh(tmp_path / "m.nc", [(100.0, 0.0)],
+                      with_scale_vars=True, sphere_radius=1.0)
+    assert max_angular_distance_deg(path, 0.0, 10.0) == pytest.approx(90.0, abs=1e-6)
+
+
+def test_cli_warns_when_the_tangent_point_is_far_from_the_mesh(tmp_path, capsys):
+    """Far, but not exactly antipodal -- that hits stereo_project's own
+    divide-by-zero at k's denominator, a separate, pre-existing edge case
+    inherited from the original script, not what this test is checking."""
+    path = write_mesh(tmp_path / "m.nc", [(100.0, 0.0), (110.0, 5.0)],
+                      with_scale_vars=True, sphere_radius=1.0)
+
+    assert main(["prep", "scale", str(path), "-o", str(tmp_path / "scaled.nc"),
+                "--no-plot", "--scale-factor", "2.0", "--tan-lat", "0",
+                "--tan-lon", "250"]) == 0
+    err = capsys.readouterr().err
+    assert "regional-mesh tool" in err
+    assert "gmpas prep relocate" in err
+
+
+def test_cli_stays_quiet_when_the_tangent_point_is_close(tmp_path, capsys):
+    path = write_mesh(tmp_path / "m.nc", [(100.0, 0.0), (110.0, 5.0)],
+                      with_scale_vars=True, sphere_radius=1.0)
+
+    assert main(["prep", "scale", str(path), "-o", str(tmp_path / "scaled.nc"),
+                "--no-plot", "--scale-factor", "2.0", "--tan-lat", "0",
+                "--tan-lon", "105"]) == 0
+    assert "regional-mesh tool" not in capsys.readouterr().err
+    assert REGIONAL_WARNING_DEG > 0   # sanity: the threshold itself is sane
 
 
 # -------------------------------------------------------------------- CLI

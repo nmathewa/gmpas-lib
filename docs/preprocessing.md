@@ -228,6 +228,42 @@ for that reason.
 Always writes a new file at `-o/--out` (default `<mesh stem>.scaled.nc`);
 `mesh.nc` is never touched.
 
+#### Regional meshes only
+
+The stereographic scale is only close to the requested factor **near the
+tangent point**. Measured directly, with `--scale-factor 2.0`: at 60 degrees
+away the local effect is already only ×1.63 instead of ×2; past 120 degrees
+it flips to making cells **coarser** instead of finer; near the antipode of
+the tangent point it converges on almost exactly the *reciprocal* of what
+was asked for. Applied to a global mesh, this produces a mesh with one
+hemisphere far too fine and the opposite one far too coarse — this is not a
+bug, it's what dividing stereographic-projected coordinates by a constant
+does far from the projection's own centre. `gmpas prep scale` warns before
+doing the (much more expensive) recompute if the mesh reaches more than 45
+degrees from the tangent point:
+
+```
+gmpas: mesh.nc reaches 174 degrees from the tangent point. gmpas prep scale
+is a regional-mesh tool: its stereographic scale is only close to the
+requested factor near the tangent point, and drifts -- past ~120 degrees it
+starts making cells coarser instead of finer -- the farther out it goes.
+See docs/preprocessing.md. To reposition a refined region without this
+distortion, use gmpas prep relocate instead.
+```
+
+The warning doesn't block the run — the recompute still happens and the
+file still writes, since there's no way to be sure a use past that
+threshold is a mistake rather than intentional experimentation. If what you
+actually want is to move a refined region to a new location, not resize it,
+`gmpas prep relocate` (below) does that with zero distortion anywhere on
+the sphere.
+
+The actual gap this points at — gmpas has no way to crop a global mesh down
+to a regional subset (what `create_region` does elsewhere in the MPAS
+tooling), which is normally the step *before* a mesh is regional enough for
+`scale` to behave well — is tracked as
+[issue 52](https://github.com/nmathewa/gmpas-lib/issues/52).
+
 #### Only a unit-sphere mesh
 
 `gmpas prep scale` refuses a mesh whose `sphere_radius` isn't 1 — a mesh
@@ -269,6 +305,44 @@ through byte-for-byte unchanged, since only geometry is recomputed. A
 `graph.info` written by `gmpas prep generate` before scaling — and any
 partition file `gpmetis` derived from it — stays valid for the scaled mesh
 without regenerating either.
+
+### Repositioning a refined region
+
+```bash
+gmpas prep relocate mesh.nc --tan-lat 40 --tan-lon 280 -o relocated.nc
+```
+
+```
+mesh.nc -> relocated.nc  (its finest cell -> 40N, 280E)
+```
+
+Moves a mesh's refined region to a new location via a rigid rotation of the
+sphere, rather than `scale`'s stereographic projection — a rotation is an
+isometry, so it preserves every distance, area and angle exactly, with no
+far-field distortion and no antipodal singularity anywhere. `dcEdge`,
+`dvEdge`, `areaCell`, `areaTriangle`, `kiteAreasOnVertex`, `weightsOnEdge`
+and `nominalMinDc` all come out **byte-for-byte unchanged**; only the
+coordinates themselves and `angleEdge` (the edge-normal bearing relative to
+local east on the fixed lat/lon grid, which does change when a point moves)
+are recomputed. This is the tool for "I want the resolution pattern I
+already have, just centred somewhere else" — `scale` is for "I want this
+mesh's resolution to actually change," and only behaves well once the mesh
+is already regional (close to the tangent point).
+
+Unlike `scale`, this has no unit-sphere precondition — a rotation matrix
+doesn't care what `sphere_radius` is — and it's safe to run directly on a
+**global** mesh: rotate first, to bring the refined region to where a study
+needs it, then crop to a regional subset once it's in the right place,
+rather than the other way around.
+
+#### The current centre
+
+`--from-lat`/`--from-lon` name where the refined region currently sits;
+left unset, it defaults to the mesh's own finest cell (minimum `areaCell`)
+— the conventional single point of maximum refinement in an MPAS
+variable-resolution mesh. Pass both explicitly for a mesh with more than
+one refined patch, where auto-detection would only find one of them; the
+two must be given together, or not at all.
 
 ### Looking at a mesh before it exists
 

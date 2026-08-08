@@ -585,7 +585,18 @@ def _prep_generate(args) -> int:
 
 
 def _prep_scale(args) -> int:
-    from .prep.scale import scale_mesh
+    from .prep.scale import REGIONAL_WARNING_DEG, max_angular_distance_deg, scale_mesh
+
+    extent = max_angular_distance_deg(args.mesh_file, args.tan_lat, args.tan_lon)
+    if extent > REGIONAL_WARNING_DEG:
+        print(f"gmpas: {args.mesh_file} reaches {extent:.0f} degrees from "
+             f"the tangent point. gmpas prep scale is a regional-mesh tool: "
+             f"its stereographic scale is only close to the requested "
+             f"factor near the tangent point, and drifts -- past ~120 "
+             f"degrees it starts making cells coarser instead of finer -- "
+             f"the farther out it goes. See docs/preprocessing.md. To "
+             f"reposition a refined region without this distortion, use "
+             f"gmpas prep relocate instead.", file=sys.stderr)
 
     out_path = args.out or f"{Path(args.mesh_file).stem}.scaled.nc"
     out = scale_mesh(args.mesh_file, out_path, args.scale_factor,
@@ -604,6 +615,24 @@ def _prep_scale(args) -> int:
             print(f"gmpas: skipped the comparison plot -- {exc}. Rendering "
                  f"needs the optional plot extra:  pip install gmpas[plot]  "
                  f"(or pass --no-plot)", file=sys.stderr)
+    return 0
+
+
+def _prep_relocate(args) -> int:
+    from .prep.relocate import relocate_mesh
+
+    if (args.from_lat is None) != (args.from_lon is None):
+        print("gmpas: --from-lat and --from-lon must be given together, "
+             "or not at all (to auto-detect)", file=sys.stderr)
+        return 1
+
+    out_path = args.out or f"{Path(args.mesh_file).stem}.relocated.nc"
+    out = relocate_mesh(args.mesh_file, out_path, args.tan_lat, args.tan_lon,
+                        from_lat_deg=args.from_lat, from_lon_deg=args.from_lon)
+    from_desc = (f"{args.from_lat:g}N, {args.from_lon:g}E" if args.from_lat is not None
+                else "its finest cell")
+    print(f"{args.mesh_file} -> {out}  ({from_desc} -> "
+         f"{args.tan_lat:g}N, {args.tan_lon:g}E)")
     return 0
 
 
@@ -713,7 +742,7 @@ def build_parser() -> argparse.ArgumentParser:
                          description="Preprocessing steps, which run before "
                                      "there is any model output to plot.")
     presub = pre.add_subparsers(dest="prep_cmd",
-                                metavar="{view,hfun,generate,scale}")
+                                metavar="{view,hfun,generate,scale,relocate}")
     # a bare `gmpas prep` should list its steps, not error
     pre.set_defaults(func=lambda _a, _p=pre: (_p.print_help(), 0)[1])
 
@@ -809,6 +838,24 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--plot-out",
                     help="comparison PNG path (default: <out stem>.compare.png)")
     ps.set_defaults(func=_prep_scale)
+
+    pr = presub.add_parser("relocate", help="move a mesh's refined region to "
+                                            "a new tangent point, without "
+                                            "resizing it")
+    pr.add_argument("mesh_file", metavar="MESH", help="a global or regional mesh")
+    pr.add_argument("-o", "--out",
+                    help="output path (default: <mesh stem>.relocated.nc)")
+    pr.add_argument("--tan-lat", type=float, required=True,
+                    help="latitude to move the refined region to, in degrees")
+    pr.add_argument("--tan-lon", type=float, required=True,
+                    help="longitude to move the refined region to, in degrees")
+    pr.add_argument("--from-lat", type=float,
+                    help="latitude the refined region is currently at "
+                         "(default: auto-detected from the mesh's finest cell)")
+    pr.add_argument("--from-lon", type=float,
+                    help="longitude the refined region is currently at "
+                         "(default: auto-detected from the mesh's finest cell)")
+    pr.set_defaults(func=_prep_relocate)
     return p
 
 

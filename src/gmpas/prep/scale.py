@@ -237,6 +237,35 @@ def _weights_on_edge(kite_areas_on_cell, dc_edge, dv_edge, cells_on_edge,
     return out
 
 
+# ------------------------------------------------------------- regional check
+
+#: past this angular distance from the tangent point, the stereographic
+#: scale has visibly drifted from the requested factor (measured: at 60
+#: degrees a factor of 2 already behaves like 1.63; past 120 degrees it
+#: starts making cells *coarser* instead of finer, and near the antipode it
+#: is close to the exact reciprocal of what was asked for)
+REGIONAL_WARNING_DEG = 45.0
+
+
+def max_angular_distance_deg(mesh_path: str | Path, tan_lat_deg: float,
+                             tan_lon_deg: float) -> float:
+    """How far the mesh's furthest cell sits from a tangent point, in
+    degrees. Cheap -- reads only `lonCell`/`latCell`, not the whole mesh --
+    so it's worth checking before `scale_mesh` does its much more expensive
+    recompute. See `REGIONAL_WARNING_DEG` for why this matters: this whole
+    module is a regional-mesh tool, correct only close to the tangent point.
+    """
+    with xr.open_dataset(resolve_path(mesh_path), decode_timedelta=False,
+                         engine="netcdf4") as ds:
+        lon = ds["lonCell"].values
+        lat = ds["latCell"].values
+
+    tan_xyz = lonlat_to_xyz(math.radians(tan_lon_deg), math.radians(tan_lat_deg))
+    cell_xyz = lonlat_to_xyz(lon, lat)
+    c = great_circle_distance(np.broadcast_to(tan_xyz, cell_xyz.shape), cell_xyz)
+    return math.degrees(float(c.max()))
+
+
 # ---------------------------------------------------------------- orchestrator
 
 def scale_mesh(mesh_path: str | Path, out_path: str | Path,
