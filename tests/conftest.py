@@ -42,7 +42,8 @@ def _ring(lon_deg: float, lat_deg: float, radius_deg: float, n: int = 6):
 
 
 def write_mesh(path, centres, *, n_verts=None, radius_deg=1.0,
-               sphere_radius=EARTH_RADIUS, areas=None, coord_dtype=np.float64):
+               sphere_radius=EARTH_RADIUS, areas=None, coord_dtype=np.float64,
+               with_scale_vars=False):
     """Write a synthetic MPAS mesh file.
 
     centres: sequence of (lon_deg, lat_deg), lon in -180..180 as a human would
@@ -51,6 +52,19 @@ def write_mesh(path, centres, *, n_verts=None, radius_deg=1.0,
              below 6 exercises the ragged `verticesOnCell` fill.
     sphere_radius: pass 1.0 to mimic a mesh straight out of JIGSAW, whose
              areas are non-dimensional.
+    with_scale_vars: also write the connectivity/derived variables
+             `scale_mesh` needs beyond what `MpasMesh._build` reads
+             (`cellsOnEdge`, `cellsOnVertex`, `edgesOnVertex`, `dcEdge`,
+             `dvEdge`, `areaTriangle`, `kiteAreasOnVertex`, `weightsOnEdge`,
+             `nominalMinDc`, `x/y/zVertex`, `x/y/zEdge`). Off by default:
+             `test_same_size_and_second_still_get_different_cache_entries`
+             depends on two small meshes padding to the *same* netCDF file
+             size, and this much extra per-cell/edge/vertex payload is
+             enough to break that coincidence. `cellsOnEdge`/
+             `cellsOnVertex`/`edgesOnVertex` are left at their 0-fill ("no
+             neighbour") default -- consistent with cells not sharing
+             topology here, and it exercises every boundary/fallback
+             branch in `scale_mesh`.
     """
     centres = np.asarray(centres, dtype=np.float64)
     n_cells = len(centres)
@@ -104,26 +118,72 @@ def write_mesh(path, centres, *, n_verts=None, radius_deg=1.0,
     def rad(deg):
         return np.radians(np.asarray(deg)).astype(coord_dtype)
 
-    ds = xr.Dataset(
-        {
-            "latCell": ("nCells", rad(centres[:, 1])),
-            "lonCell": ("nCells", rad360(centres[:, 0])),
-            "xCell": ("nCells", xyz[:, 0].astype(coord_dtype)),
-            "yCell": ("nCells", xyz[:, 1].astype(coord_dtype)),
-            "zCell": ("nCells", xyz[:, 2].astype(coord_dtype)),
-            "areaCell": ("nCells", areas.astype(coord_dtype)),
-            "nEdgesOnCell": ("nCells", n_verts.astype(np.int32)),
-            "verticesOnCell": (("nCells", "maxEdges"), voc),
-            "edgesOnCell": (("nCells", "maxEdges"), eoc),
-            "latVertex": ("nVertices", rad(lat_v)),
-            "lonVertex": ("nVertices", rad360(lon_v)),
-            "verticesOnEdge": (("nEdges", "TWO"), voe),
-            "latEdge": ("nEdges", rad(lat_e)),
-            "lonEdge": ("nEdges", rad360(lon_e)),
-            "angleEdge": ("nEdges", angle_edge.astype(coord_dtype)),
-        },
-        attrs={"sphere_radius": float(sphere_radius)},
-    )
+    variables = {
+        "latCell": ("nCells", rad(centres[:, 1])),
+        "lonCell": ("nCells", rad360(centres[:, 0])),
+        "xCell": ("nCells", xyz[:, 0].astype(coord_dtype)),
+        "yCell": ("nCells", xyz[:, 1].astype(coord_dtype)),
+        "zCell": ("nCells", xyz[:, 2].astype(coord_dtype)),
+        "areaCell": ("nCells", areas.astype(coord_dtype)),
+        "nEdgesOnCell": ("nCells", n_verts.astype(np.int32)),
+        "verticesOnCell": (("nCells", "maxEdges"), voc),
+        "edgesOnCell": (("nCells", "maxEdges"), eoc),
+        "latVertex": ("nVertices", rad(lat_v)),
+        "lonVertex": ("nVertices", rad360(lon_v)),
+        "verticesOnEdge": (("nEdges", "TWO"), voe),
+        "latEdge": ("nEdges", rad(lat_e)),
+        "lonEdge": ("nEdges", rad360(lon_e)),
+        "angleEdge": ("nEdges", angle_edge.astype(coord_dtype)),
+    }
+
+    if with_scale_vars:
+        def xyz_of(lon_deg, lat_deg):
+            lr, gr = np.radians(lat_deg), np.radians(lon_deg)
+            return np.stack([np.cos(lr) * np.cos(gr), np.cos(lr) * np.sin(gr),
+                             np.sin(lr)], axis=-1) * sphere_radius
+
+        xyz_v = xyz_of(lon_v, lat_v)
+        xyz_e = xyz_of(lon_e, lat_e)
+
+        # Placeholder magnitudes for the derived quantities `scale_mesh`
+        # only ever reads through its "/scalefac"-style fallback (every
+        # edge/vertex here is a boundary one, since cells don't share
+        # topology) -- the exact values don't matter, only that they exist
+        # and scale correctly.
+        vertex_degree = 3
+        max_edges2 = 2 * max_edges
+        edge_len = np.radians(radius_deg) * sphere_radius
+        dc_edge = np.full(n_edges, edge_len, dtype=coord_dtype)
+        dv_edge = np.full(n_edges, 0.5 * edge_len, dtype=coord_dtype)
+        area_triangle = (np.repeat(areas, max_edges) / max_edges).astype(coord_dtype)
+        kite_areas = np.repeat(area_triangle / vertex_degree, vertex_degree)
+        kite_areas = kite_areas.reshape(n_vertices, vertex_degree)
+
+        variables.update({
+            "xVertex": ("nVertices", xyz_v[:, 0].astype(coord_dtype)),
+            "yVertex": ("nVertices", xyz_v[:, 1].astype(coord_dtype)),
+            "zVertex": ("nVertices", xyz_v[:, 2].astype(coord_dtype)),
+            "xEdge": ("nEdges", xyz_e[:, 0].astype(coord_dtype)),
+            "yEdge": ("nEdges", xyz_e[:, 1].astype(coord_dtype)),
+            "zEdge": ("nEdges", xyz_e[:, 2].astype(coord_dtype)),
+            "cellsOnEdge": (("nEdges", "TWO"),
+                           np.zeros((n_edges, 2), dtype=np.int32)),
+            "edgesOnEdge": (("nEdges", "maxEdges2"),
+                           np.zeros((n_edges, max_edges2), dtype=np.int32)),
+            "cellsOnVertex": (("nVertices", "vertexDegree"),
+                             np.zeros((n_vertices, vertex_degree), dtype=np.int32)),
+            "edgesOnVertex": (("nVertices", "vertexDegree"),
+                             np.zeros((n_vertices, vertex_degree), dtype=np.int32)),
+            "dcEdge": ("nEdges", dc_edge),
+            "dvEdge": ("nEdges", dv_edge),
+            "areaTriangle": ("nVertices", area_triangle),
+            "kiteAreasOnVertex": (("nVertices", "vertexDegree"), kite_areas),
+            "weightsOnEdge": (("nEdges", "maxEdges2"),
+                             np.zeros((n_edges, max_edges2), dtype=coord_dtype)),
+            "nominalMinDc": ((), np.float64(edge_len)),
+        })
+
+    ds = xr.Dataset(variables, attrs={"sphere_radius": float(sphere_radius)})
     assert ds.sizes["nVertices"] == n_vertices
     ds.to_netcdf(path)
     ds.close()

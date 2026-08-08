@@ -15,9 +15,11 @@ load the site's own build (`module load esmf`) rather than a conda-forge copy
 in gmpas's own environment; the two compete on `PATH`/`LD_LIBRARY_PATH`
 rather than help.
 
-**Preprocessing** covers `prep view`, `prep hfun` and `prep generate`: looking
-at a mesh after it exists, looking at a distance function before any mesh
-exists, and running JIGSAW to get from the second to the first. A run leaves
+**Preprocessing** covers `prep view`, `prep hfun`, `prep generate`,
+`prep scale` and `prep relocate`: looking at a mesh after it exists, looking
+at a distance function before any mesh exists, running JIGSAW to get from
+the second to the first, rescaling a regional mesh around a tangent point,
+and repositioning a refined region without resizing it. A run leaves
 everything `mkgrid` reads.
 
 ## Not implemented

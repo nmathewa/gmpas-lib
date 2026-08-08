@@ -200,6 +200,150 @@ gmpas always runs it in the output directory, so this cannot bite here. It is
 recorded because it does bite when running JIGSAW by hand: it prints
 `**parse error: file not found!` and exits 2.
 
+### Rescaling a regional mesh
+
+```bash
+gmpas prep scale mesh.nc --scale-factor 2.0 --tan-lat 0 --tan-lon 125 -o scaled.nc
+```
+
+```
+mesh.nc -> scaled.nc  (x2 around 0N, 125E)
+comparison plot: scaled.compare.png
+```
+
+Projects every cell/vertex/edge stereographically onto the plane tangent at
+`--tan-lat/--tan-lon`, divides by `--scale-factor`, and projects back —
+values above 1 shrink cells (finer resolution), pulling the whole domain in
+toward the tangent point rather than resizing cells within a fixed extent.
+Everything derived from position (`dcEdge`, `dvEdge`, `areaCell`,
+`areaTriangle`, `kiteAreasOnVertex`, `weightsOnEdge`, `angleEdge`,
+`nominalMinDc`) is recomputed from the new coordinates. Ported from
+MPAS-Tools' `scale_regional_mesh.py`; ordinary MPAS's own dual-mesh
+formulas throughout (l'Huilier's theorem for spherical triangle area, the
+usual spherical-trig angle formula), vectorized with numpy rather than a
+per-cell/edge/vertex Python loop — the one exception is `weightsOnEdge`,
+which walks each cell's edges in rotated order and stays a loop over edges
+for that reason.
+
+Always writes a new file at `-o/--out` (default `<mesh stem>.scaled.nc`);
+`mesh.nc` is never touched.
+
+#### Regional meshes only
+
+The stereographic scale is only close to the requested factor **near the
+tangent point**. Measured directly, with `--scale-factor 2.0`: at 60 degrees
+away the local effect is already only ×1.63 instead of ×2; past 120 degrees
+it flips to making cells **coarser** instead of finer; near the antipode of
+the tangent point it converges on almost exactly the *reciprocal* of what
+was asked for. Applied to a global mesh, this produces a mesh with one
+hemisphere far too fine and the opposite one far too coarse — this is not a
+bug, it's what dividing stereographic-projected coordinates by a constant
+does far from the projection's own centre. `gmpas prep scale` warns before
+doing the (much more expensive) recompute if the mesh reaches more than 45
+degrees from the tangent point:
+
+```
+gmpas: mesh.nc reaches 174 degrees from the tangent point. gmpas prep scale
+is a regional-mesh tool: its stereographic scale is only close to the
+requested factor near the tangent point, and drifts -- past ~120 degrees it
+starts making cells coarser instead of finer -- the farther out it goes.
+See docs/preprocessing.md. To reposition a refined region without this
+distortion, use gmpas prep relocate instead.
+```
+
+The warning doesn't block the run — the recompute still happens and the
+file still writes, since there's no way to be sure a use past that
+threshold is a mistake rather than intentional experimentation. If what you
+actually want is to move a refined region to a new location, not resize it,
+`gmpas prep relocate` (below) does that with zero distortion anywhere on
+the sphere.
+
+The actual gap this points at — gmpas has no way to crop a global mesh down
+to a regional subset (what `create_region` does elsewhere in the MPAS
+tooling), which is normally the step *before* a mesh is regional enough for
+`scale` to behave well — is tracked as
+[issue 52](https://github.com/nmathewa/gmpas-lib/issues/52).
+
+#### Only a unit-sphere mesh
+
+`gmpas prep scale` refuses a mesh whose `sphere_radius` isn't 1 — a mesh
+straight out of JIGSAW/`mkgrid` (`gmpas prep generate`), not one that has
+already been through `init_atmosphere`. The whole algorithm assumes `R = 1`;
+running it on an Earth-scaled mesh would silently corrupt every coordinate,
+so this is checked rather than assumed:
+
+```
+gmpas: mesh.nc has sphere_radius=6371229.0, not a unit sphere. gmpas prep
+scale only supports a mesh straight off JIGSAW/mkgrid, before
+init_atmosphere redimensionalizes it -- scaling a metres-scale mesh with
+this formula would silently corrupt its coordinates.
+```
+
+#### Boundary cells
+
+A regional mesh has cells/edges/vertices at its own boundary with no real
+neighbour on one side (MPAS's 1-based, 0-fill connectivity). Anything that
+would otherwise need a missing neighbour — `dcEdge` and `areaTriangle` at
+the boundary, `kiteAreasOnVertex` where a vertex's own neighbours run out —
+falls back to the old value scaled by `scale_factor` (or `scale_factor**2`
+for an area) instead. `dvEdge` has no such case: every edge always has
+exactly two vertices.
+
+#### The comparison plot
+
+By default, a successful scale also writes a before/after cell-width map —
+two panels on one shared colour scale, so a resolution change and a domain
+shift both show up at a glance, at `--plot-out` (default
+`<out stem>.compare.png`). This is a quick sanity check, not a saved
+artefact of the scale itself: pass `--no-plot` to skip it, which also skips
+importing matplotlib/cartopy entirely, so `gmpas prep scale` still works
+without the optional `plot` extra installed.
+
+Unaffected by the topology this scale never touches: the mesh's cell
+adjacency (`cellsOnCell`, `cellsOnEdge`, `verticesOnCell`, ...) passes
+through byte-for-byte unchanged, since only geometry is recomputed. A
+`graph.info` written by `gmpas prep generate` before scaling — and any
+partition file `gpmetis` derived from it — stays valid for the scaled mesh
+without regenerating either.
+
+### Repositioning a refined region
+
+```bash
+gmpas prep relocate mesh.nc --tan-lat 40 --tan-lon 280 -o relocated.nc
+```
+
+```
+mesh.nc -> relocated.nc  (its finest cell -> 40N, 280E)
+```
+
+Moves a mesh's refined region to a new location via a rigid rotation of the
+sphere, rather than `scale`'s stereographic projection — a rotation is an
+isometry, so it preserves every distance, area and angle exactly, with no
+far-field distortion and no antipodal singularity anywhere. `dcEdge`,
+`dvEdge`, `areaCell`, `areaTriangle`, `kiteAreasOnVertex`, `weightsOnEdge`
+and `nominalMinDc` all come out **byte-for-byte unchanged**; only the
+coordinates themselves and `angleEdge` (the edge-normal bearing relative to
+local east on the fixed lat/lon grid, which does change when a point moves)
+are recomputed. This is the tool for "I want the resolution pattern I
+already have, just centred somewhere else" — `scale` is for "I want this
+mesh's resolution to actually change," and only behaves well once the mesh
+is already regional (close to the tangent point).
+
+Unlike `scale`, this has no unit-sphere precondition — a rotation matrix
+doesn't care what `sphere_radius` is — and it's safe to run directly on a
+**global** mesh: rotate first, to bring the refined region to where a study
+needs it, then crop to a regional subset once it's in the right place,
+rather than the other way around.
+
+#### The current centre
+
+`--from-lat`/`--from-lon` name where the refined region currently sits;
+left unset, it defaults to the mesh's own finest cell (minimum `areaCell`)
+— the conventional single point of maximum refinement in an MPAS
+variable-resolution mesh. Pass both explicitly for a mesh with more than
+one refined patch, where auto-detection would only find one of them; the
+two must be given together, or not at all.
+
 ### Looking at a mesh before it exists
 
 ```bash
