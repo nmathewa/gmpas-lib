@@ -344,6 +344,68 @@ variable-resolution mesh. Pass both explicitly for a mesh with more than
 one refined patch, where auto-detection would only find one of them; the
 two must be given together, or not at all.
 
+### Cropping a global mesh to a region
+
+```bash
+gmpas prep create-region mesh.nc \
+    --polygon 40,-129 50,-129 50,-65 40,-65 -o conus.region.nc
+```
+
+```
+mesh.nc -> conus.region.nc  (4-point boundary)
+partition file: conus.region.graph.info
+region plot: conus.region.png
+```
+
+Also writes a PNG of the cropped mesh coloured by boundary zone (0 for the
+untouched interior, up through 7 at the outer edge) by default -- a quick
+visual check that the kept cells and relaxation rings form actual rings, not
+a smear. `--no-plot` skips it (and the matplotlib/cartopy import, so the
+command still works headless); `--plot-out` overrides the default path.
+
+The step this package was previously missing entirely
+([gmpas-lib#52](https://github.com/nmathewa/gmpas-lib/issues/52)): going
+from a global (or larger regional) mesh to the actual regional subset a
+limited-area run uses. `--polygon` is a closed boundary as `lat,lon` pairs
+in degrees, at least 3, in either winding order; `--point` names a point
+known to be inside it and defaults to the polygon's spherical centroid,
+which is only reliable for a convex (or near-convex) boundary — pass it
+explicitly otherwise.
+
+Every mesh cell inside the boundary is kept, plus 7 more rings of cells
+grown outward beyond it — not part of what was asked for, but required for
+the file to be usable: `init_atmosphere` and the atmosphere core relax the
+forecast toward driving boundary data in those rings every step, most
+strongly in the outermost 2 (the "specified" zone, overwritten directly)
+and with decreasing weight through the next 5 (the "relaxation" zone). That
+7-ring split (`N_SPEC_ZONE = 2`, `N_RELAX_ZONE = 5`) is not a tuning choice
+made here — it is hardcoded in MPAS-Model's own
+`mpas_atm_boundaries.F`/`mpas_init_atm_cases.F`, and `bdyMaskCell`'s value
+at each kept cell (`0` for the untouched interior, up through `7` at the
+outer edge) is a file-format contract with those routines, not an
+implementation detail. `bdyMaskEdge`/`bdyMaskVertex` follow the more
+interior (lower) of their adjoining cells' values.
+
+An independent implementation, not a port — see the module docstring in
+`gmpas/prep/region.py` for why: MPAS-Dev/MPAS-Limited-Area does the same
+job but carries no LICENSE file, unlike MPAS-Tools (the source for `scale`
+and `relocate`), which is permissively licensed. Built instead from graph
+traversal over `cellsOnCell` and from MPAS-Model's own public
+Registry.xml/Fortran source for the `bdyMaskCell` semantics above.
+
+Since there is no `mkgrid` run over a cropped subset, `create-region` also
+writes the accompanying `graph.info` `gpmetis` partition file itself, in
+the same directory as the output mesh.
+
+#### Concave regions
+
+A concave boundary (or one spanning a pole, or a large longitude range, on
+a `grid.nc`) can produce incorrect terrain during `init_atmosphere`'s
+static-field interpolation — a property of that downstream interpolation
+step, not of the cropping itself, but worth keeping in mind when drawing
+`--polygon`. Prefer a convex boundary, or crop a `static.nc` (already past
+that interpolation) instead.
+
 ### Looking at a mesh before it exists
 
 ```bash
