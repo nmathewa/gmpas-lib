@@ -637,24 +637,35 @@ def _prep_relocate(args) -> int:
 
 
 def _prep_create_region(args) -> int:
-    from .prep.region import create_region, write_graph_info
+    from .prep.region import create_region, region_from_pts, write_graph_info
 
-    try:
-        points = [tuple(float(v) for v in token.split(",")) for token in args.polygon]
-        if any(len(p) != 2 for p in points):
-            raise ValueError
-    except ValueError:
-        print("gmpas: --polygon points must be 'lat,lon' pairs, e.g. "
-             "--polygon 40.0,-100.0 50.0,-100.0 50.0,-70.0", file=sys.stderr)
+    if bool(args.polygon) == bool(args.pts):
+        print("gmpas: give exactly one of --polygon or --pts", file=sys.stderr)
         return 1
-    boundary_lat, boundary_lon = zip(*points, strict=True)
 
-    point_lat, point_lon = args.point if args.point else (None, None)
+    if args.pts:
+        spec = region_from_pts(args.pts)
+        boundary_lat, boundary_lon = spec.boundary_lat_deg, spec.boundary_lon_deg
+        point_lat, point_lon = spec.point_lat_deg, spec.point_lon_deg
+        out_path = args.out or f"{spec.name}.region.nc"
+        boundary_desc = f"{spec.name} ({len(boundary_lat)}-point boundary)"
+    else:
+        try:
+            points = [tuple(float(v) for v in token.split(",")) for token in args.polygon]
+            if any(len(p) != 2 for p in points):
+                raise ValueError
+        except ValueError:
+            print("gmpas: --polygon points must be 'lat,lon' pairs, e.g. "
+                 "--polygon 40.0,-100.0 50.0,-100.0 50.0,-70.0", file=sys.stderr)
+            return 1
+        boundary_lat, boundary_lon = zip(*points, strict=True)
+        point_lat, point_lon = args.point if args.point else (None, None)
+        out_path = args.out or f"{Path(args.mesh_file).stem}.region.nc"
+        boundary_desc = f"{len(points)}-point boundary"
 
-    out_path = args.out or f"{Path(args.mesh_file).stem}.region.nc"
     out = create_region(args.mesh_file, out_path, boundary_lat, boundary_lon,
                         point_lat_deg=point_lat, point_lon_deg=point_lon)
-    print(f"{args.mesh_file} -> {out}  ({len(points)}-point boundary)")
+    print(f"{args.mesh_file} -> {out}  ({boundary_desc})")
 
     graph = write_graph_info(out, f"{out.with_suffix('')}.graph.info")
     print(f"partition file: {graph}")
@@ -901,9 +912,18 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("mesh_file", metavar="MESH", help="a global or regional mesh")
     pc.add_argument("-o", "--out",
                     help="output path (default: <mesh stem>.region.nc)")
-    pc.add_argument("--polygon", nargs="+", required=True, metavar="LAT,LON",
+    pc.add_argument("--polygon", nargs="+", metavar="LAT,LON",
                     help="boundary vertices as 'lat,lon' pairs, in degrees, "
-                         "at least 3 (e.g. --polygon 40,-100 50,-100 50,-70)")
+                         "at least 3 (e.g. --polygon 40,-100 50,-100 50,-70). "
+                         "Exactly one of --polygon or --pts is required")
+    pc.add_argument("--pts", metavar="FILE",
+                    help="a .pts region-specification file (the format "
+                         "MPAS-Limited-Area's create_region uses -- Name/"
+                         "Type/Point, plus a Radius for a circle, Semi-"
+                         "major-axis/Semi-minor-axis/Orientation-angle for "
+                         "an ellipse, or boundary coordinate lines for a "
+                         "custom polygon). 'channel' regions are not "
+                         "supported. An alternative to --polygon")
     pc.add_argument("--point", type=float, nargs=2, metavar=("LAT", "LON"),
                     help="a point known to be inside the boundary (default: "
                          "the polygon's spherical centroid -- only reliable "
