@@ -190,6 +190,186 @@ def write_mesh(path, centres, *, n_verts=None, radius_deg=1.0,
     return path
 
 
+def write_grid_mesh(path, nrows, ncols, *, lon0_deg=0.0, lat0_deg=0.0,
+                    dlon_deg=2.0, dlat_deg=2.0, sphere_radius=1.0):
+    """Write a small structured lon/lat quad-lattice mesh, in MPAS's file
+    format, with *genuine* shared connectivity -- unlike `write_mesh`, whose
+    cells each own a private, unshared ring of vertices/edges and which has
+    no `cellsOnCell` at all.
+
+    `region.py`'s algorithm (flood fill, boundary walk, relaxation layers)
+    is pure graph traversal over `cellsOnCell`; a fixture with fake adjacency
+    would let a wrong traversal pass. This one is a real (if non-hexagonal)
+    mesh graph: `nrows` x `ncols` cells, each cell's 4 corners are vertices
+    shared with its diagonal/orthogonal neighbours, each edge shared by
+    exactly the 2 cells on either side of it (0 on the side beyond the
+    lattice's own edge -- there is no wraparound, so this is a regional
+    patch, not a closed global mesh).
+
+    Cell (i, j)'s corners/edges, CCW from the SW corner, in MPAS's own
+    "verticesOnCell[k]/edgesOnCell[k] straddle the edge to cellsOnCell[k]"
+    convention: south (row i-1), east (col j+1), north (row i+1), west
+    (col j-1).
+
+    Includes `indexToCellID`/`indexToEdgeID`/`indexToVertexID` and the
+    `on_a_sphere`/`sphere_radius` global attributes -- not needed by
+    `region.py` itself, but required by `MeshHandler._load_vars` in the
+    external MPAS-Limited-Area comparison harness, so the same file drives
+    both.
+    """
+    n_cells = nrows * ncols
+    n_vertices = (nrows + 1) * (ncols + 1)
+    n_hrow = (nrows + 1) * ncols          # horizontal edges (constant row)
+    n_vcol = nrows * (ncols + 1)          # vertical edges (constant column)
+    n_edges = n_hrow + n_vcol
+    max_edges = 4
+    vertex_degree = 4
+
+    def cell_id(i, j):
+        return i * ncols + j if 0 <= i < nrows and 0 <= j < ncols else -1
+
+    def vtx_id(i, j):
+        return i * (ncols + 1) + j
+
+    def hrow_id(i, j):
+        return i * ncols + j
+
+    def vcol_id(i, j):
+        return n_hrow + i * (ncols + 1) + j
+
+    def to_xyz(lon_deg, lat_deg):
+        lr, gr = np.radians(lat_deg), np.radians(lon_deg)
+        return (np.cos(lr) * np.cos(gr) * sphere_radius,
+               np.cos(lr) * np.sin(gr) * sphere_radius,
+               np.sin(lr) * sphere_radius)
+
+    # -- cells --------------------------------------------------------
+    lon_c = np.zeros(n_cells)
+    lat_c = np.zeros(n_cells)
+    n_edges_on_cell = np.full(n_cells, max_edges, dtype=np.int32)
+    coc = np.zeros((n_cells, max_edges), dtype=np.int32)   # cellsOnCell
+    voc = np.zeros((n_cells, max_edges), dtype=np.int32)   # verticesOnCell
+    eoc = np.zeros((n_cells, max_edges), dtype=np.int32)   # edgesOnCell
+
+    for i in range(nrows):
+        for j in range(ncols):
+            c = cell_id(i, j)
+            lon_c[c] = lon0_deg + j * dlon_deg
+            lat_c[c] = lat0_deg + i * dlat_deg
+            corners = [vtx_id(i, j), vtx_id(i, j + 1),
+                      vtx_id(i + 1, j + 1), vtx_id(i + 1, j)]
+            edges = [hrow_id(i, j), vcol_id(i, j + 1),
+                    hrow_id(i + 1, j), vcol_id(i, j)]
+            neighbours = [cell_id(i - 1, j), cell_id(i, j + 1),
+                         cell_id(i + 1, j), cell_id(i, j - 1)]
+            voc[c] = [v + 1 for v in corners]
+            eoc[c] = [e + 1 for e in edges]
+            coc[c] = [n + 1 if n >= 0 else 0 for n in neighbours]
+
+    # -- vertices -------------------------------------------------------
+    lon_v = np.zeros(n_vertices)
+    lat_v = np.zeros(n_vertices)
+    cov = np.zeros((n_vertices, vertex_degree), dtype=np.int32)  # cellsOnVertex
+    eov = np.zeros((n_vertices, vertex_degree), dtype=np.int32)  # edgesOnVertex
+
+    for i in range(nrows + 1):
+        for j in range(ncols + 1):
+            v = vtx_id(i, j)
+            lon_v[v] = lon0_deg + (j - 0.5) * dlon_deg
+            lat_v[v] = lat0_deg + (i - 0.5) * dlat_deg
+            around_cells = [cell_id(i, j), cell_id(i, j - 1),
+                            cell_id(i - 1, j - 1), cell_id(i - 1, j)]
+            cov[v, :] = [c + 1 if c >= 0 else 0 for c in around_cells]
+            around_edges = []
+            around_edges.append(hrow_id(i, j - 1) if j - 1 >= 0 else -1)
+            around_edges.append(hrow_id(i, j) if j < ncols else -1)
+            around_edges.append(vcol_id(i - 1, j) if i - 1 >= 0 else -1)
+            around_edges.append(vcol_id(i, j) if i < nrows else -1)
+            eov[v, :] = [e + 1 if e >= 0 else 0 for e in around_edges]
+
+    # -- edges ------------------------------------------------------------
+    lon_e = np.zeros(n_edges)
+    lat_e = np.zeros(n_edges)
+    coe = np.zeros((n_edges, 2), dtype=np.int32)   # cellsOnEdge
+    voe = np.zeros((n_edges, 2), dtype=np.int32)   # verticesOnEdge
+
+    for i in range(nrows + 1):
+        for j in range(ncols):
+            e = hrow_id(i, j)
+            lon_e[e] = lon0_deg + j * dlon_deg
+            lat_e[e] = lat0_deg + (i - 0.5) * dlat_deg
+            south, north = cell_id(i - 1, j), cell_id(i, j)
+            coe[e] = [south + 1 if south >= 0 else 0,
+                     north + 1 if north >= 0 else 0]
+            voe[e] = [vtx_id(i, j) + 1, vtx_id(i, j + 1) + 1]
+
+    for i in range(nrows):
+        for j in range(ncols + 1):
+            e = vcol_id(i, j)
+            lon_e[e] = lon0_deg + (j - 0.5) * dlon_deg
+            lat_e[e] = lat0_deg + i * dlat_deg
+            west, east = cell_id(i, j - 1), cell_id(i, j)
+            coe[e] = [west + 1 if west >= 0 else 0,
+                     east + 1 if east >= 0 else 0]
+            voe[e] = [vtx_id(i, j) + 1, vtx_id(i + 1, j) + 1]
+
+    # edgesOnEdge -- every edge adjoining either of this edge's two cells,
+    # other than itself. Order/exact membership isn't semantically load
+    # -bearing anywhere in region.py; it only needs to be a valid, ragged,
+    # 1-based-with-0-fill array of edge ids for the generic connectivity
+    # -remap path to exercise.
+    max_edges2 = 2 * max_edges
+    eoe = np.zeros((n_edges, max_edges2), dtype=np.int32)
+    for e in range(n_edges):
+        neighbours = []
+        for c0 in coe[e]:
+            if c0 == 0:
+                continue
+            neighbours.extend(int(x) for x in eoc[c0 - 1] if x != 0 and x != e + 1)
+        neighbours = neighbours[:max_edges2]
+        eoe[e, :len(neighbours)] = neighbours
+
+    xc, yc, zc = to_xyz(lon_c, lat_c)
+    xv, yv, zv = to_xyz(lon_v, lat_v)
+    xe, ye, ze = to_xyz(lon_e, lat_e)
+
+    def rad360(deg):
+        return np.radians(np.asarray(deg) % 360.0)
+
+    def rad(deg):
+        return np.radians(np.asarray(deg))
+
+    ds = xr.Dataset(
+        {
+            "latCell": ("nCells", rad(lat_c)), "lonCell": ("nCells", rad360(lon_c)),
+            "xCell": ("nCells", xc), "yCell": ("nCells", yc), "zCell": ("nCells", zc),
+            "nEdgesOnCell": ("nCells", n_edges_on_cell),
+            "cellsOnCell": (("nCells", "maxEdges"), coc),
+            "verticesOnCell": (("nCells", "maxEdges"), voc),
+            "edgesOnCell": (("nCells", "maxEdges"), eoc),
+            "indexToCellID": ("nCells", np.arange(1, n_cells + 1, dtype=np.int32)),
+            "latVertex": ("nVertices", rad(lat_v)),
+            "lonVertex": ("nVertices", rad360(lon_v)),
+            "xVertex": ("nVertices", xv), "yVertex": ("nVertices", yv),
+            "zVertex": ("nVertices", zv),
+            "cellsOnVertex": (("nVertices", "vertexDegree"), cov),
+            "edgesOnVertex": (("nVertices", "vertexDegree"), eov),
+            "indexToVertexID": ("nVertices", np.arange(1, n_vertices + 1, dtype=np.int32)),
+            "latEdge": ("nEdges", rad(lat_e)), "lonEdge": ("nEdges", rad360(lon_e)),
+            "xEdge": ("nEdges", xe), "yEdge": ("nEdges", ye), "zEdge": ("nEdges", ze),
+            "cellsOnEdge": (("nEdges", "TWO"), coe),
+            "verticesOnEdge": (("nEdges", "TWO"), voe),
+            "edgesOnEdge": (("nEdges", "maxEdges2"), eoe),
+            "indexToEdgeID": ("nEdges", np.arange(1, n_edges + 1, dtype=np.int32)),
+        },
+        attrs={"sphere_radius": float(sphere_radius), "on_a_sphere": "YES",
+              "is_periodic": "NO"},
+    )
+    ds.to_netcdf(path)
+    ds.close()
+    return path
+
+
 @pytest.fixture
 def simple_mesh_file(tmp_path):
     """Four well-separated cells over the Maritime Continent, all hexagons."""

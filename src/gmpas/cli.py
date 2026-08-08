@@ -636,6 +636,31 @@ def _prep_relocate(args) -> int:
     return 0
 
 
+def _prep_create_region(args) -> int:
+    from .prep.region import create_region, write_graph_info
+
+    try:
+        points = [tuple(float(v) for v in token.split(",")) for token in args.polygon]
+        if any(len(p) != 2 for p in points):
+            raise ValueError
+    except ValueError:
+        print("gmpas: --polygon points must be 'lat,lon' pairs, e.g. "
+             "--polygon 40.0,-100.0 50.0,-100.0 50.0,-70.0", file=sys.stderr)
+        return 1
+    boundary_lat, boundary_lon = zip(*points, strict=True)
+
+    point_lat, point_lon = args.point if args.point else (None, None)
+
+    out_path = args.out or f"{Path(args.mesh_file).stem}.region.nc"
+    out = create_region(args.mesh_file, out_path, boundary_lat, boundary_lon,
+                        point_lat_deg=point_lat, point_lon_deg=point_lon)
+    print(f"{args.mesh_file} -> {out}  ({len(points)}-point boundary)")
+
+    graph = write_graph_info(out, f"{out.with_suffix('')}.graph.info")
+    print(f"partition file: {graph}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gmpas",
@@ -742,7 +767,8 @@ def build_parser() -> argparse.ArgumentParser:
                          description="Preprocessing steps, which run before "
                                      "there is any model output to plot.")
     presub = pre.add_subparsers(dest="prep_cmd",
-                                metavar="{view,hfun,generate,scale,relocate}")
+                                metavar="{view,hfun,generate,scale,relocate,"
+                                        "create-region}")
     # a bare `gmpas prep` should list its steps, not error
     pre.set_defaults(func=lambda _a, _p=pre: (_p.print_help(), 0)[1])
 
@@ -856,6 +882,21 @@ def build_parser() -> argparse.ArgumentParser:
                     help="longitude the refined region is currently at "
                          "(default: auto-detected from the mesh's finest cell)")
     pr.set_defaults(func=_prep_relocate)
+
+    pc = presub.add_parser("create-region", help="crop a global (or larger "
+                                                 "regional) mesh to a "
+                                                 "boundary-defined subset")
+    pc.add_argument("mesh_file", metavar="MESH", help="a global or regional mesh")
+    pc.add_argument("-o", "--out",
+                    help="output path (default: <mesh stem>.region.nc)")
+    pc.add_argument("--polygon", nargs="+", required=True, metavar="LAT,LON",
+                    help="boundary vertices as 'lat,lon' pairs, in degrees, "
+                         "at least 3 (e.g. --polygon 40,-100 50,-100 50,-70)")
+    pc.add_argument("--point", type=float, nargs=2, metavar=("LAT", "LON"),
+                    help="a point known to be inside the boundary (default: "
+                         "the polygon's spherical centroid -- only reliable "
+                         "for a convex boundary)")
+    pc.set_defaults(func=_prep_create_region)
     return p
 
 

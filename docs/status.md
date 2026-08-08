@@ -16,11 +16,12 @@ in gmpas's own environment; the two compete on `PATH`/`LD_LIBRARY_PATH`
 rather than help.
 
 **Preprocessing** covers `prep view`, `prep hfun`, `prep generate`,
-`prep scale` and `prep relocate`: looking at a mesh after it exists, looking
-at a distance function before any mesh exists, running JIGSAW to get from
-the second to the first, rescaling a regional mesh around a tangent point,
-and repositioning a refined region without resizing it. A run leaves
-everything `mkgrid` reads.
+`prep scale`, `prep relocate` and `prep create-region`: looking at a mesh
+after it exists, looking at a distance function before any mesh exists,
+running JIGSAW to get from the second to the first, rescaling a regional
+mesh around a tangent point, repositioning a refined region without
+resizing it, and cropping a global mesh down to a regional subset. A run
+leaves everything `mkgrid` reads.
 
 ## Not implemented
 
