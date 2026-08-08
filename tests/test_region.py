@@ -112,7 +112,11 @@ def test_connectivity_is_renumbered_with_no_dangling_or_out_of_range_ids(tmp_pat
         assert np.array_equal(ds.indexToCellID.values, np.arange(1, n_cells + 1))
 
 
-def test_an_edge_between_two_kept_cells_takes_the_more_interior_zone(tmp_path):
+def test_an_edge_fully_surrounded_by_kept_cells_takes_the_more_interior_zone(tmp_path):
+    """Covers only the all-neighbours-kept branch of `_neighbour_zone` -- an
+    edge always has exactly 2 sides, so it can never exercise the
+    some-neighbours-dropped branch on its own (see the vertex tests below,
+    and `_neighbour_zone`'s docstring, for why that needs 3+ sides)."""
     path = write_grid_mesh(tmp_path / "m.nc", **GRID)
     out = create_region(path, tmp_path / "region.nc", BOX_LAT, BOX_LON)
 
@@ -124,6 +128,32 @@ def test_an_edge_between_two_kept_cells_takes_the_more_interior_zone(tmp_path):
         expected = np.minimum(cell_zone[coe[both_kept, 0] - 1],
                               cell_zone[coe[both_kept, 1] - 1])
         assert np.array_equal(edge_zone[both_kept], expected)
+
+
+def test_neighbour_zone_takes_the_min_when_every_side_is_kept():
+    from gmpas.prep.region import _neighbour_zone
+
+    zone = np.array([0, 3, 5, 2, -1])
+    cells_on = np.array([[1, 2, 3, 4]])   # all 4 sides kept: zones 0, 3, 5, 2
+    assert _neighbour_zone(zone, cells_on).tolist() == [0]
+
+
+def test_neighbour_zone_takes_the_max_when_a_side_is_missing_or_dropped():
+    """The case a 2-sided edge structurally cannot exercise: with at least
+    one side missing (0-fill) or dropped (beyond N_BDY_LAYERS, zone -1),
+    this element sits at the outer rim of whatever it does touch, so it
+    takes the *more boundary-like* (max) of its kept sides, not the min.
+    Kept sides here are zones {0, 5} (cell 1 and cell 3); a plain min
+    -of-kept, which is what an earlier version of this function did, would
+    wrongly give 0 instead of 5.
+    """
+    from gmpas.prep.region import _neighbour_zone
+
+    zone = np.array([0, 3, 5, 2, -1])
+    # 1-based cellsOnCell-style row: cell 1 (zone 0), cell 3 (zone 5),
+    # a 0-fill "no neighbour" slot, and cell 5 (zone -1, dropped)
+    cells_on = np.array([[1, 3, 0, 5]])
+    assert _neighbour_zone(zone, cells_on).tolist() == [5]
 
 
 def test_graph_info_header_matches_the_subset(tmp_path):

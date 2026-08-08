@@ -227,17 +227,35 @@ def _relaxation_zones(cells_on_cell: np.ndarray, n_edges_on_cell: np.ndarray,
 
 
 def _neighbour_zone(zone: np.ndarray, cells_on: np.ndarray) -> np.ndarray:
-    """The minimum zone among a row's kept (>= 0) neighbour cells --
-    `bdyMaskEdge`/`bdyMaskVertex` take the more-interior (lower) of their
-    adjoining cells' zones, following the actual boundary inward. A side
-    with no kept cell at all (0-fill, or a neighbour this crop dropped)
-    contributes `_NO_NEIGHBOUR`, so it never wins the min unless every side
-    is like that -- which means this edge/vertex is dropped too.
+    """An edge's/vertex's own zone, derived from the zones of its
+    surrounding cells.
+
+    An element fully surrounded by kept cells takes the *more interior*
+    (lower) of their zones -- it follows the most-restrictive neighbour
+    inward. But an element with at least one side missing (0-fill, or a
+    neighbour this crop dropped entirely) sits structurally at the outer
+    rim of whatever it does touch, with nothing beyond to inform it -- it
+    takes the *more boundary-like* (higher, i.e. max) of the sides it does
+    have, not the lower. An edge only ever has 2 sides, so this distinction
+    is invisible there (one reached side makes min and max the same value)
+    -- it only shows up on a vertex with 3+ neighbours, some kept at
+    different zones and at least one not. An element with no kept
+    neighbours at all gets a sentinel above `N_BDY_LAYERS`, so the caller's
+    keep-filter drops it.
     """
-    zone_ext = np.append(zone, _NO_NEIGHBOUR)          # index n_cells == "none"
+    zone_ext = np.append(zone, -1)                     # index n_cells == "none"
     idx = np.where(cells_on > 0, cells_on - 1, zone_ext.shape[0] - 1)
-    per_side = np.where(zone_ext[idx] >= 0, zone_ext[idx], _NO_NEIGHBOUR)
-    return per_side.min(axis=1)
+    side_zone = zone_ext[idx]
+    reached = side_zone >= 0
+    n_reached = reached.sum(axis=1)
+
+    min_reached = np.where(reached, side_zone, N_BDY_LAYERS + 1).min(axis=1)
+    max_reached = np.where(reached, side_zone, -1).max(axis=1)
+    all_reached = n_reached == cells_on.shape[1]
+
+    result = np.where(all_reached, min_reached, max_reached)
+    result = np.where(n_reached == 0, _NO_NEIGHBOUR, result)
+    return result
 
 
 def _spherical_centroid(lon_deg: np.ndarray, lat_deg: np.ndarray) -> tuple[float, float]:
