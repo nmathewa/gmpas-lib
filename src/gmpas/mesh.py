@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -242,7 +243,12 @@ class MpasMesh:
             return cls._build(path)
 
         cache = cache_path(path)
-        if not (cache / "meta.json").exists():
+        if (cache / "meta.json").exists():
+            print(f"gmpas: using cached mesh geometry ({cache})", file=sys.stderr)
+        else:
+            print(f"gmpas: no cache for {path.name} yet — building geometry at "
+                  f"{cache} (first use of this mesh; large global meshes can "
+                  f"take a while and real memory)", file=sys.stderr)
             _build_to_dir(path, cache)
         return cls._mapped(path, cache)
 
