@@ -314,10 +314,15 @@ def test_a_chunk_boundary_does_not_split_a_polygon(tmp_path):
     for chunk in (1, 7, 40, 1000):
         cache = cache_path(path)
         _build_to_dir(path, cache, chunk=chunk)
-        results.append(np.asarray(MpasMesh._mapped(path, cache).cell_verts))
+        mesh = MpasMesh._mapped(path, cache)
+        results.append((np.asarray(mesh.cell_verts), np.asarray(mesh.xyz_cell),
+                        np.asarray(mesh.area_cell)))
 
-    for other in results[1:]:
-        assert np.array_equal(results[0], other)
+    cell_verts0, xyz_cell0, area_cell0 = results[0]
+    for cell_verts, xyz_cell, area_cell in results[1:]:
+        assert np.array_equal(cell_verts0, cell_verts)
+        assert np.array_equal(xyz_cell0, xyz_cell)
+        assert np.array_equal(area_cell0, area_cell)
 
 
 def test_cached_arrays_are_memory_mapped_not_read(simple_mesh_file):
