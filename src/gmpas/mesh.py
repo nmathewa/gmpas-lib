@@ -579,25 +579,53 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
         # arrays no longer need to stay resident alongside whatever comes next
         del lon_v, lat_v
 
-        xyz = np.stack([nc.variables["xCell"][:], nc.variables["yCell"][:],
-                        nc.variables["zCell"][:]], axis=-1)
-        xyz = xyz / np.linalg.norm(xyz, axis=-1, keepdims=True)
-
         radius = float(getattr(nc, "sphere_radius", EARTH_RADIUS) or EARTH_RADIUS)
-        area = nc.variables["areaCell"][:]
-        if radius < 1.001:
+        rescale_area = radius < 1.001
+        if rescale_area:
             radius = EARTH_RADIUS
-            area = area * EARTH_RADIUS**2
 
-        _save(tmp / "xyz_cell.npy", xyz)
-        _save(tmp / "area_cell.npy", area)
-        _save(tmp / "lon_cell.npy", _wrap180(nc.variables["lonCell"][:] * R2D))
-        _save(tmp / "lat_cell.npy", nc.variables["latCell"][:] * R2D)
+        # xyz's normalize is a per-row reduction (each cell's own 3
+        # components), so -- like the ragged fill and antimeridian unwrap
+        # above -- it decomposes cleanly over cells with no chunk needing to
+        # see another.
+        xc_var, yc_var, zc_var = (nc.variables["xCell"], nc.variables["yCell"],
+                                  nc.variables["zCell"])
+        area_var = nc.variables["areaCell"]
+        lonc_var, latc_var = nc.variables["lonCell"], nc.variables["latCell"]
+
+        xyz_w = _NpyWriter(tmp / "xyz_cell.npy", xc_var.dtype, (n_cells, 3))
+        area_w = _NpyWriter(tmp / "area_cell.npy", area_var.dtype, (n_cells,))
+        lonc_w = _NpyWriter(tmp / "lon_cell.npy", lonc_var.dtype, (n_cells,))
+        latc_w = _NpyWriter(tmp / "lat_cell.npy", latc_var.dtype, (n_cells,))
+
+        # coverage needs sum(areaCell), so accumulate a running total instead
+        # of summing the whole array at the end -- same idea as `_Bounds` for
+        # extent. A chunked sum isn't bit-identical to a whole-array .sum()
+        # (float addition isn't associative), but this only affects the
+        # derived coverage scalar, not any cached array's own values.
+        area_sum = 0.0
+        for i in range(0, n_cells, chunk):
+            j = min(i + chunk, n_cells)
+
+            xyz_block = np.stack([xc_var[i:j], yc_var[i:j], zc_var[i:j]], axis=-1)
+            xyz_block = xyz_block / np.linalg.norm(xyz_block, axis=-1, keepdims=True)
+            xyz_w.append(xyz_block)
+
+            area_block = area_var[i:j]
+            if rescale_area:
+                area_block = area_block * EARTH_RADIUS**2
+            area_w.append(area_block)
+            area_sum += float(area_block.sum())
+
+            lonc_w.append(_wrap180(lonc_var[i:j] * R2D))
+            latc_w.append(latc_var[i:j] * R2D)
+        xyz_w.close(); area_w.close(); lonc_w.close(); latc_w.close()
+
         _save(tmp / "lon_edge.npy", _wrap180(nc.variables["lonEdge"][:] * R2D))
         _save(tmp / "lat_edge.npy", nc.variables["latEdge"][:] * R2D)
         _save(tmp / "angle_edge.npy", nc.variables["angleEdge"][:])
 
-        coverage = float(area.sum() / (4.0 * np.pi * radius**2))
+        coverage = float(area_sum / (4.0 * np.pi * radius**2))
         extent = ((-180.0, 180.0, -90.0, 90.0) if coverage >= GLOBAL_COVERAGE
                   else bounds.extent())
         (tmp / "meta.json").write_text(json.dumps({
