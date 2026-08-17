@@ -621,9 +621,19 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             latc_w.append(latc_var[i:j] * R2D)
         xyz_w.close(); area_w.close(); lonc_w.close(); latc_w.close()
 
-        _save(tmp / "lon_edge.npy", _wrap180(nc.variables["lonEdge"][:] * R2D))
-        _save(tmp / "lat_edge.npy", nc.variables["latEdge"][:] * R2D)
-        _save(tmp / "angle_edge.npy", nc.variables["angleEdge"][:])
+        # pure elementwise scale/wrap, no reduction at all -- the simplest
+        # case of the three chunked loops in this function
+        lone_var, late_var, ang_var = (nc.variables["lonEdge"], nc.variables["latEdge"],
+                                       nc.variables["angleEdge"])
+        lone_w = _NpyWriter(tmp / "lon_edge.npy", lone_var.dtype, (n_edges,))
+        late_w = _NpyWriter(tmp / "lat_edge.npy", late_var.dtype, (n_edges,))
+        ang_w = _NpyWriter(tmp / "angle_edge.npy", ang_var.dtype, (n_edges,))
+        for i in range(0, n_edges, chunk):
+            j = min(i + chunk, n_edges)
+            lone_w.append(_wrap180(lone_var[i:j] * R2D))
+            late_w.append(late_var[i:j] * R2D)
+            ang_w.append(ang_var[i:j])
+        lone_w.close(); late_w.close(); ang_w.close()
 
         coverage = float(area_sum / (4.0 * np.pi * radius**2))
         extent = ((-180.0, 180.0, -90.0, 90.0) if coverage >= GLOBAL_COVERAGE
