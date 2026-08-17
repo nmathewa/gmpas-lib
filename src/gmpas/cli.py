@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import faulthandler
 import io
+import os
 import sys
 import time
 from pathlib import Path
@@ -684,12 +685,23 @@ def build_parser() -> argparse.ArgumentParser:
     # not required: a bare `gmpas` prints help rather than an argparse error
     sub = p.add_subparsers(dest="cmd", metavar="{info,plot,view}")
 
+    # Setting $GMPAS_CACHE_DIR by hand only works if the assignment precedes
+    # `gmpas` on the command line; placed after the command (a common mistake)
+    # it is silently taken as an ordinary positional argument instead. --cache-dir
+    # can't be misplaced that way, so every subcommand that can build or read a
+    # mesh cache accepts it.
+    _cache_dir_opt = dict(
+        metavar="DIR",
+        help="mesh geometry cache directory for this run, overriding "
+             "$GMPAS_CACHE_DIR (default: $GMPAS_CACHE_DIR or ~/.cache/gmpas/mesh)")
+
     def common(sp):
         # nargs="+" so an unquoted glob works too: the shell expands it into
         # many arguments, and Series.expand already accepts a list
         sp.add_argument("path", nargs="+", metavar="PATH",
                         help="file, directory, or glob (quoted or not)")
         sp.add_argument("-m", "--mesh", help="mesh file, if not alongside the data")
+        sp.add_argument("--cache-dir", **_cache_dir_opt)
 
     i = sub.add_parser("info", help="summarise a mesh and its variables")
     common(i)
@@ -731,6 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("-d", "--dir", help="where to look for the config files "
                                        "(default: the working directory)")
     t.add_argument("-o", "--out", help="write the target grid as SCRIP here")
+    t.add_argument("--cache-dir", **_cache_dir_opt)
     t.set_defaults(func=_target)
 
     r = sub.add_parser("remap", help="conservatively remap a run to a lat-lon grid")
@@ -801,6 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--height", type=int, default=700)
     pv.add_argument("--no-browser", action="store_true",
                     help="do not open a browser (useful over an SSH tunnel)")
+    pv.add_argument("--cache-dir", **_cache_dir_opt)
     pv.set_defaults(func=_prep_view)
 
     ph = presub.add_parser("hfun", help="browse a JIGSAW distance function "
@@ -826,6 +840,7 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--height", type=int, default=700)
     ph.add_argument("--no-browser", action="store_true",
                     help="do not open a browser (useful over an SSH tunnel)")
+    ph.add_argument("--cache-dir", **_cache_dir_opt)
     ph.set_defaults(func=_prep_hfun)
 
     pg = presub.add_parser("generate", help="run JIGSAW to build a mesh from "
@@ -855,6 +870,7 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--allow-steep", action="store_true",
                     help="generate even if the cell size gradient is above "
                          "the guideline")
+    pg.add_argument("--cache-dir", **_cache_dir_opt)
     pg.set_defaults(func=_prep_generate)
 
     ps = presub.add_parser("scale", help="rescale a regional mesh around a "
@@ -875,6 +891,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip the before/after cell-width comparison PNG")
     ps.add_argument("--plot-out",
                     help="comparison PNG path (default: <out stem>.compare.png)")
+    ps.add_argument("--cache-dir", **_cache_dir_opt)
     ps.set_defaults(func=_prep_scale)
 
     pr = presub.add_parser("relocate", help="move a mesh's refined region to "
@@ -893,6 +910,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--from-lon", type=float,
                     help="longitude the refined region is currently at "
                          "(default: auto-detected from the mesh's finest cell)")
+    pr.add_argument("--cache-dir", **_cache_dir_opt)
     pr.set_defaults(func=_prep_relocate)
 
     pc = presub.add_parser("create-region", help="crop a global (or larger "
@@ -912,6 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip the boundary-zone PNG")
     pc.add_argument("--plot-out",
                     help="region plot path (default: <out stem>.png)")
+    pc.add_argument("--cache-dir", **_cache_dir_opt)
     pc.set_defaults(func=_prep_create_region)
     return p
 
@@ -944,6 +963,15 @@ def main(argv=None) -> int:
     if getattr(args, "func", None) is None:
         parser.print_help()
         return 0
+
+    # --cache-dir is the safe way to point the mesh cache somewhere other than
+    # $GMPAS_CACHE_DIR: setting the env var by hand only works if the
+    # assignment precedes `gmpas` on the command line (`X=y gmpas ...`); placed
+    # after the command it is silently swallowed as an ordinary argument
+    # instead (issue seen in practice: `GMPAS_CACHE_DIR=/x` ended up baked into
+    # a mesh filename). This flag can't be misplaced that way.
+    if getattr(args, "cache_dir", None):
+        os.environ["GMPAS_CACHE_DIR"] = args.cache_dir
 
     from .mesh import MeshCacheError
     from .prep.generate import GenerateError
