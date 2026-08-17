@@ -528,13 +528,27 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
 
         _check_space(cache.parent, _cache_bytes(nc), path)
 
-        lon_v = _wrap180(nc.variables["lonVertex"][:] * R2D)
-        lat_v = nc.variables["latVertex"][:] * R2D
-        dt = lon_v.dtype
+        lon_v_var = nc.variables["lonVertex"]
+        lat_v_var = nc.variables["latVertex"]
+        dt = lon_v_var.dtype
+        n_vertices = lon_v_var.shape[0]
 
         n_cells = len(nc.dimensions["nCells"])
         n_edges = len(nc.dimensions["nEdges"])
         max_edges = len(nc.dimensions["maxEdges"])
+
+        # lon_v/lat_v must stay fully resident for the fancy-indexing below
+        # (lon_v[voc], lat_v[voe] pick arbitrary, non-sequential vertices), so
+        # unlike everything else in this function they can't become a genuine
+        # streaming read -- but the read itself can still be chunked, which
+        # avoids the transient 2-3x multiplier _wrap180's modulo chain costs
+        # when applied in one shot to the whole array.
+        lon_v = np.empty(n_vertices, dtype=dt)
+        lat_v = np.empty(n_vertices, dtype=dt)
+        for i in range(0, n_vertices, chunk):
+            j = min(i + chunk, n_vertices)
+            lon_v[i:j] = _wrap180(lon_v_var[i:j] * R2D)
+            lat_v[i:j] = lat_v_var[i:j] * R2D
 
         bounds = _Bounds()
 
@@ -573,25 +587,67 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             ew.append(wrapped)
         segs.close(); ew.close()
 
-        xyz = np.stack([nc.variables["xCell"][:], nc.variables["yCell"][:],
-                        nc.variables["zCell"][:]], axis=-1)
-        xyz = xyz / np.linalg.norm(xyz, axis=-1, keepdims=True)
+        # nothing past this point indexes by vertex, so the full nVertices
+        # arrays no longer need to stay resident alongside whatever comes next
+        del lon_v, lat_v
 
         radius = float(getattr(nc, "sphere_radius", EARTH_RADIUS) or EARTH_RADIUS)
-        area = nc.variables["areaCell"][:]
-        if radius < 1.001:
+        rescale_area = radius < 1.001
+        if rescale_area:
             radius = EARTH_RADIUS
-            area = area * EARTH_RADIUS**2
 
-        _save(tmp / "xyz_cell.npy", xyz)
-        _save(tmp / "area_cell.npy", area)
-        _save(tmp / "lon_cell.npy", _wrap180(nc.variables["lonCell"][:] * R2D))
-        _save(tmp / "lat_cell.npy", nc.variables["latCell"][:] * R2D)
-        _save(tmp / "lon_edge.npy", _wrap180(nc.variables["lonEdge"][:] * R2D))
-        _save(tmp / "lat_edge.npy", nc.variables["latEdge"][:] * R2D)
-        _save(tmp / "angle_edge.npy", nc.variables["angleEdge"][:])
+        # xyz's normalize is a per-row reduction (each cell's own 3
+        # components), so -- like the ragged fill and antimeridian unwrap
+        # above -- it decomposes cleanly over cells with no chunk needing to
+        # see another.
+        xc_var, yc_var, zc_var = (nc.variables["xCell"], nc.variables["yCell"],
+                                  nc.variables["zCell"])
+        area_var = nc.variables["areaCell"]
+        lonc_var, latc_var = nc.variables["lonCell"], nc.variables["latCell"]
 
-        coverage = float(area.sum() / (4.0 * np.pi * radius**2))
+        xyz_w = _NpyWriter(tmp / "xyz_cell.npy", xc_var.dtype, (n_cells, 3))
+        area_w = _NpyWriter(tmp / "area_cell.npy", area_var.dtype, (n_cells,))
+        lonc_w = _NpyWriter(tmp / "lon_cell.npy", lonc_var.dtype, (n_cells,))
+        latc_w = _NpyWriter(tmp / "lat_cell.npy", latc_var.dtype, (n_cells,))
+
+        # coverage needs sum(areaCell), so accumulate a running total instead
+        # of summing the whole array at the end -- same idea as `_Bounds` for
+        # extent. A chunked sum isn't bit-identical to a whole-array .sum()
+        # (float addition isn't associative), but this only affects the
+        # derived coverage scalar, not any cached array's own values.
+        area_sum = 0.0
+        for i in range(0, n_cells, chunk):
+            j = min(i + chunk, n_cells)
+
+            xyz_block = np.stack([xc_var[i:j], yc_var[i:j], zc_var[i:j]], axis=-1)
+            xyz_block = xyz_block / np.linalg.norm(xyz_block, axis=-1, keepdims=True)
+            xyz_w.append(xyz_block)
+
+            area_block = area_var[i:j]
+            if rescale_area:
+                area_block = area_block * EARTH_RADIUS**2
+            area_w.append(area_block)
+            area_sum += float(area_block.sum())
+
+            lonc_w.append(_wrap180(lonc_var[i:j] * R2D))
+            latc_w.append(latc_var[i:j] * R2D)
+        xyz_w.close(); area_w.close(); lonc_w.close(); latc_w.close()
+
+        # pure elementwise scale/wrap, no reduction at all -- the simplest
+        # case of the three chunked loops in this function
+        lone_var, late_var, ang_var = (nc.variables["lonEdge"], nc.variables["latEdge"],
+                                       nc.variables["angleEdge"])
+        lone_w = _NpyWriter(tmp / "lon_edge.npy", lone_var.dtype, (n_edges,))
+        late_w = _NpyWriter(tmp / "lat_edge.npy", late_var.dtype, (n_edges,))
+        ang_w = _NpyWriter(tmp / "angle_edge.npy", ang_var.dtype, (n_edges,))
+        for i in range(0, n_edges, chunk):
+            j = min(i + chunk, n_edges)
+            lone_w.append(_wrap180(lone_var[i:j] * R2D))
+            late_w.append(late_var[i:j] * R2D)
+            ang_w.append(ang_var[i:j])
+        lone_w.close(); late_w.close(); ang_w.close()
+
+        coverage = float(area_sum / (4.0 * np.pi * radius**2))
         extent = ((-180.0, 180.0, -90.0, 90.0) if coverage >= GLOBAL_COVERAGE
                   else bounds.extent())
         (tmp / "meta.json").write_text(json.dumps({
