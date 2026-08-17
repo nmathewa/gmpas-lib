@@ -219,7 +219,12 @@ class MpasMesh:
         if self._tree is None:
             from scipy.spatial import cKDTree
 
-            self._tree = cKDTree(self.xyz_cell)
+            # balanced_tree=False only changes the split heuristic scipy uses
+            # while building the tree (sliding midpoint vs. median-of-medians),
+            # not the branch-and-bound search query() runs afterward -- nearest
+            # cell results are identical either way, and construction is
+            # measurably faster on a large mesh.
+            self._tree = cKDTree(self.xyz_cell, balanced_tree=False)
         return self._tree
 
     def cell_of(self, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
