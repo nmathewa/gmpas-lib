@@ -561,6 +561,10 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             ew.append(wrapped)
         segs.close(); ew.close()
 
+        # nothing past this point indexes by vertex, so the full nVertices
+        # arrays no longer need to stay resident alongside whatever comes next
+        del lon_v, lat_v
+
         xyz = np.stack([nc.variables["xCell"][:], nc.variables["yCell"][:],
                         nc.variables["zCell"][:]], axis=-1)
         xyz = xyz / np.linalg.norm(xyz, axis=-1, keepdims=True)
