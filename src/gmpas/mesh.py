@@ -516,13 +516,27 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
 
         _check_space(cache.parent, _cache_bytes(nc), path)
 
-        lon_v = _wrap180(nc.variables["lonVertex"][:] * R2D)
-        lat_v = nc.variables["latVertex"][:] * R2D
-        dt = lon_v.dtype
+        lon_v_var = nc.variables["lonVertex"]
+        lat_v_var = nc.variables["latVertex"]
+        dt = lon_v_var.dtype
+        n_vertices = lon_v_var.shape[0]
 
         n_cells = len(nc.dimensions["nCells"])
         n_edges = len(nc.dimensions["nEdges"])
         max_edges = len(nc.dimensions["maxEdges"])
+
+        # lon_v/lat_v must stay fully resident for the fancy-indexing below
+        # (lon_v[voc], lat_v[voe] pick arbitrary, non-sequential vertices), so
+        # unlike everything else in this function they can't become a genuine
+        # streaming read -- but the read itself can still be chunked, which
+        # avoids the transient 2-3x multiplier _wrap180's modulo chain costs
+        # when applied in one shot to the whole array.
+        lon_v = np.empty(n_vertices, dtype=dt)
+        lat_v = np.empty(n_vertices, dtype=dt)
+        for i in range(0, n_vertices, chunk):
+            j = min(i + chunk, n_vertices)
+            lon_v[i:j] = _wrap180(lon_v_var[i:j] * R2D)
+            lat_v[i:j] = lat_v_var[i:j] * R2D
 
         bounds = _Bounds()
 
