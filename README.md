@@ -1,7 +1,7 @@
 # gmpas
 
 [![tests](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml/badge.svg)](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml)
-[![version](https://img.shields.io/badge/version-0.4.1-blue)](docs/status.md)
+[![PyPI](https://img.shields.io/pypi/v/gmpas)](https://pypi.org/project/gmpas/)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](docs/installation.md)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -26,13 +26,14 @@ a mesh file with a matching cell count sits beside it.
 ## Installation
 
 ```bash
-conda env create -f environment.yml && conda activate gmpas && pip install -e . --no-deps
+pip install gmpas            # core: geometry, caching, remap weights
+pip install "gmpas[plot]"    # + matplotlib and cartopy, for plotting
 ```
 
-Pure pip works too where wheels exist:
+Developing gmpas itself, or want conda-forge's easier cartopy/netCDF4 builds:
 
 ```bash
-pip install -e ".[dev]"
+conda env create -f environment.yml && conda activate gmpas && pip install -e . --no-deps
 ```
 
 Two workflows need external programs, which pip cannot provide. Conservative
@@ -43,8 +44,10 @@ MPI and PnetCDF. Skip both if you only plot and view.
 Check it landed:
 
 ```bash
-gmpas --version && pytest -q
+gmpas --version
 ```
+
+From a source install, `pytest -q` runs the test suite too.
 
 Full detail, including the extras and what each one pulls in:
 [docs/installation.md](docs/installation.md).
