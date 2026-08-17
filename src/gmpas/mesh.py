@@ -58,8 +58,14 @@ class MeshCacheError(OSError):
     """The mesh cache could not be written -- almost always out of room."""
 
 
-def has_mesh(ds: xr.Dataset) -> bool:
-    """Whether a dataset carries enough information to build mesh geometry."""
+def has_mesh(ds) -> bool:
+    """Whether a dataset carries enough information to build mesh geometry.
+
+    Accepts an xarray Dataset or a raw netCDF4 Dataset -- both expose a
+    `.variables` mapping supporting `in`, and callers use both (`data.py`'s
+    directory scan probes candidates with netCDF4 directly to skip xarray's
+    CF decoding).
+    """
     return all(v in ds.variables for v in MESH_VARS)
 
 

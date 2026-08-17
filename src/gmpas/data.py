@@ -47,13 +47,25 @@ def open_data(data_path: str | Path,
 
 
 def find_mesh_beside(dpath: Path, n_cells: int) -> Path | None:
-    """Look for a mesh file in the same directory with a matching cell count."""
+    """Look for a mesh file in the same directory with a matching cell count.
+
+    Probes each candidate with netCDF4 directly rather than xarray: this only
+    needs two cheap header facts -- does it carry `verticesOnCell`, does its
+    `nCells` match -- and `xr.open_dataset` would run full CF decoding
+    (attrs, masking, coordinate indexes) over every variable in every
+    candidate file just to answer them. A run directory can hold many files,
+    so that cost is paid once per file scanned, not once total; matches
+    `Series._scan`'s netCDF4-over-xarray choice for the same reason.
+    """
+    import netCDF4
+
     for cand in sorted(dpath.parent.glob("*.nc")):
         if cand == dpath:
             continue
         try:
-            with xr.open_dataset(cand, decode_timedelta=False, engine="netcdf4") as c:
-                if has_mesh(c) and int(c.sizes.get("nCells", -1)) == n_cells:
+            with netCDF4.Dataset(cand) as nc:
+                dim = nc.dimensions.get("nCells")
+                if has_mesh(nc) and dim is not None and len(dim) == n_cells:
                     return cand
         except Exception:
             continue
