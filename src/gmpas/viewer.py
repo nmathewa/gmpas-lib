@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import io
 import json
+import re
 import threading
 import webbrowser
 from collections import OrderedDict
@@ -378,6 +379,19 @@ class Viewer:
 # ----------------------------------------------------------------- serving
 
 
+def _safe_header_value(value: str) -> str:
+    """Strip control characters before a request-derived string reaches a
+    response header.
+
+    `http.server.BaseHTTPRequestHandler.send_header` does not sanitize its
+    input -- it just formats `"%s: %s\\r\\n" % (keyword, value)` and encodes
+    as latin-1, so an embedded CR/LF (e.g. from a query parameter decoded by
+    `parse_qs`, which turns `%0d%0a` into a literal newline) would split the
+    header stream and let a request inject arbitrary extra response headers.
+    """
+    return re.sub(r"[\x00-\x1f\x7f]", "", value)
+
+
 class PageHandler(BaseHTTPRequestHandler):
     """What every gmpas page handler has in common.
 
@@ -475,10 +489,15 @@ def _handler(viewer: Viewer, html: str = ""):
                             "application/x-netcdf", f"{stem}.nc")
                     else:
                         return self.send_error(404)
+                    # name is built from `var`, a raw query parameter -- strip
+                    # control characters (the CRLF-injection sink) and quotes
+                    # (which would otherwise close the filename="..." early
+                    # and let extra Content-Disposition parameters follow)
+                    safe_name = _safe_header_value(name).replace('"', "")
                     self.send_response(200)
                     self.send_header("Content-Type", ctype)
                     self.send_header("Content-Disposition",
-                                     f'attachment; filename="{name}"')
+                                     f'attachment; filename="{safe_name}"')
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     return self.wfile.write(body)
