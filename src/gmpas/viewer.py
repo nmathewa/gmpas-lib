@@ -807,7 +807,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
 </div>
 <script>
 const $=s=>document.querySelector(s);
-let M=null, cur=null, busy=false, pend=false;
+let M=null, cur=null, drawCtrl=null;
 let view=null, home=null, rendered=null;      // geographic state
 const ZMAX=800;                               // slider units, 100 per doubling
 
@@ -994,13 +994,14 @@ function colorbar(lo,hi){
 
 async function draw(){
   if(!cur) return;
-  if(busy){ pend=true; return; }
-  busy=true;
-  // everything below runs under try/finally: a fetch that rejects -- a
-  // superseded request, a reload mid-flight, a server hiccup -- used to
-  // escape with busy still set, and the viewer then never drew again. It
-  // looked like zoom and pan had broken, because the preview transform kept
-  // updating over a frame that could no longer be replaced.
+  // Selecting something new mid-render used to queue behind the render
+  // already in flight, so switching variable/time/level while a frame was
+  // loading made the new selection wait on work nobody wants anymore.
+  // Abort it instead: the browser drops the response, and the request
+  // being superseded (rather than blocking a fresh one from starting) is
+  // exactly what makes the new selection feel immediate.
+  if(drawCtrl) drawCtrl.abort();
+  const ctrl = drawCtrl = new AbortController();
   try{
   const b=outset(boxOf(view));
   const p=new URLSearchParams({var:cur.name,time:$("#time").value,
@@ -1009,7 +1010,7 @@ async function draw(){
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
   const t0=performance.now();
-  const r=await fetch("api/frame?"+p);
+  const r=await fetch("api/frame?"+p, {signal: ctrl.signal});
   if(!r.ok){ say((await r.json()).error); return; }
   const [lo,hi]=r.headers.get("X-Range").split(",").map(Number);
   const url=URL.createObjectURL(await r.blob());
@@ -1022,10 +1023,10 @@ async function draw(){
   colorbar(lo,hi); scalebar(); graticule(); renderAnimList();
   say(`${cur.label} \u00b7 ${Math.round(performance.now()-t0)} ms`);
   }catch(e){
+    if(e.name==="AbortError") return;   // superseded by a newer draw()
     say("render failed: "+e);
   }finally{
-    busy=false;
-    if(pend){ pend=false; draw(); }      // always drains, however we left
+    if(drawCtrl===ctrl) drawCtrl=null;  // don't clobber a newer request's state
   }
 }
 // Named, independently-loading animations, one entry per (variable, level,
