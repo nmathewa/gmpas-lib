@@ -44,6 +44,16 @@ CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo",
 #: like, grew both dicts without bound for the life of the server process.
 VIEW_LRU_SIZE = 12
 
+#: derived-variable grammar: a fixed, small set of patterns, each mapped to
+#: one specific numpy op -- never eval()/exec() on the query string, since
+#: `var` is untrusted input reachable over the network once --host 0.0.0.0
+#: is in play for an HPC tunnel. Operands are plain field names (\w+), so
+#: these never nest into each other.
+_DIFF_EXPR = re.compile(r"^\s*diff\(\s*(\w+)\s*\)\s*$")         # np.diff along time
+_HYPOT_EXPR = re.compile(r"^\s*hypot\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*$")
+_BINARY_EXPR = re.compile(r"^\s*(\w+)\s*([+\-*/])\s*(\w+)\s*$")
+_BINARY_OPS = {"+": np.add, "-": np.subtract, "*": np.multiply, "/": np.divide}
+
 
 def ramp(name: str, n: int = 32) -> list[str]:
     """Hex stops for a colormap, so the browser's bar matches the image."""
@@ -289,8 +299,47 @@ class Viewer:
                              lambda: _overlay(extent, nx, ny))
 
     def values(self, var: str, time: int, level: int) -> np.ndarray:
-        """`time` indexes the whole series, across files, not one file."""
-        return self.series.values(var, step=time, level=level)
+        """`time` indexes the whole series, across files, not one file.
+
+        `var` is usually a real field name, looked up directly. It can also
+        be a small derived expression built from real field names -- see
+        `_derived` -- in which case every operand still goes through this
+        same cached `Series.values()` a real name would, so a derived
+        variable costs one cheap elementwise numpy op on top of ordinary
+        (cached) reads, nothing more.
+        """
+        if var in self.plottable_cell_vars():
+            return self.series.values(var, step=time, level=level)
+        return self._derived(var, time, level)
+
+    def _derived(self, expr: str, time: int, level: int) -> np.ndarray:
+        """Evaluate a derived-variable expression against a fixed grammar.
+
+        Deliberately not eval()/exec(): `expr` is untrusted input, reachable
+        over the network once --host 0.0.0.0 is in play for an HPC tunnel.
+        Every operand is matched as a plain field name and read through
+        `Series.values()` directly, which raises its own clear KeyError for
+        an unknown one -- nothing here runs an arbitrary expression.
+        """
+        if m := _DIFF_EXPR.match(expr):
+            (name,) = m.groups()
+            cur = self.series.values(name, step=time, level=level)
+            if time == 0:
+                return np.full_like(cur, np.nan)   # no previous step to diff against
+            prev = self.series.values(name, step=time - 1, level=level)
+            return cur - prev
+        if m := _HYPOT_EXPR.match(expr):
+            a, b = m.groups()
+            return np.hypot(self.series.values(a, step=time, level=level),
+                            self.series.values(b, step=time, level=level))
+        if m := _BINARY_EXPR.match(expr):
+            a, op, b = m.groups()
+            return _BINARY_OPS[op](self.series.values(a, step=time, level=level),
+                                   self.series.values(b, step=time, level=level))
+        raise KeyError(
+            f"{expr!r} is not a known variable, and not a recognised derived "
+            f"expression (a + b, a - b, a * b, a / b, hypot(a, b), or diff(a))"
+        )
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
               nx=None, ny=None, compress=1):
@@ -330,6 +379,13 @@ class Viewer:
         from .plot import cell_field
         from .style import Style
 
+        if var not in self.plottable_cell_vars():
+            raise ValueError(
+                f"{var!r} is a derived expression -- figure export needs a "
+                f"real field's attrs (units, long_name) for its label and "
+                f"title, which a derived variable doesn't have. Export the "
+                f"underlying variable(s) instead."
+            )
         da = self.series.dataarray(var, time)
         values = self.values(var, time, level)
         label = _data.field_label(da)
@@ -377,6 +433,13 @@ class Viewer:
 
         from .raster import target_grid
 
+        if var not in self.plottable_cell_vars():
+            raise ValueError(
+                f"{var!r} is a derived expression -- netCDF export needs a "
+                f"real field's attrs (units, long_name), which a derived "
+                f"variable doesn't have. Export the underlying variable(s) "
+                f"instead."
+            )
         view = self.view(extent, nx, ny)
         img = view.frame(self.values(var, time, level)).astype(np.float32)
         lon, lat = target_grid(tuple(extent), view.nx, view.ny)
@@ -720,6 +783,13 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
   <div class="sec"><label style="margin:0"><input type="checkbox" id="showstatic"
     style="width:auto;vertical-align:-1px"> show mesh &amp; static arrays</label></div>
   <div id="vars"></div>
+  <div class="sec">
+    <label>derive</label>
+    <div style="display:flex;gap:6px">
+      <input type="text" id="deriveExpr" placeholder="a - b, hypot(a,b), diff(a)">
+      <button id="deriveBtn">show</button>
+    </div>
+  </div>
 </div>
 <div id="main">
   <div id="top">
@@ -877,6 +947,24 @@ function pick(name){
   $("#level").max=cur.levels-1; $("#level").value=0; $("#llab").textContent=0;
   overlay(); draw();
 }
+// A derived expression ("a - b", "hypot(a,b)", "diff(a)") isn't in
+// M.variables -- it's evaluated server-side against real fields, see
+// Viewer._derived -- so `cur` is built by hand rather than looked up.
+// No vertical level of its own: combining two fields' levels is ambiguous,
+// so this always shows level 0 of whatever the expression names.
+function pickDerived(expr){
+  if(!expr) return;
+  stopPlayback();
+  cur = {name: expr, label: expr, static: false, levels: 1};
+  [...$("#vars").children].forEach(d=>d.classList.remove("on"));
+  $("#time").max=M.steps-1; $("#tlab").textContent=M.labels[$("#time").value|0];
+  $("#level").max=0; $("#level").value=0; $("#llab").textContent=0;
+  overlay(); draw();
+}
+$("#deriveBtn").onclick = ()=>pickDerived($("#deriveExpr").value.trim());
+$("#deriveExpr").addEventListener("keydown", e=>{
+  if(e.key==="Enter"){ e.preventDefault(); $("#deriveBtn").click(); }
+});
 async function pollScan(){
   if(!M||!M.scanning) return;
   const s=await (await fetch("api/status")).json();
