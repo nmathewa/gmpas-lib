@@ -550,8 +550,40 @@ def _dashboard(args, data_path=None, mesh_path="", hfun_path="") -> int:
 
 
 def _view(args) -> int:
+    if args.generic:
+        return _generic_view(args)
     return _dashboard(args, data_path=args.path, mesh_path=args.mesh or "",
                       hfun_path=args.hfun or "")
+
+
+def _generic_view(args) -> int:
+    """`gmpas view --generic`: one plain lat/lon-grid file, no mesh.
+
+    Bypasses `_dashboard`/`dashboard.build` entirely -- those assemble the
+    MPAS run/mesh/hfun sources `GenericViewer` has no equivalent of. Reuses
+    `dashboard.serve` directly instead: it only needs a list of `Source`,
+    and a `Source.handler` is any BaseHTTPRequestHandler subclass, which
+    `viewer._handler(generic_viewer, PAGE)` already is.
+    """
+    from .dashboard import Source, serve
+    from .generic import GenericViewer
+    from .viewer import PAGE, _handler
+
+    if len(args.path) != 1:
+        raise ValueError(
+            f"--generic takes exactly one file, got {len(args.path)}: "
+            f"{args.path}"
+        )
+    gv = GenericViewer(args.path[0])
+    source = Source("run", "data",
+                    f"{gv.path.name} · {gv.nx}x{gv.ny} grid · "
+                    f"{gv.steps} step{'s' if gv.steps != 1 else ''}",
+                    _handler(gv, PAGE))
+    serve([source], port=args.port, host=args.host,
+          open_browser=not args.no_browser,
+          strict_port=args.port != DEFAULT_PORT,
+          banner=f"gmpas view --generic · {gv.path.name}")
+    return 0
 
 
 def _prep_view(args) -> int:
@@ -770,6 +802,19 @@ def build_parser() -> argparse.ArgumentParser:
     common(v)
     v.add_argument("--hfun", help="also serve the JIGSAW hfun.py behind this "
                                   "mesh, as a third page on the same port")
+    v.add_argument("--generic", action="store_true",
+                   help="treat PATH as a plain, self-describing netCDF file "
+                        "on its own regular lat/lon grid, not MPAS output -- "
+                        "no mesh, no KD-tree, so it's much faster, but only "
+                        "works for a real regular lat/lon grid (a curvilinear "
+                        "or unstructured file needs a mesh instead). Frames "
+                        "are served at the file's own native resolution, not "
+                        "resampled, so --width/--height are ignored too (the "
+                        "browser box is sized off the grid's own shape, to "
+                        "stay undistorted without resampling); so are "
+                        "-m/--mesh, --hfun and --cache-dir. Export "
+                        "(figure/GIF/netCDF) isn't implemented for this mode "
+                        "yet.")
     v.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
                    help=f"port (default {DEFAULT_PORT}; the default wanders "
                         f"if busy, an explicit one fails instead)")
