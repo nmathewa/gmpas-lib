@@ -58,6 +58,12 @@ def parse_time(path: Path) -> datetime | None:
 #: open file handles to keep around while scrubbing through time
 LRU_SIZE = 4
 
+#: materialised (var, step, level) reads to keep around. Cheaper to hold
+#: more of these than open file handles -- one field's worth of float64
+#: rather than a whole file -- but still bounded: an animation loop can
+#: cycle through every step of every variable over a long session.
+VALUES_LRU_SIZE = 64
+
 
 def expand(paths) -> list[Path]:
     """Turn a path, glob, directory or list into a sorted list of files."""
@@ -117,6 +123,7 @@ class Series:
                  background_scan: bool = False):
         self.files = expand(paths)
         self._open: OrderedDict[Path, xr.Dataset] = OrderedDict()
+        self._values: OrderedDict[tuple, np.ndarray] = OrderedDict()
 
         # netCDF4/HDF5 is not safe for concurrent access from multiple
         # threads, and the viewer serves every HTTP request on its own
@@ -280,17 +287,35 @@ class Series:
     def values(self, var: str, step: int = 0, level: int = 0) -> np.ndarray:
         """One field at one step in the series, as a flat per-element array.
 
+        Re-rendering the same (var, step, level) -- a colormap or range
+        change, scrubbing back to a step already visited -- is common and
+        was paying a full disk read every time, serialized behind every
+        other read in the process (see the lock's own note above). Cache
+        the materialised result so only the first request for a given key
+        pays that cost; later ones return the same detached array straight
+        from the cache lookup, which is why they can share the lock with
+        the disk read below rather than needing one of their own.
+
         The actual disk read (`select` materialises `.values`) happens
         inside the lock along with the cache lookup, not after it -- the
         returned array is a plain, fully detached numpy array, so nothing
         else needs to hold the lock once this returns.
         """
-        path, local = self.steps[step]
+        key = (var, step, level)
         with self._lock:
+            cached = self._values.get(key)
+            if cached is not None:
+                self._values.move_to_end(key)
+                return cached
+            path, local = self.steps[step]
             ds = self._dataset(path)
             if var not in ds:
                 raise KeyError(f"{var!r} not in {path.name}")
-            return select(ds[var], time=local, level=level)
+            arr = select(ds[var], time=local, level=level)
+            self._values[key] = arr
+            if len(self._values) > VALUES_LRU_SIZE:
+                self._values.popitem(last=False)
+            return arr
 
     def __repr__(self) -> str:
         return (f"<Series {len(self.steps)} steps across {self.n_files} files"
