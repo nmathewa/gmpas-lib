@@ -179,7 +179,15 @@ class Viewer:
         self.home = self.mesh.extent
         self._views: OrderedDict[tuple, ViewIndex] = OrderedDict()
         self._overlays: OrderedDict[tuple, bytes] = OrderedDict()
+        # Guards only the dict bookkeeping below, never the build itself --
+        # see _cached(). A KD-tree query or a cartopy render can take a
+        # couple hundred ms, and holding this for that long serialized every
+        # render in the process onto one thread at a time regardless of
+        # whether they shared a key, even though ThreadingHTTPServer already
+        # gives each request its own thread.
         self._lock = threading.Lock()
+        self._view_pending: dict[tuple, threading.Event] = {}
+        self._overlay_pending: dict[tuple, threading.Event] = {}
 
     # -- variables -------------------------------------------------------
 
@@ -226,31 +234,59 @@ class Viewer:
 
     # -- frames ----------------------------------------------------------
 
+    def _cached(self, cache: OrderedDict, pending: dict, key, build):
+        """Get-or-build `key` in `cache`, computing `build()` at most once
+        per key even under concurrent requests -- but never while holding
+        `self._lock`, so a request for a different key never waits on it.
+
+        Concurrent requests for the *same* uncached key share one build via
+        `pending`'s per-key Event rather than duplicating the work; a build
+        that raises leaves nothing cached, so any waiters just retry it
+        themselves instead of silently reusing a failure.
+        """
+        with self._lock:
+            if key in cache:
+                cache.move_to_end(key)
+                return cache[key]
+            ev = pending.get(key)
+            if ev is None:
+                pending[key] = ev = threading.Event()
+                mine = True
+            else:
+                mine = False
+        if not mine:
+            ev.wait()
+            with self._lock:
+                if key in cache:
+                    return cache[key]
+            return self._cached(cache, pending, key, build)      # builder failed: retry
+
+        try:
+            value = build()
+        except Exception:
+            with self._lock:
+                del pending[key]
+            ev.set()
+            raise
+        with self._lock:
+            cache[key] = value
+            if len(cache) > VIEW_LRU_SIZE:
+                cache.popitem(last=False)
+            del pending[key]
+        ev.set()
+        return value
+
     def view(self, extent, nx=None, ny=None) -> ViewIndex:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        with self._lock:
-            if key in self._views:
-                self._views.move_to_end(key)
-                return self._views[key]
-            index = ViewIndex(self.mesh, extent, nx, ny)
-            self._views[key] = index
-            if len(self._views) > VIEW_LRU_SIZE:
-                self._views.popitem(last=False)
-            return index
+        return self._cached(self._views, self._view_pending, key,
+                             lambda: ViewIndex(self.mesh, extent, nx, ny))
 
     def overlay(self, extent, nx=None, ny=None) -> bytes:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        with self._lock:
-            if key in self._overlays:
-                self._overlays.move_to_end(key)
-                return self._overlays[key]
-            png = _overlay(extent, nx, ny)
-            self._overlays[key] = png
-            if len(self._overlays) > VIEW_LRU_SIZE:
-                self._overlays.popitem(last=False)
-            return png
+        return self._cached(self._overlays, self._overlay_pending, key,
+                             lambda: _overlay(extent, nx, ny))
 
     def values(self, var: str, time: int, level: int) -> np.ndarray:
         """`time` indexes the whole series, across files, not one file."""
