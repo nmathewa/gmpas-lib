@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "gmpas - a faster native visualizer for MPAS"
+type: software
+authors:
+  - given-names: Nirmal
+    family-names: Alex
+version: 0.4.5
+date-released: "2026-08-18"
+repository-code: "https://github.com/nmathewa/gmpas-lib"
+url: "https://github.com/nmathewa/gmpas-lib"
+doi: 10.5281/zenodo.21987068
+license: MIT
+keywords:
+  - mpas
+  - unstructured mesh
+  - voronoi
+  - atmosphere
+  - visualization
+  - climate
+abstract: >-
+  Fast plotting of MPAS output on its own native, variable-resolution mesh --
+  no regridding -- plus mesh generation, an interactive viewer, and
+  conservative remapping.

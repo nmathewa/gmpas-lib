@@ -1,6 +1,6 @@
 # Status
 
-As of 0.4.4, gmpas covers the pipeline from both ends.
+As of 0.4.5, gmpas covers the pipeline from both ends.
 
 **Postprocessing** — plotting, the interactive viewer, and conservative
 remapping — is implemented. `gmpas remap` writes the grid files ESMF needs,
