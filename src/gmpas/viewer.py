@@ -665,7 +665,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <label style="white-space:nowrap"><input type="checkbox" id="grid" checked
       style="vertical-align:-1px"> grid</label>
     <button id="home">reset view</button>
-    <button id="anim">animate</button>
+    <button id="anim">▶ play</button>
     <span id="animstate"></span>
   </div>
   <div id="stage">
@@ -960,7 +960,8 @@ async function draw(){
 // configuration, so panning or changing variable starts a new set while an
 // earlier one stays instantly replayable.
 const animCache=new Map();
-const anim={loading:false, playing:false, timer:null, cancel:false, urls:null};
+const anim={loading:false, playing:false, timer:null, cancel:false, urls:null,
+            ready:0, total:0, firstReady:null};
 let lastRange=null;
 
 function animKey(){
@@ -973,10 +974,13 @@ function animUI(){
     $("#animhint").textContent=f?`${f} frames held in ${animCache.size} set${animCache.size>1?"s":""}`:""; }
   const k=animKey(), have=animCache.has(k);
   const btn=$("#anim");
-  btn.disabled=anim.loading;
-  btn.textContent = anim.loading ? "loading\u2026"
-                  : anim.playing ? "\u23f8 pause"
-                  : have ? "\u25b6 play" : "animate";
+  // disabled only in the brief gap before frame 0 has rendered -- once
+  // anything is ready, play can start (and keep extending as more streams
+  // in), and pausing/resuming a still-loading run must stay clickable
+  btn.disabled = anim.loading && !anim.playing && anim.ready===0;
+  btn.textContent = anim.playing ? "\u23f8 pause"
+                  : anim.loading ? "loading\u2026"
+                  : "\u25b6 play";
   btn.classList.toggle("on", anim.playing);
   if(!anim.loading && !anim.playing)
     $("#animstate").textContent = have ? `${animCache.get(k).length} frames ready` : "";
@@ -984,7 +988,12 @@ function animUI(){
 
 async function animLoad(){
   const k=animKey(), n=M.steps;
-  if(n<2){ say("only one timestep"); return null; }
+  let resolveFirst;
+  anim.firstReady=new Promise(res=>{resolveFirst=res});
+  anim.ready=0; anim.total=n;
+
+  if(n<2){ say("only one timestep"); resolveFirst(); return null; }
+
   // Lock the colour range across the run: autoscaling every frame separately
   // makes the sequence flicker and stops frames being comparable.
   let lo=lastRange&&lastRange[0], hi=lastRange&&lastRange[1];
@@ -992,11 +1001,12 @@ async function animLoad(){
 
   anim.loading=true; anim.cancel=false; animUI();
   const urls=new Array(n), b=outset(boxOf(view));
+  anim.urls=urls;
   const nx=Math.round(M.nx*OUTSET), ny=Math.round(M.ny*OUTSET);
   const t0=performance.now();
   try{
     for(let i=0;i<n;i++){
-      if(anim.cancel){ urls.slice(0,i).forEach(URL.revokeObjectURL); return null; }
+      if(anim.cancel){ urls.slice(0,i).forEach(u=>u&&URL.revokeObjectURL(u)); resolveFirst(); return null; }
       const p=new URLSearchParams({var:cur.name, time:i, level:$("#level").value,
         extent:b.join(","), cmap:$("#cmap").value, nx, ny, vmin:lo, vmax:hi,
         compress:$("#quality").value});
@@ -1004,13 +1014,21 @@ async function animLoad(){
       if(!r.ok) throw new Error((await r.json()).error);
       urls[i]=URL.createObjectURL(await r.blob());
       await new Promise(res=>{ const im=new Image(); im.onload=im.onerror=res; im.src=urls[i]; });
-      $("#animstate").textContent=`loading ${i+1} / ${n}`;
+      // frame 0 is the earliest point playback can usefully start -- resolve
+      // as soon as it lands rather than waiting for the whole run
+      anim.ready=i+1;
+      if(i===0) resolveFirst();
+      if(!anim.playing) $("#animstate").textContent=`loading ${anim.ready} / ${n}`;
     }
-  }catch(e){ say("animation failed: "+e); urls.filter(Boolean).forEach(URL.revokeObjectURL);
-             anim.loading=false; animUI(); return null; }
+  }catch(e){
+    say("animation failed: "+e);
+    urls.filter(Boolean).forEach(u=>u&&URL.revokeObjectURL(u));
+    anim.loading=false; anim.ready=0; resolveFirst(); animUI(); return null;
+  }
   animCache.set(k, urls);
   anim.loading=false;
-  $("#animstate").textContent=`${n} frames in ${((performance.now()-t0)/1000).toFixed(1)}s`;
+  if(!anim.playing)
+    $("#animstate").textContent=`${n} frames in ${((performance.now()-t0)/1000).toFixed(1)}s`;
   animUI();
   return urls;
 }
@@ -1022,10 +1040,18 @@ function animPlay(urls){
   anim.urls=urls; anim.playing=true; animUI();
   const tick=()=>{
     if(!anim.playing) return;
-    let i=(+$("#time").value+1)%urls.length;
+    // urls is pre-sized to the full run and filled in as frames arrive, so
+    // its own .length is not how many are actually usable yet -- loop over
+    // what anim.ready says is loaded so far while a stream is still filling,
+    // and only then over the whole thing
+    const ready = anim.loading ? anim.ready : urls.length;
+    if(ready<1) return;
+    let i=(+$("#time").value+1)%ready;
     $("#time").value=i; $("#tlab").textContent=M.labels[i];
     $("#data").src=urls[i];
-    $("#animstate").textContent=`${i+1} / ${urls.length}`;
+    $("#animstate").textContent = anim.loading
+      ? `playing \u00b7 ${i+1}/${ready} rendered (of ${anim.total})`
+      : `${i+1} / ${urls.length}`;
   };
   clearInterval(anim.timer);
   anim.timer=setInterval(tick, 1000/(+$("#fps").value||8));
@@ -1110,9 +1136,15 @@ $("#expgif").onclick = ()=>{ animStop(); exportAs("gif","animation"); };
 $("#anim").onclick = async ()=>{
   if(anim.playing){ animStop(); return; }
   const k=animKey();
-  let urls=animCache.get(k);
-  if(!urls) urls=await animLoad();
-  if(urls) animPlay(urls);
+  const cached=animCache.get(k);
+  if(cached){ animPlay(cached); return; }
+  if(anim.loading){                    // a stream is already filling in
+    if(anim.ready>0) animPlay(anim.urls);
+    return;
+  }
+  animLoad();                          // don't await -- let it stream in the background
+  await anim.firstReady;               // resolves once frame 0 has rendered (or on failure)
+  if(anim.ready>0 && !anim.playing) animPlay(anim.urls);
 };
 $("#fps").oninput = ()=>{ if(anim.playing) animPlay(anim.urls); };
 
