@@ -384,7 +384,10 @@ made here — it is hardcoded in MPAS-Model's own
 at each kept cell (`0` for the untouched interior, up through `7` at the
 outer edge) is a file-format contract with those routines, not an
 implementation detail. `bdyMaskEdge`/`bdyMaskVertex` follow the more
-interior (lower) of their adjoining cells' values.
+interior (lower) of their adjoining cells' values — except where a
+neighbour is missing or fell outside the crop, where they take the more
+boundary-like (higher) of the sides they do have, since that side sits at
+the true outer rim with nothing beyond it.
 
 An independent implementation, not a port — see the module docstring in
 `gmpas/prep/region.py` for why: MPAS-Dev/MPAS-Limited-Area does the same
@@ -392,6 +395,34 @@ job but carries no LICENSE file, unlike MPAS-Tools (the source for `scale`
 and `relocate`), which is permissively licensed. Built instead from graph
 traversal over `cellsOnCell` and from MPAS-Model's own public
 Registry.xml/Fortran source for the `bdyMaskCell` semantics above.
+
+#### Circles, ellipses, and `.pts` files
+
+`--pts FILE` is an alternative to `--polygon`: a region-specification file
+in the format MPAS-Limited-Area's own `create_region` uses, so an existing
+`.pts` file written for that tool works here unchanged.
+
+```
+Name: Manus
+Type: circle
+Point: -2.0, 147.0
+radius: 3000000.0   # Meters
+```
+
+```bash
+gmpas prep create-region mesh.nc --pts manus.pts
+```
+
+`custom` (an explicit boundary polygon, one alternative to `--polygon`
+directly), `circle`, and `ellipse` are supported; `channel` (a band between
+two latitudes spanning every longitude) isn't yet — it needs multiple
+disjoint boundaries, which `create_region`'s single-polygon interface
+doesn't support (tracked in
+[gmpas-lib#56](https://github.com/nmathewa/gmpas-lib/issues/56), along with
+direct `--circle`/`--ellipse` CLI flags that skip needing a file at all).
+The file's `Point:` is used directly as the interior point (no centroid
+guessing), and its `Name:` becomes the default output stem in place of the
+mesh's own.
 
 Since there is no `mkgrid` run over a cropped subset, `create-region` also
 writes the accompanying `graph.info` `gpmetis` partition file itself, in
