@@ -242,6 +242,24 @@ def test_compression_level_changes_size_not_content(small_viewer):
 # ------------------------------------------------------------------- export
 
 
+def test_header_value_sanitizer_strips_crlf_and_quotes():
+    """Content-Disposition is built from a filename derived from `var` and
+    (when a file has no parseable timestamp) the file's own name -- and
+    Linux filenames can contain raw CR/LF that send_header does not filter.
+
+    Not reachable through /api/export/* itself: `var` must match a real
+    dataset variable name before that code path is reached, and no valid
+    netCDF variable name can carry a control character. This guards the
+    filename-derived route (`label_of()`'s `path.stem` fallback) instead.
+    """
+    from gmpas.viewer import _safe_header_value
+
+    assert _safe_header_value("evil\r\nX-Injected: yes\r\n") == "evilX-Injected: yes"
+    assert "\r" not in _safe_header_value("a\rb\nc\x00d")
+    assert "\n" not in _safe_header_value("a\rb\nc\x00d")
+    assert _safe_header_value("ordinary_name.nc") == "ordinary_name.nc"
+
+
 def test_figure_export_is_a_full_plot_not_the_bare_raster(small_viewer):
     """A screenshot of the viewer has no axes or colorbar; this does."""
     from PIL import Image
