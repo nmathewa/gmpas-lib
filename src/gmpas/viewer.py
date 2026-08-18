@@ -782,11 +782,7 @@ function aspect(){ return M.nx/M.ny; }
 // aspect so nothing is ever stretched
 function boxOf(v){
   const h=v.w/aspect();
-  // latitude has a hard physical bound the aspect-fit math above knows
-  // nothing about: fitting a 360x180 globe into a window wider than 2:1
-  // makes h > 180 to preserve aspect, which pushes clat+-h/2 past the poles
-  return [v.clon-v.w/2, v.clon+v.w/2,
-          Math.max(-90,v.clat-h/2), Math.min(90,v.clat+h/2)];
+  return [v.clon-v.w/2, v.clon+v.w/2, v.clat-h/2, v.clat+h/2];
 }
 function fit(box){
   const [a,b,c,d]=box, clon=(a+b)/2, clat=(c+d)/2;
@@ -886,9 +882,7 @@ const GUTTER_X=52, GUTTER_Y=18;
 const OUTSET=1.4;
 function outset(b, f=OUTSET){
   const cx=(b[0]+b[1])/2, cy=(b[2]+b[3])/2, w=(b[1]-b[0])*f/2, h=(b[3]-b[2])*f/2;
-  // b's own latitude bounds are already pole-clamped (boxOf), but expanding
-  // by the margin here can push past +-90 all over again -- clamp once more
-  return [cx-w, cx+w, Math.max(-90,cy-h), Math.min(90,cy+h)];
+  return [cx-w, cx+w, cy-h, cy+h];
 }
 function covers(outer, inner){
   return outer && outer[0]<=inner[0]+1e-9 && outer[1]>=inner[1]-1e-9
