@@ -5,10 +5,6 @@
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](docs/installation.md)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Fast plotting of MPAS output **on its own native mesh** — no regridding, so
-variable resolution is preserved exactly as the model carries it. Plus the
-other end of the pipeline: designing a mesh, building it with JIGSAW, and
-looking at either before or after it exists.
 
 ```python
 import gmpas
@@ -30,24 +26,18 @@ pip install gmpas            # core: geometry, caching, remap weights
 pip install "gmpas[plot]"    # + matplotlib and cartopy, for plotting
 ```
 
-Developing gmpas itself, or want conda-forge's easier cartopy/netCDF4 builds:
 
 ```bash
 conda env create -f environment.yml && conda activate gmpas && pip install -e . --no-deps
 ```
 
-Two workflows need external programs, which pip cannot provide. Conservative
-remapping needs ESMF (`conda install -c conda-forge esmf nco`); mesh generation
-needs [JIGSAW](https://github.com/dengwirda/jigsaw) and, for the final step,
-MPI and PnetCDF. Skip both if you only plot and view.
-
-Check it landed:
+mesh generation requires [JIGSAW](https://github.com/dengwirda/jigsaw) and, MPI and PnetCDF
 
 ```bash
 gmpas --version
 ```
 
-From a source install, `pytest -q` runs the test suite too.
+From a source install, `pytest -q` runs the test suite.
 
 Full detail, including the extras and what each one pulls in:
 [docs/installation.md](docs/installation.md).
@@ -64,13 +54,6 @@ gmpas prep hfun     hfun.py --check
 gmpas prep generate hfun.py -o mesh/     # needs $JIGSAWDIR and $MKGRIDFILE
 ```
 
-Any path may be a file, a directory, or a glob; a directory or glob is read as
-one time series across files, which is how MPAS writes output. Running `gmpas`
-with no arguments prints the whole list with examples.
-
-Everything except `prep` is **postprocessing** — it opens a run and renders,
-remaps or exports it. `prep` is the other end, for work that happens before
-there is any output.
 
 ## Documentation
 
