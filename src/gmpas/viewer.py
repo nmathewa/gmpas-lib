@@ -650,6 +650,15 @@ button:disabled{opacity:.5;cursor:default;border-color:var(--line)}
 button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
 #animstate{font-variant-numeric:tabular-nums}
 #fps{width:80px}
+.animrow{display:flex;align-items:center;gap:6px;padding:4px 0;
+         border-bottom:1px solid var(--line)}
+.animrow:last-child{border-bottom:none}
+.animrow.on{color:var(--accent)}
+.animrow-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.animrow-status{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums}
+.animrow-play,.animrow-clear{background:none;border:none;padding:2px 4px;
+                              color:var(--fg);cursor:pointer;font-size:12px}
+.animrow-play:hover,.animrow-clear:hover{color:var(--accent)}
 </style></head><body>
 <div id="side">
   <h1><span id="title">loading…</span><small id="sub"></small></h1>
@@ -715,7 +724,8 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <div class="kv" style="margin-top:8px"><span>quality</span><b id="qlab">fast</b></div>
     <input type="range" id="quality" min="1" max="9" value="1"
            title="PNG compression: lower is faster to build, higher is smaller to transfer">
-    <div class="row" style="margin-top:8px"><button id="clearanim">clear cached frames</button></div>
+    <div id="animlist" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:8px"><button id="clearanim">clear all</button></div>
     <div class="hint" id="animhint"></div>
   </div>
 
@@ -777,7 +787,7 @@ async function boot(){
   layout();
   subtitle(); fillVars();
   if(M.scanning) setTimeout(pollScan, 400);
-  animUI(); panel();
+  renderAnimList();
   pick(M.variables.find(v=>!v.static)?.name ?? M.variables[0].name);
 }
 function subtitle(){
@@ -798,7 +808,7 @@ function fillVars(){
 $("#showstatic").addEventListener("change", fillVars);
 
 function pick(name){
-  animStop();
+  stopPlayback();
   cur = M.variables.find(v=>v.name===name);
   [...$("#vars").children].forEach(d=>d.classList.toggle("on",d.textContent===name));
   $("#time").max=M.steps-1; $("#tlab").textContent=M.labels[$("#time").value|0];
@@ -947,7 +957,7 @@ async function draw(){
   rendered=b;
   preview();          // the frame is larger than the window: crop to the view
   lastRange=[lo,hi];
-  colorbar(lo,hi); scalebar(); graticule(); animUI(); panel();
+  colorbar(lo,hi); scalebar(); graticule(); renderAnimList();
   say(`${cur.label} \u00b7 ${Math.round(performance.now()-t0)} ms`);
   }catch(e){
     say("render failed: "+e);
@@ -956,105 +966,202 @@ async function draw(){
     if(pend){ pend=false; draw(); }      // always drains, however we left
   }
 }
-// Every frame of a run, held for the session. Keyed by the whole render
-// configuration, so panning or changing variable starts a new set while an
-// earlier one stays instantly replayable.
-const animCache=new Map();
-const anim={loading:false, playing:false, timer:null, cancel:false, urls:null,
-            ready:0, total:0, firstReady:null};
+// Named, independently-loading animations, one entry per (variable, level,
+// extent, cmap, colour range) combination -- keyed the same way the old
+// single animCache was. Loading and playing are deliberately decoupled:
+// - LOADING is a background fetch loop scoped entirely to its own entry and
+//   the params frozen when it started. It never reads `cur`, the level
+//   slider, or any other live control again, so switching variables (or
+//   panning, or anything else) mid-load can no longer mix frames from two
+//   different configurations into one stream, which is what a shared
+//   `cur.name` read on every loop iteration used to do.
+// - PLAYING is which single entry currently drives #data/#time/#tlab. Any
+//   number of entries can be loading at once regardless of which, if any,
+//   is playing -- switching what you're looking at never stops another
+//   variable's animation from finishing in the background.
+const anims=new Map();
+let playingKey=null, animTimer=null;
 let lastRange=null;
 
-function animKey(){
-  const b=boxOf(view).map(v=>+v.toFixed(4));
-  return JSON.stringify([cur&&cur.name, $("#level").value, b,
-                         $("#cmap").value, $("#vmin").value, $("#vmax").value]);
+function animParams(){
+  return {varName:cur.name, level:$("#level").value, box:boxOf(view),
+          cmap:$("#cmap").value, vmin:$("#vmin").value, vmax:$("#vmax").value};
 }
-function animUI(){
-  if($("#animhint")) { const f=[...animCache.values()].reduce((n,u)=>n+u.length,0);
-    $("#animhint").textContent=f?`${f} frames held in ${animCache.size} set${animCache.size>1?"s":""}`:""; }
-  const k=animKey(), have=animCache.has(k);
+function animKeyOf(p){
+  return JSON.stringify([p.varName, p.level, p.box.map(v=>+v.toFixed(4)),
+                         p.cmap, p.vmin, p.vmax]);
+}
+
+function animRow(key, entry){
+  const div=document.createElement("div");
+  div.className="animrow"+(playingKey===key?" on":"");
+  const status=entry.loading ? `${entry.ready}/${entry.total}` : "ready";
+  div.innerHTML=
+    `<span class="animrow-name" title="${entry.varName}">${entry.varName}</span>`+
+    `<span class="animrow-status">${status}</span>`+
+    `<button class="animrow-play" title="play">${playingKey===key?"\u23f8":"\u25b6"}</button>`+
+    `<button class="animrow-clear" title="clear">\u00d7</button>`;
+  div.querySelector(".animrow-play").onclick=()=>togglePlay(key);
+  div.querySelector(".animrow-clear").onclick=()=>clearAnim(key);
+  return div;
+}
+function renderAnimList(){
+  const list=$("#animlist");
+  if(list){
+    list.innerHTML="";
+    for(const [key,entry] of anims) list.appendChild(animRow(key,entry));
+  }
+  const frames=[...anims.values()].reduce((n,e)=>n+e.ready,0);
+  $("#animhint").textContent = anims.size
+    ? `${frames} frame${frames===1?"":"s"} across ${anims.size} animation${anims.size>1?"s":""}`
+    : "";
+
+  // the top-bar button always reflects the entry for whatever is currently
+  // selected, independent of the per-row buttons in the list below
   const btn=$("#anim");
-  // disabled only in the brief gap before frame 0 has rendered -- once
-  // anything is ready, play can start (and keep extending as more streams
-  // in), and pausing/resuming a still-loading run must stay clickable
-  btn.disabled = anim.loading && !anim.playing && anim.ready===0;
-  btn.textContent = anim.playing ? "\u23f8 pause"
-                  : anim.loading ? "loading\u2026"
-                  : "\u25b6 play";
-  btn.classList.toggle("on", anim.playing);
-  if(!anim.loading && !anim.playing)
-    $("#animstate").textContent = have ? `${animCache.get(k).length} frames ready` : "";
+  if(cur){
+    const curKey=animKeyOf(animParams());
+    const entry=anims.get(curKey);
+    const playing=entry && playingKey===curKey;
+    btn.disabled = !!entry && entry.loading && !playing && entry.ready===0;
+    btn.textContent = playing ? "⏸ pause"
+                     : (entry && entry.loading) ? "loading…"
+                     : "▶ play";
+    btn.classList.toggle("on", !!playing);
+  }
+  panel();
 }
 
-async function animLoad(){
-  const k=animKey(), n=M.steps;
+async function ensureLoaded(key, params){
+  if(anims.has(key)) return anims.get(key);
+
   let resolveFirst;
-  anim.firstReady=new Promise(res=>{resolveFirst=res});
-  anim.ready=0; anim.total=n;
+  const entry={varName:params.varName, level:params.level, box:params.box,
+              cmap:params.cmap, loading:true, ready:0, total:M.steps,
+              urls:new Array(M.steps)};
+  entry.firstReady=new Promise(res=>{resolveFirst=res});
+  entry.resolveFirst=resolveFirst;
+  anims.set(key, entry);
+  renderAnimList();
 
-  if(n<2){ say("only one timestep"); resolveFirst(); return null; }
+  if(M.steps<2){
+    say("only one timestep");
+    anims.delete(key); resolveFirst(); renderAnimList();
+    return entry;
+  }
 
-  // Lock the colour range across the run: autoscaling every frame separately
-  // makes the sequence flicker and stops frames being comparable.
-  let lo=lastRange&&lastRange[0], hi=lastRange&&lastRange[1];
-  if(lo===undefined||lo===null){ await draw(); [lo,hi]=lastRange||[0,1]; }
+  // Lock the colour range across the run, resolved once now rather than
+  // re-read per frame: autoscaling every frame separately makes the
+  // sequence flicker and stops frames being comparable.
+  let vmin=params.vmin, vmax=params.vmax;
+  if(!vmin && !vmax){
+    if(!lastRange) await draw();
+    [vmin,vmax]=lastRange||[0,1];
+  }
+  entry.vmin=vmin; entry.vmax=vmax;
+  animLoad(key, {...params, vmin, vmax, total:entry.total});
+  return entry;
+}
 
-  anim.loading=true; anim.cancel=false; animUI();
-  const urls=new Array(n), b=outset(boxOf(view));
-  anim.urls=urls;
+async function animLoad(key, params){
+  const entry=anims.get(key);
+  const urls=entry.urls, n=params.total;
+  const fetchBox=outset(params.box);
   const nx=Math.round(M.nx*OUTSET), ny=Math.round(M.ny*OUTSET);
-  const t0=performance.now();
   try{
     for(let i=0;i<n;i++){
-      if(anim.cancel){ urls.slice(0,i).forEach(u=>u&&URL.revokeObjectURL(u)); resolveFirst(); return null; }
-      const p=new URLSearchParams({var:cur.name, time:i, level:$("#level").value,
-        extent:b.join(","), cmap:$("#cmap").value, nx, ny, vmin:lo, vmax:hi,
-        compress:$("#quality").value});
+      if(!anims.has(key)) return;      // cleared out from under this loop
+      const p=new URLSearchParams({var:params.varName, time:i, level:params.level,
+        extent:fetchBox.join(","), cmap:params.cmap, nx, ny,
+        vmin:params.vmin, vmax:params.vmax, compress:$("#quality").value});
       const r=await fetch("api/frame?"+p);
       if(!r.ok) throw new Error((await r.json()).error);
       urls[i]=URL.createObjectURL(await r.blob());
       await new Promise(res=>{ const im=new Image(); im.onload=im.onerror=res; im.src=urls[i]; });
+      if(!anims.has(key)){ urls.forEach(u=>u&&URL.revokeObjectURL(u)); return; }
       // frame 0 is the earliest point playback can usefully start -- resolve
       // as soon as it lands rather than waiting for the whole run
-      anim.ready=i+1;
-      if(i===0) resolveFirst();
-      if(!anim.playing) $("#animstate").textContent=`loading ${anim.ready} / ${n}`;
+      entry.ready=i+1;
+      if(i===0) entry.resolveFirst();
+      renderAnimList();
     }
   }catch(e){
-    say("animation failed: "+e);
+    say(`animation for ${params.varName} failed: ${e}`);
     urls.filter(Boolean).forEach(u=>u&&URL.revokeObjectURL(u));
-    anim.loading=false; anim.ready=0; resolveFirst(); animUI(); return null;
+    anims.delete(key);
+    entry.resolveFirst();
+    if(playingKey===key) stopPlayback();
+    renderAnimList();
+    return;
   }
-  animCache.set(k, urls);
-  anim.loading=false;
-  if(!anim.playing)
-    $("#animstate").textContent=`${n} frames in ${((performance.now()-t0)/1000).toFixed(1)}s`;
-  animUI();
-  return urls;
+  entry.loading=false;
+  renderAnimList();
 }
 
-function animStop(){
-  anim.playing=false; clearInterval(anim.timer); anim.timer=null; animUI();
+function stopPlayback(){
+  playingKey=null; clearInterval(animTimer); animTimer=null; renderAnimList();
 }
-function animPlay(urls){
-  anim.urls=urls; anim.playing=true; animUI();
+function startPlaybackOf(key){
+  const entry=anims.get(key);
+  if(!entry) return;
+  playingKey=key;
+  clearInterval(animTimer);
   const tick=()=>{
-    if(!anim.playing) return;
+    if(playingKey!==key) return;
     // urls is pre-sized to the full run and filled in as frames arrive, so
     // its own .length is not how many are actually usable yet -- loop over
-    // what anim.ready says is loaded so far while a stream is still filling,
-    // and only then over the whole thing
-    const ready = anim.loading ? anim.ready : urls.length;
+    // what entry.ready says is loaded so far while still filling, and only
+    // then over the whole thing
+    const ready=entry.loading ? entry.ready : entry.total;
     if(ready<1) return;
     let i=(+$("#time").value+1)%ready;
     $("#time").value=i; $("#tlab").textContent=M.labels[i];
-    $("#data").src=urls[i];
-    $("#animstate").textContent = anim.loading
-      ? `playing \u00b7 ${i+1}/${ready} rendered (of ${anim.total})`
-      : `${i+1} / ${urls.length}`;
+    $("#data").src=entry.urls[i];
+    $("#animstate").textContent = entry.loading
+      ? `playing \u00b7 ${i+1}/${ready} rendered (of ${entry.total})`
+      : `${i+1} / ${entry.total}`;
   };
-  clearInterval(anim.timer);
-  anim.timer=setInterval(tick, 1000/(+$("#fps").value||8));
+  animTimer=setInterval(tick, 1000/(+$("#fps").value||8));
+  renderAnimList();
+}
+
+// Reflects an entry's frozen settings into the live controls, so what gets
+// shown once playback starts matches what the sidebar/colour panel display
+// -- used when picking an animation from the list rather than the one for
+// whatever is currently selected.
+function switchViewToMatch(entry){
+  if(cur?.name!==entry.varName){
+    const v=M.variables.find(x=>x.name===entry.varName);
+    if(v){ cur=v;
+      [...$("#vars").children].forEach(d=>d.classList.toggle("on", d.textContent===entry.varName));
+    }
+  }
+  $("#level").value=entry.level; $("#llab").textContent=entry.level;
+  $("#cmap").value=entry.cmap;
+  view=fit(entry.box); clamp();
+  overlay();
+}
+
+async function playKey(key, params){
+  if(playingKey===key){ stopPlayback(); return; }
+  const entry=await ensureLoaded(key, params);
+  await entry.firstReady;
+  if(entry.ready>0 && playingKey!==key) startPlaybackOf(key);
+}
+function togglePlay(key){
+  if(playingKey===key){ stopPlayback(); return; }
+  const entry=anims.get(key);
+  if(!entry) return;
+  switchViewToMatch(entry);
+  startPlaybackOf(key);
+}
+function clearAnim(key){
+  const entry=anims.get(key);
+  if(!entry) return;
+  if(playingKey===key) stopPlayback();
+  entry.urls.forEach(u=>u&&URL.revokeObjectURL(u));
+  anims.delete(key);
+  renderAnimList();
 }
 
 function panel(){
@@ -1066,9 +1173,6 @@ function panel(){
   $("#rangehint").textContent = lastRange
     ? ($("#vmin").value||$("#vmax").value ? "manual" : `auto ${lastRange[0].toPrecision(4)} .. ${lastRange[1].toPrecision(4)}`)
     : "";
-  const frames=[...animCache.values()].reduce((n,u)=>n+u.length,0);
-  $("#animhint").textContent = frames
-    ? `${frames} frames held in ${animCache.size} set${animCache.size>1?"s":""}` : "";
   $("#fpslab").textContent=$("#fps").value;
   const q=+$("#quality").value;
   $("#qlab").textContent = q<=2?"fast" : q<=5?"balanced" : "small";
@@ -1080,7 +1184,7 @@ $("#applyext").onclick = ()=>{
   const b=boxOf(view);
   const box=[g("#elon0",b[0]), g("#elon1",b[1]), g("#elat0",b[2]), g("#elat1",b[3])];
   if(box[1]<=box[0]||box[3]<=box[2]){ say("extent must be min then max"); return; }
-  animStop(); view=fit(box); clamp(); overlay(); draw(); panel();
+  stopPlayback(); view=fit(box); clamp(); overlay(); draw(); panel();
 };
 $("#copyext").onclick = ()=>{
   const b=boxOf(view).map(v=>v.toFixed(4));
@@ -1091,12 +1195,14 @@ $("#lockrange").onclick = ()=>{
   if(!lastRange) return;
   $("#vmin").value=lastRange[0].toPrecision(6);
   $("#vmax").value=lastRange[1].toPrecision(6);
-  animStop(); draw(); panel();
+  stopPlayback(); draw(); panel();
 };
 $("#clearanim").onclick = ()=>{
-  animStop();
-  for(const urls of animCache.values()) urls.forEach(URL.revokeObjectURL);
-  animCache.clear(); animUI(); panel(); say("cached frames released");
+  stopPlayback();
+  for(const entry of anims.values()) entry.urls.forEach(u=>u&&URL.revokeObjectURL(u));
+  anims.clear();
+  renderAnimList();
+  say("all animations cleared");
 };
 
 async function exportAs(kind, label){
@@ -1131,34 +1237,25 @@ async function exportAs(kind, label){
 }
 $("#expfig").onclick = ()=>exportAs("figure","figure");
 $("#expnc").onclick  = ()=>exportAs("netcdf","netCDF");
-$("#expgif").onclick = ()=>{ animStop(); exportAs("gif","animation"); };
+$("#expgif").onclick = ()=>{ stopPlayback(); exportAs("gif","animation"); };
 
 $("#anim").onclick = async ()=>{
-  if(anim.playing){ animStop(); return; }
-  const k=animKey();
-  const cached=animCache.get(k);
-  if(cached){ animPlay(cached); return; }
-  if(anim.loading){                    // a stream is already filling in
-    if(anim.ready>0) animPlay(anim.urls);
-    return;
-  }
-  animLoad();                          // don't await -- let it stream in the background
-  await anim.firstReady;               // resolves once frame 0 has rendered (or on failure)
-  if(anim.ready>0 && !anim.playing) animPlay(anim.urls);
+  const params=animParams();
+  await playKey(animKeyOf(params), params);
 };
-$("#fps").oninput = ()=>{ if(anim.playing) animPlay(anim.urls); };
+$("#fps").oninput = ()=>{ if(playingKey) startPlaybackOf(playingKey); };
 
 let redrawTimer=null;
-function schedule(ms){ animStop(); preview(); scalebar(); graticule(); clearTimeout(redrawTimer);
+function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); clearTimeout(redrawTimer);
   redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
-  if(anim.playing) return;                       // scrubbing during playback
-  const urls=animCache.get(animKey());
-  if(urls){ $("#data").src=urls[e.target.value]; return; }   // instant if loaded
+  if(playingKey) return;                         // scrubbing during playback
+  const entry=anims.get(animKeyOf(animParams()));
+  if(entry && entry.urls[e.target.value]){ $("#data").src=entry.urls[e.target.value]; return; }
   draw(); };
-$("#level").oninput = e=>{ $("#llab").textContent=e.target.value; animStop(); draw(); };
-$("#cmap").onchange = ()=>{ animStop(); draw(); };
+$("#level").oninput = e=>{ $("#llab").textContent=e.target.value; stopPlayback(); draw(); };
+$("#cmap").onchange = ()=>{ stopPlayback(); draw(); };
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
 $("#home").onclick = ()=>{ view={...home}; clamp(); schedule(0); };
