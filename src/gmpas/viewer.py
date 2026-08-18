@@ -782,15 +782,18 @@ function aspect(){ return M.nx/M.ny; }
 // aspect so nothing is ever stretched
 function boxOf(v){
   const h=v.w/aspect();
-  // latitude has a hard physical bound the aspect-fit math above knows
-  // nothing about: fitting a 360x180 globe into a window wider than 2:1
-  // makes h > 180 to preserve aspect, which pushes clat+-h/2 past the poles
-  return [v.clon-v.w/2, v.clon+v.w/2,
-          Math.max(-90,v.clat-h/2), Math.min(90,v.clat+h/2)];
+  return [v.clon-v.w/2, v.clon+v.w/2, v.clat-h/2, v.clat+h/2];
 }
 function fit(box){
   const [a,b,c,d]=box, clon=(a+b)/2, clat=(c+d)/2;
-  return {clon, clat, w: Math.max(b-a, (d-c)*aspect())};
+  // "contain" the box unstretched: w covers whichever dimension is binding.
+  // For a near-global box in a window whose aspect isn't exactly 2:1, that
+  // pads latitude past the binding dimension -- fine in general, but there's
+  // nothing beyond +-90 to pad into. Cap w (and so h=w/aspect, together, at
+  // the same scale) at the point where h would just reach 180, rather than
+  // clamping h alone after the fact and desyncing it from w's aspect.
+  const w = Math.min(Math.max(b-a, (d-c)*aspect()), 180*aspect());
+  return {clon, clat, w};
 }
 function clamp(){
   view.w = Math.min(view.w, home.w);                 // never wider than the mesh
@@ -886,9 +889,7 @@ const GUTTER_X=52, GUTTER_Y=18;
 const OUTSET=1.4;
 function outset(b, f=OUTSET){
   const cx=(b[0]+b[1])/2, cy=(b[2]+b[3])/2, w=(b[1]-b[0])*f/2, h=(b[3]-b[2])*f/2;
-  // b's own latitude bounds are already pole-clamped (boxOf), but expanding
-  // by the margin here can push past +-90 all over again -- clamp once more
-  return [cx-w, cx+w, Math.max(-90,cy-h), Math.min(90,cy+h)];
+  return [cx-w, cx+w, cy-h, cy+h];
 }
 function covers(outer, inner){
   return outer && outer[0]<=inner[0]+1e-9 && outer[1]>=inner[1]-1e-9
