@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gmpas"
-version = "0.4.4"
+version = "0.4.5"
 description = "Fast plotting of MPAS output on its own native variable-resolution mesh"
 readme = "README.md"
 requires-python = ">=3.10"

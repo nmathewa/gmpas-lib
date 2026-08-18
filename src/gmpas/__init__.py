@@ -30,7 +30,7 @@ from .style import CMAPS, EXTENTS, Style, resolve_extent, save_figure
 
 # kept in step with pyproject.toml by test_version.py -- `gmpas --version` and
 # the built wheel disagreeing is the kind of thing only noticed after a release
-__version__ = "0.4.4"
+__version__ = "0.4.5"
 
 __all__ = [
     # entry points
