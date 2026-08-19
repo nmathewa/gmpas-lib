@@ -24,7 +24,7 @@ DATA_ENV = "GMPAS_DATA_DIR"
 
 
 def cache_dir() -> Path:
-    """Directory holding cached `.npz` mesh geometry.
+    """Directory holding cached mesh geometry (one `.npy` array per file).
 
     Safe to delete at any time — it rebuilds on next use.
     """
