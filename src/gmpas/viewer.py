@@ -627,10 +627,10 @@ PORT_ATTEMPTS = 20
 def ssh_target() -> str:
     """The name to SSH *to*, preferring one that resolves off this machine.
 
-    `gethostname()` alone gives the bare label -- `derecho1` -- which is not
+    `gethostname()` alone gives the bare label -- `node7` -- which is not
     something a laptop can look up. The fully qualified name usually is:
-    `derecho1.hpc.ucar.edu` can be typed straight into `ssh`, which is the
-    entire point of printing the command at all.
+    `node7.cluster.example.org` can be typed straight into `ssh`, which is
+    the entire point of printing the command at all.
 
     Only taken when it genuinely extends the short name, since `getfqdn()`
     falls back to whatever /etc/hosts says and can answer `localhost` or some
@@ -642,6 +642,34 @@ def ssh_target() -> str:
     return fqdn if fqdn.startswith(f"{node}.") else node
 
 
+#: environment a batch scheduler sets on a compute node. Both pairs are read
+#: from the environment at run time -- no site, cluster or hostname is ever
+#: baked in here, so this works on any PBS or Slurm system and knows nothing
+#: about any particular one.
+JOB_ID_VARS = ("PBS_JOBID", "SLURM_JOB_ID")
+SUBMIT_HOST_VARS = ("PBS_O_HOST", "SLURM_SUBMIT_HOST")
+
+
+def in_batch_job() -> bool:
+    """Whether this is running inside a scheduler allocation."""
+    return any(os.environ.get(v) for v in JOB_ID_VARS)
+
+
+def submit_host() -> str:
+    """The host the job was submitted from -- the login node, if known.
+
+    PBS sets `PBS_O_HOST` and Slurm `SLURM_SUBMIT_HOST` to wherever the job
+    was queued, which on a cluster is exactly the node a tunnel has to hop
+    through. Reading it beats asking the user to remember it, and beats
+    hardcoding anything: the value comes from their own session.
+    """
+    for var in SUBMIT_HOST_VARS:
+        value = os.environ.get(var)
+        if value:
+            return value
+    return "<login-node>"
+
+
 def reach_lines(host: str, port: int) -> list[str]:
     """How to actually open this server, as lines ready to print.
 
@@ -650,12 +678,13 @@ def reach_lines(host: str, port: int) -> list[str]:
     step people miss -- an editor like VS Code forwards the port silently, so
     the first plain-terminal run looks like the server never started.
 
-    Everything knowable is filled in. That includes the case this banner
-    used to get wrong: a *login* node running the viewer is directly
-    reachable, so telling its user to tunnel via "<login-node>" asks them to
-    hop through the machine they are already on. The direct command comes
-    first now, with the via-a-login-node form kept for a compute node that
-    really cannot be reached from outside.
+    Which command is right depends on where this is running, and that is
+    knowable rather than guessable. Inside a batch job the viewer is on a
+    compute node, unreachable from outside, and the hop has to go through the
+    submitting host -- which the scheduler names in the environment. Anywhere
+    else, including on a login node, the machine is reachable directly, and
+    telling the reader to go via "<login-node>" would send them hopping
+    through the box they are already on.
     """
     target = ssh_target()
     node = socket.gethostname()
@@ -671,14 +700,21 @@ def reach_lines(host: str, port: int) -> list[str]:
             f"  (an HPC compute node is different: a tunnel lands on the login"
             f" node and will not reach here, so restart with --host 0.0.0.0)",
         ]
+
+    if in_batch_job():
+        # a compute node: reachable only through whoever queued the job
+        return [
+            f"listening on {host}:{port} — reachable as {node}:{port}",
+            f"  from your own machine, run this THERE:",
+            f"      ssh -N -L {port}:{node}:{port} {user}@{submit_host()}",
+            f"    then open       http://localhost:{port}",
+        ]
+
     return [
         f"listening on {host}:{port} — reachable as {target}:{port}",
         f"  from your own machine, run this THERE:",
         f"      ssh -N -L {port}:localhost:{port} {user}@{target}",
         f"    then open       http://localhost:{port}",
-        f"  (if {node} is a compute node you cannot SSH to directly, go via"
-        f" the login node instead:)",
-        f"      ssh -N -L {port}:{node}:{port} {user}@<login-node>",
     ]
 
 
