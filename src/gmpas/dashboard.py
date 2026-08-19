@@ -154,9 +154,9 @@ def serve(sources: list[Source], port: int = 8765, host: str = "127.0.0.1",
           open_browser: bool = True, strict_port: bool = False,
           banner: str = ""):
     """Start one server carrying every source, and block until interrupted."""
-    import socket
+    import sys
 
-    from .viewer import bind, open_in_browser
+    from .viewer import bind, open_in_browser, reach_lines
 
     server = bind(router(sources), port, host=host, strict=strict_port)
     port = server.server_address[1]
@@ -167,17 +167,13 @@ def serve(sources: list[Source], port: int = 8765, host: str = "127.0.0.1",
     for s in sources:
         print(f"  /{s.slug:<5} {s.label} — {s.detail}")
 
-    node = socket.gethostname()
-    if host in ("127.0.0.1", "localhost"):
-        print(f"listening on 127.0.0.1:{port} — this machine only")
-        print(f"  open  http://127.0.0.1:{port}")
-        print(f"  if {node} is a remote node, this is NOT reachable through a "
-              f"tunnel to a login node; restart with --host 0.0.0.0")
-    else:
-        print(f"listening on {host}:{port} — reachable as {node}:{port}")
-        print(f"  from your machine:  ssh -N -L {port}:{node}:{port} <login-node>")
-        print(f"  then open           http://localhost:{port}")
+    for line in reach_lines(host, port):
+        print(line)
     print("ctrl-c to stop")
+    # stdout is block-buffered whenever it is not a terminal, so the usual
+    # `gmpas view ... > viewer.log &` on a compute node left the log empty --
+    # no URL, no tunnel command, nothing to act on until the process ended
+    sys.stdout.flush()
 
     if open_browser:
         open_in_browser(f"http://127.0.0.1:{port}")

@@ -504,3 +504,36 @@ def test_a_working_browser_is_opened_and_stays_quiet(monkeypatch, capsys):
     timer.join()
     assert opened == ["http://127.0.0.1:8765"]
     assert capsys.readouterr().err == ""        # success says nothing
+
+
+# ------------------------------------------------- how to reach the server
+
+
+def test_the_tunnel_command_is_filled_in_not_a_placeholder(monkeypatch):
+    """A command still holding <host> is one the reader has to decode."""
+    import getpass
+    import socket
+
+    from gmpas.viewer import reach_lines
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "dec1042")
+    monkeypatch.setattr(getpass, "getuser", lambda: "someone")
+
+    text = "\n".join(reach_lines("127.0.0.1", 8765))
+    assert "ssh -N -L 8765:localhost:8765 someone@dec1042" in text
+    assert "http://localhost:8765" in text
+    assert "<host>" not in text and "<user>" not in text
+
+
+def test_binding_all_interfaces_forwards_via_the_node_name(monkeypatch):
+    import getpass
+    import socket
+
+    from gmpas.viewer import reach_lines
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "dec1042")
+    monkeypatch.setattr(getpass, "getuser", lambda: "someone")
+
+    text = "\n".join(reach_lines("0.0.0.0", 8765))
+    # the compute node is named, but the login node genuinely cannot be known
+    assert "ssh -N -L 8765:dec1042:8765 someone@<login-node>" in text
