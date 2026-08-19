@@ -155,10 +155,8 @@ def serve(sources: list[Source], port: int = 8765, host: str = "127.0.0.1",
           banner: str = ""):
     """Start one server carrying every source, and block until interrupted."""
     import socket
-    import threading
-    import webbrowser
 
-    from .viewer import bind
+    from .viewer import bind, open_in_browser
 
     server = bind(router(sources), port, host=host, strict=strict_port)
     port = server.server_address[1]
@@ -182,8 +180,7 @@ def serve(sources: list[Source], port: int = 8765, host: str = "127.0.0.1",
     print("ctrl-c to stop")
 
     if open_browser:
-        threading.Timer(0.5, webbrowser.open,
-                        args=(f"http://127.0.0.1:{port}",)).start()
+        open_in_browser(f"http://127.0.0.1:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
