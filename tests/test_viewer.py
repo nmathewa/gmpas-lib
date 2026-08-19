@@ -526,7 +526,12 @@ def test_the_tunnel_command_is_filled_in_not_a_placeholder(monkeypatch):
     assert "<host>" not in text and "<user>" not in text
 
 
-def test_binding_all_interfaces_forwards_via_the_node_name(monkeypatch):
+def test_binding_all_interfaces_outside_a_job_is_reached_directly(monkeypatch):
+    """Not in a batch job -- a login node, say -- means no hop is needed.
+
+    The old banner sent this reader through "<login-node>", which on a login
+    node is the machine they are already on.
+    """
     import getpass
     import socket
 
@@ -534,14 +539,14 @@ def test_binding_all_interfaces_forwards_via_the_node_name(monkeypatch):
 
     monkeypatch.setattr(socket, "gethostname", lambda: "dec1042")
     monkeypatch.setattr(getpass, "getuser", lambda: "someone")
-
     monkeypatch.setattr(socket, "getfqdn", lambda *a: "dec1042.hpc.example.edu")
+    for var in ("PBS_JOBID", "SLURM_JOB_ID"):
+        monkeypatch.delenv(var, raising=False)
+
     text = "\n".join(reach_lines("0.0.0.0", 8765))
-    # the directly-reachable form comes first, fully qualified so it can be
-    # typed straight into ssh -- a login node running the viewer is reachable
+    # fully qualified, so it can be typed straight into ssh
     assert "ssh -N -L 8765:localhost:8765 someone@dec1042.hpc.example.edu" in text
-    # with the via-a-login-node form kept for a compute node that is not
-    assert "ssh -N -L 8765:dec1042:8765 someone@<login-node>" in text
+    assert "<login-node>" not in text          # nothing left to substitute
 
 
 def test_a_bogus_fqdn_falls_back_to_the_short_name(monkeypatch):
@@ -561,3 +566,59 @@ def test_a_bogus_fqdn_falls_back_to_the_short_name(monkeypatch):
 
     monkeypatch.setattr(socket, "getfqdn", lambda *a: "dec1042.hpc.example.edu")
     assert ssh_target() == "dec1042.hpc.example.edu"
+
+
+def test_a_batch_job_tunnels_via_the_submitting_host(monkeypatch):
+    """A compute node is not reachable from outside; the submit host is.
+
+    PBS and Slurm both name that host in the environment, so the command can
+    be complete without hardcoding any site's address into gmpas.
+    """
+    import getpass
+    import socket
+
+    from gmpas.viewer import reach_lines
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "dec0965")
+    monkeypatch.setattr(getpass, "getuser", lambda: "someone")
+    monkeypatch.setenv("PBS_JOBID", "1234567.desched1")
+    monkeypatch.setenv("PBS_O_HOST", "login.cluster.example.org")
+
+    text = "\n".join(reach_lines("0.0.0.0", 8787))
+    assert ("ssh -N -L 8787:dec0965:8787 someone@login.cluster.example.org"
+            in text)
+    assert "<login-node>" not in text          # nothing left to substitute
+
+
+def test_slurm_is_understood_as_well_as_pbs(monkeypatch):
+    import getpass
+    import socket
+
+    from gmpas.viewer import reach_lines
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "nid001")
+    monkeypatch.setattr(getpass, "getuser", lambda: "someone")
+    monkeypatch.delenv("PBS_JOBID", raising=False)
+    monkeypatch.delenv("PBS_O_HOST", raising=False)
+    monkeypatch.setenv("SLURM_JOB_ID", "99")
+    monkeypatch.setenv("SLURM_SUBMIT_HOST", "head.cluster.example.org")
+
+    text = "\n".join(reach_lines("0.0.0.0", 8787))
+    assert "ssh -N -L 8787:nid001:8787 someone@head.cluster.example.org" in text
+
+
+def test_a_job_without_a_submit_host_still_says_something_useful(monkeypatch):
+    """Some sites unset it; fall back to a placeholder rather than a wrong name."""
+    import getpass
+    import socket
+
+    from gmpas.viewer import reach_lines
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "dec0965")
+    monkeypatch.setattr(getpass, "getuser", lambda: "someone")
+    monkeypatch.setenv("PBS_JOBID", "1234567")
+    monkeypatch.delenv("PBS_O_HOST", raising=False)
+    monkeypatch.delenv("SLURM_SUBMIT_HOST", raising=False)
+
+    text = "\n".join(reach_lines("0.0.0.0", 8787))
+    assert "ssh -N -L 8787:dec0965:8787 someone@<login-node>" in text
