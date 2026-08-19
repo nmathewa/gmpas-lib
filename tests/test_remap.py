@@ -730,3 +730,74 @@ def test_a_failing_file_does_not_stop_the_run(tmp_path, weights):
     assert len(results) == 1
     assert "error" in results[0]
     assert results[0]["source"] == "absent.nc"
+
+
+# ------------------------------------------------- dimensions that do not fit
+
+
+def test_weights_for_a_different_target_grid_are_named_as_the_cause(tmp_path, weights):
+    """The failure used to be numpy's, and named neither weights nor domain.
+
+    Weights are cached as map_<method>.nc keyed on neither grid, so reusing an
+    output directory after editing target_domain reuses the old ones. That
+    surfaced as `cannot reshape array of size 2 into shape (3,3)`, once per
+    file, with nothing to act on.
+    """
+    from gmpas.remap import remap_file
+
+    src = tmp_path / "diag.nc"
+    xr.Dataset({"x": (("nCells",), np.ones(2, dtype="f4"))}).to_netcdf(src)
+
+    # these weights carry 2 destination points; the domain now wants 9
+    domain = TargetDomain(nlat=3, nlon=3, startlat=-1.0, endlat=1.0,
+                          startlon=0.0, endlon=2.0)
+
+    with pytest.raises(ValueError) as excinfo:
+        remap_file(src, weights, domain, ["x"], tmp_path / "out.nc")
+
+    message = str(excinfo.value)
+    assert "map.nc" in message                 # which weights
+    assert "3 x 3" in message                  # and which domain
+    assert "force-weights" in message          # and what to do about it
+
+
+def test_a_field_with_an_unhandled_axis_is_skipped_not_fatal(tmp_path, weights):
+    """MPAS really ships these: the ozone climatology is
+    (nCells, nOznLevels, nMonths), and nOznLevels is not a level prefix.
+
+    remap_file walks Time and one level axis; a third has nowhere to go, and
+    reaching the remap with one failed the whole file.
+    """
+    from gmpas.remap import remap_file
+
+    src = tmp_path / "diag.nc"
+    xr.Dataset({
+        "o3clim": (("nCells", "nOznLevels", "nMonths"),
+                   np.ones((2, 3, 12), dtype="f4")),
+        "good": (("nCells",), np.ones(2, dtype="f4")),
+    }).to_netcdf(src)
+
+    domain = TargetDomain(nlat=1, nlon=2, startlat=-1.0, endlat=1.0,
+                          startlon=0.0, endlon=2.0)
+    info = remap_file(src, weights, domain, ["good", "o3clim"],
+                      tmp_path / "out.nc")
+
+    # the good field still lands; the awkward one is reported, not fatal
+    assert info["fields"] == 1
+    reasons = dict(info["skipped"])
+    assert "o3clim" in reasons
+    assert "nOznLevels" in reasons["o3clim"] and "nMonths" in reasons["o3clim"]
+    with xr.open_dataset(tmp_path / "out.nc") as out:
+        assert list(out.data_vars) == ["good"]
+
+
+def test_two_level_axes_are_reported_rather_than_guessed_between(tmp_path, weights):
+    from gmpas.remap import remappable
+
+    ds = xr.Dataset({
+        "both": (("nCells", "nVertLevels", "nSoilLevels"),
+                 np.ones((2, 3, 4), dtype="f4")),
+    })
+    keep, skip = remappable(ds, ["both"])
+    assert keep == []
+    assert "two level axes" in dict(skip)["both"]

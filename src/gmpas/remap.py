@@ -327,7 +327,26 @@ def remappable(ds: xr.Dataset, names) -> tuple[list[str], list[tuple[str, str]]]
         if name not in ds:
             skip.append((name, "not in this file"))
         elif "nCells" in ds[name].dims:
-            keep.append(name)
+            # remap_file walks Time and one level axis and hands the rest to
+            # the weights as a flat per-cell vector, so anything else left in
+            # the shape has nowhere to go. Real MPAS history carries such
+            # fields -- the ozone climatology is (nCells, nOznLevels,
+            # nMonths) -- and reaching them with an unhandled axis fails deep
+            # in the remap with numpy talking about dimensions, naming
+            # neither the field nor the axis. Report them the way an edge
+            # field is reported instead.
+            spare = [d for d in ds[name].dims
+                     if d != "nCells" and d != "Time"
+                     and not d.startswith(LEVEL_PREFIXES)]
+            levels = [d for d in ds[name].dims if d.startswith(LEVEL_PREFIXES)]
+            if spare:
+                skip.append((name, f"has {', '.join(spare)} as well as cells "
+                                   f"— only Time and one level axis are handled"))
+            elif len(levels) > 1:
+                skip.append((name, f"has two level axes ({', '.join(levels)}) "
+                                   f"— only one is handled"))
+            else:
+                keep.append(name)
         elif "nEdges" in ds[name].dims:
             skip.append((name, "on nEdges — needs edge weights"))
         elif "nVertices" in ds[name].dims:
@@ -522,6 +541,23 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
     exactly as before this existed -- no Time coordinate, not a wrong one.
     """
     lat, lon = domain.lats(), domain.lons()
+
+    # The source side is checked per field below, against nCells. The
+    # destination side has to be checked here, because nothing downstream
+    # would say what went wrong: the mismatch surfaces as `cannot reshape
+    # array of size N into shape (nlat, nlon)` from numpy, once per file,
+    # with nothing pointing at the weights that are actually stale.
+    expected = domain.nlat * domain.nlon
+    if weights.n_b != expected:
+        raise ValueError(
+            f"{weights.path.name} was built for a target grid of "
+            f"{weights.n_b} points, but this target domain is "
+            f"{domain.nlat} x {domain.nlon} = {expected}. The weights and the "
+            f"domain disagree -- rebuild the weights for this domain with "
+            f"`--force-weights`, or point at the target_domain the existing "
+            f"weights were made for."
+        )
+
     result: dict[str, xr.DataArray] = {}
     slabs = 0
     worst = 0.0

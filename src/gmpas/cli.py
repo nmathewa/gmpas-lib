@@ -450,6 +450,21 @@ def _remap(args) -> int:
                 f"gmpas: weights are for {weights.n_a:,} cells but the mesh has "
                 f"{series.mesh.n_cells:,}. Delete {weights_path.name} to rebuild."
             )
+        # The same check for the other end of the map. Weights are cached as
+        # map_<method>.nc in the output directory, keyed on neither grid, so
+        # reusing an output directory after editing target_domain silently
+        # reuses weights built for the old one. Without this the run gets all
+        # the way into remapping and fails per file with numpy's `cannot
+        # reshape array of size N into shape (nlat, nlon)`, which names
+        # neither the weights nor the domain.
+        expected = domain.nlat * domain.nlon
+        if weights.n_b != expected:
+            raise SystemExit(
+                f"gmpas: weights map onto {weights.n_b:,} points but this "
+                f"target domain is {domain.nlat} x {domain.nlon} = "
+                f"{expected:,}. They were built for a different target grid — "
+                f"rerun with --force-weights, or delete {weights_path.name}."
+            )
     finally:
         series.close()
 
