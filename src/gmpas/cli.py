@@ -543,9 +543,15 @@ def _dashboard(args, data_path=None, mesh_path="", hfun_path="") -> int:
 
     sources, banner = build(data_path, mesh_path, hfun_path,
                             nx=args.width, ny=args.height)
-    serve(sources, port=args.port, host=args.host,
-          open_browser=not args.no_browser,
-          strict_port=args.port != DEFAULT_PORT, banner=banner)
+    # `--port` defaults to None rather than DEFAULT_PORT so that asking for a
+    # port explicitly is distinguishable from not asking. Comparing the value
+    # to DEFAULT_PORT instead meant `--port 8765` -- the natural thing to type
+    # once an SSH tunnel is pinned to that port -- counted as "no preference"
+    # and was allowed to wander to 8766 when busy, leaving the tunnel pointing
+    # at nothing and looking, from the browser, exactly like a dead server.
+    serve(sources, port=DEFAULT_PORT if args.port is None else args.port,
+          host=args.host, open_browser=not args.no_browser,
+          strict_port=args.port is not None, banner=banner)
     return 0
 
 
@@ -579,9 +585,9 @@ def _generic_view(args) -> int:
                     f"{gv.path.name} · {gv.nx}x{gv.ny} grid · "
                     f"{gv.steps} step{'s' if gv.steps != 1 else ''}",
                     _handler(gv, PAGE))
-    serve([source], port=args.port, host=args.host,
-          open_browser=not args.no_browser,
-          strict_port=args.port != DEFAULT_PORT,
+    serve([source], port=DEFAULT_PORT if args.port is None else args.port,
+          host=args.host, open_browser=not args.no_browser,
+          strict_port=args.port is not None,          # see the note in _dashboard
           banner=f"gmpas view --generic · {gv.path.name}")
     return 0
 
@@ -815,7 +821,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "-m/--mesh, --hfun and --cache-dir. Export "
                         "(figure/GIF/netCDF) isn't implemented for this mode "
                         "yet.")
-    v.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
+    v.add_argument("-p", "--port", type=int, default=None,
                    help=f"port (default {DEFAULT_PORT}; the default wanders "
                         f"if busy, an explicit one fails instead)")
     v.add_argument("--host", default="127.0.0.1",
@@ -848,7 +854,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--hfun", help="also serve the JIGSAW hfun.py behind this "
                                    "mesh, so intent and result are one click "
                                    "apart")
-    pv.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
+    pv.add_argument("-p", "--port", type=int, default=None,
                     help=f"port (default {DEFAULT_PORT}; the default wanders "
                          f"if busy, an explicit one fails instead)")
     pv.add_argument("--host", default="127.0.0.1",
@@ -874,7 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--mesh", help="also serve a mesh built from this hfun, "
                                    "to compare what was asked for against "
                                    "what came out")
-    ph.add_argument("-p", "--port", type=int, default=DEFAULT_PORT,
+    ph.add_argument("-p", "--port", type=int, default=None,
                     help=f"port (default {DEFAULT_PORT}; the default wanders "
                          f"if busy, an explicit one fails instead)")
     ph.add_argument("--host", default="127.0.0.1",

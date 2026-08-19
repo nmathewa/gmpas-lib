@@ -16,10 +16,12 @@ an SSH tunnel -- the case where ncview's X11 forwarding hurts most.
 from __future__ import annotations
 
 import errno
+import getpass
 import io
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import webbrowser
@@ -622,6 +624,40 @@ def _handler(viewer: Viewer, html: str = ""):
 PORT_ATTEMPTS = 20
 
 
+def reach_lines(host: str, port: int) -> list[str]:
+    """How to actually open this server, as lines ready to print.
+
+    The tunnel command is the whole point of this banner: on anything but a
+    laptop the viewer sits on the far side of an SSH hop, and that hop is the
+    step people miss -- an editor like VS Code forwards the port silently, so
+    the first plain-terminal run looks like the server never started.
+
+    Both the host and the login name are known right here, so they are filled
+    in rather than left as <placeholders> for the reader to substitute. Only
+    the login node genuinely cannot be known from a compute node, so that one
+    stays a placeholder.
+    """
+    node = socket.gethostname()
+    user = getpass.getuser()
+
+    if host in ("127.0.0.1", "localhost"):
+        return [
+            f"listening on 127.0.0.1:{port} — this machine only",
+            f"  on this machine:  http://127.0.0.1:{port}",
+            f"  from another machine, forward the port first — run this THERE:",
+            f"      ssh -N -L {port}:localhost:{port} {user}@{node}",
+            f"    then open       http://localhost:{port}",
+            f"  (an HPC compute node is different: a tunnel lands on the login"
+            f" node and will not reach here, so restart with --host 0.0.0.0)",
+        ]
+    return [
+        f"listening on {host}:{port} — reachable as {node}:{port}",
+        f"  from your own machine, run this THERE:",
+        f"      ssh -N -L {port}:{node}:{port} {user}@<login-node>",
+        f"    then open       http://localhost:{port}",
+    ]
+
+
 def can_open_browser() -> tuple[bool, str]:
     """Whether opening a browser here is likely to work, and why not if not.
 
@@ -743,8 +779,6 @@ def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True
     so a viewer listening only on the compute node's loopback is unreachable.
     Pass host="0.0.0.0" there, exactly as one does for Jupyter.
     """
-    import socket
-
     viewer = Viewer(data_path, mesh_path, nx=nx, ny=ny)
     server = bind(_handler(viewer), port, host=host, strict=strict_port)
     port = server.server_address[1]
@@ -755,17 +789,11 @@ def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True
           f"{viewer.series.n_files} file(s), "
           f"{len(viewer.plottable_cell_vars())} plottable fields")
 
-    node = socket.gethostname()
-    if host in ("127.0.0.1", "localhost"):
-        print(f"listening on 127.0.0.1:{port} — this machine only")
-        print(f"  open  http://127.0.0.1:{port}")
-        print(f"  if {node} is a remote node, this is NOT reachable through a "
-              f"tunnel to a login node; restart with --host 0.0.0.0")
-    else:
-        print(f"listening on {host}:{port} — reachable as {node}:{port}")
-        print(f"  from your machine:  ssh -N -L {port}:{node}:{port} <login-node>")
-        print(f"  then open           http://localhost:{port}")
+    for line in reach_lines(host, port):
+        print(line)
     print("ctrl-c to stop")
+    # see the note in dashboard.serve: a redirected log stayed empty otherwise
+    sys.stdout.flush()
 
     if open_browser:
         open_in_browser(f"http://127.0.0.1:{port}")
