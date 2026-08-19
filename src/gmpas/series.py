@@ -17,6 +17,7 @@ this class deliberately does not try to replace it.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from collections import OrderedDict
@@ -58,11 +59,32 @@ def parse_time(path: Path) -> datetime | None:
 #: open file handles to keep around while scrubbing through time
 LRU_SIZE = 4
 
-#: materialised (var, step, level) reads to keep around. Cheaper to hold
-#: more of these than open file handles -- one field's worth of float64
-#: rather than a whole file -- but still bounded: an animation loop can
-#: cycle through every step of every variable over a long session.
-VALUES_LRU_SIZE = 64
+#: how much memory materialised (var, step, level) reads may hold, in bytes.
+#:
+#: A budget in BYTES, deliberately not a count of entries. One field is ~2 MB
+#: on a small regional mesh and ~320 MB on a 41M-cell global one, so any fixed
+#: entry count is either useless at one end or an out-of-memory kill at the
+#: other: 64 entries was ~130 MB on the mesh it was tuned against and ~20 GB
+#: on a 3.75 km global mesh, which is exactly how it got a Derecho login node
+#: killed. Sizing by bytes scales itself -- dozens of small fields, or one
+#: large one, for the same footprint either way.
+VALUES_CACHE_BYTES = 512 * 1024 * 1024
+
+#: overrides the values-cache budget, in MB. Worth setting on HPC, where a
+#: login node's cgroup cap and a compute node's memory differ by orders of
+#: magnitude and the same install serves both.
+VALUES_CACHE_ENV = "GMPAS_VALUES_CACHE_MB"
+
+
+def values_budget() -> int:
+    """The values-cache budget in bytes, honouring the environment override."""
+    raw = os.environ.get(VALUES_CACHE_ENV)
+    if not raw:
+        return VALUES_CACHE_BYTES
+    try:
+        return max(0, int(float(raw) * 1024 * 1024))
+    except ValueError:                      # unparseable: keep the default
+        return VALUES_CACHE_BYTES
 
 
 def expand(paths) -> list[Path]:
@@ -124,6 +146,8 @@ class Series:
         self.files = expand(paths)
         self._open: OrderedDict[Path, xr.Dataset] = OrderedDict()
         self._values: OrderedDict[tuple, np.ndarray] = OrderedDict()
+        self._values_bytes = 0
+        self._values_budget = values_budget()
 
         # netCDF4/HDF5 is not safe for concurrent access from multiple
         # threads, and the viewer serves every HTTP request on its own
@@ -243,6 +267,10 @@ class Series:
             for ds in self._open.values():
                 ds.close()
             self._open.clear()
+            # the materialised fields are the bulk of what this holds; closing
+            # the handles but keeping them resident would free almost nothing
+            self._values.clear()
+            self._values_bytes = 0
 
     # -- access ----------------------------------------------------------
 
@@ -296,6 +324,11 @@ class Series:
         from the cache lookup, which is why they can share the lock with
         the disk read below rather than needing one of their own.
 
+        The cache is bounded by total BYTES, not entry count -- see
+        `VALUES_CACHE_BYTES`. What it holds therefore depends on the mesh:
+        many fields of a small one, or a single field of a 41M-cell global
+        one, for the same footprint either way.
+
         The actual disk read (`select` materialises `.values`) happens
         inside the lock along with the cache lookup, not after it -- the
         returned array is a plain, fully detached numpy array, so nothing
@@ -312,10 +345,30 @@ class Series:
             if var not in ds:
                 raise KeyError(f"{var!r} not in {path.name}")
             arr = select(ds[var], time=local, level=level)
-            self._values[key] = arr
-            if len(self._values) > VALUES_LRU_SIZE:
-                self._values.popitem(last=False)
+            self._remember(key, arr)
             return arr
+
+    def _remember(self, key: tuple, arr: np.ndarray) -> None:
+        """Cache `arr`, evicting oldest entries to stay inside the budget.
+
+        Caller must hold `self._lock`. Note this bounds only what the *cache*
+        keeps: a caller combining two fields (a derived variable, say) holds
+        its own references to both regardless, which is inherent to the
+        operation rather than something a cache can bound away.
+        """
+        nbytes = int(arr.nbytes)
+        # An array larger than the entire budget is never worth keeping: it
+        # would evict everything else and still sit there as the sole entry,
+        # so the next distinct read evicts it again. Better to not cache it
+        # and leave the budget serving reads it can actually satisfy twice.
+        if nbytes > self._values_budget:
+            return
+
+        self._values[key] = arr
+        self._values_bytes += nbytes
+        while self._values_bytes > self._values_budget and len(self._values) > 1:
+            _, old = self._values.popitem(last=False)
+            self._values_bytes -= int(old.nbytes)
 
     def __repr__(self) -> str:
         return (f"<Series {len(self.steps)} steps across {self.n_files} files"
