@@ -18,7 +18,9 @@ from __future__ import annotations
 import errno
 import io
 import json
+import os
 import re
+import sys
 import threading
 import webbrowser
 from collections import OrderedDict
@@ -620,6 +622,91 @@ def _handler(viewer: Viewer, html: str = ""):
 PORT_ATTEMPTS = 20
 
 
+def can_open_browser() -> tuple[bool, str]:
+    """Whether opening a browser here is likely to work, and why not if not.
+
+    `$BROWSER` wins outright: it is the hook VS Code sets in its integrated
+    terminal to route a URL back to the real browser at the other end of its
+    connection, which is the entire reason `gmpas view` pops a tab there and
+    not from a plain SSH session. Anyone can set it by hand to get the same.
+    """
+    if os.environ.get("BROWSER"):
+        return True, ""
+    if sys.platform == "darwin" or sys.platform.startswith("win"):
+        return True, ""                       # `open` / `start` always exist
+    if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+        return True, ""
+    return False, "no DISPLAY, no WAYLAND_DISPLAY and no $BROWSER"
+
+
+#: browsers that render *into the terminal*. Launching one would seize the
+#: very TTY the server is logging to, so they are never an acceptable answer
+#: here however far down `webbrowser`'s list they sit.
+CONSOLE_BROWSERS = frozenset(
+    {"www-browser", "links", "elinks", "lynx", "w3m"}
+)
+
+
+def _console_browser(controller) -> bool:
+    name = getattr(controller, "name", "") or ""
+    if not name:                              # MacOSX / WindowsDefault: GUI
+        return False
+    return os.path.basename(name.split()[0]) in CONSOLE_BROWSERS
+
+
+def open_in_browser(url: str, delay: float = 0.5) -> "threading.Timer | None":
+    """Open `url`, or say plainly why it could not -- but never in silence.
+
+    `webbrowser.open` returns False when it cannot launch anything and raises
+    on some platforms; both results used to be dropped inside a Timer thread,
+    so "your browser is opening" and "nothing will ever happen" printed the
+    same thing. On a compute node or over a bare SSH session that reads as the
+    viewer being broken, when in fact the server is up and only needs the URL
+    to be opened by hand -- which is what the tunnel instructions above cover.
+
+    Deliberately resolves ONE controller and uses it, rather than calling
+    `webbrowser.open`, which walks its whole list until something works. That
+    list ends in terminal browsers, so a `$BROWSER` pointing at anything
+    broken does not fail -- it cascades into elinks and takes the terminal
+    with it. Better to try the browser the environment actually nominates and
+    report honestly when that one does not work.
+
+    Returns the timer doing the work, so a caller that needs to know the
+    attempt finished (a test, mainly) can join it; `serve` does not care.
+    """
+    ok, why = can_open_browser()
+    if not ok:
+        print(f"gmpas: not opening a browser -- {why}.\n"
+              f"       open {url} yourself (see the tunnel note above if this "
+              f"is a remote node), or pass --no-browser to stop asking.",
+              file=sys.stderr)
+        return None
+
+    def _say(reason: str) -> None:
+        print(f"gmpas: could not open a browser ({reason}) -- open {url} "
+              f"yourself, or pass --no-browser to stop asking.", file=sys.stderr)
+
+    def _try() -> None:
+        try:
+            controller = webbrowser.get()
+        except Exception as exc:              # nothing registered at all
+            return _say(f"{type(exc).__name__}: {exc}")
+        if _console_browser(controller):
+            return _say(f"only a terminal browser ({controller.name}) is "
+                        f"available, which would take over this terminal")
+        try:
+            if not controller.open(url):
+                _say("the browser did not start")
+        except Exception as exc:              # a broken $BROWSER, a dead DISPLAY
+            _say(f"{type(exc).__name__}: {exc}")
+
+    # still deferred: the socket is listening already, but a browser racing the
+    # first request adds nothing, and this keeps the banner above unbroken
+    timer = threading.Timer(delay, _try)
+    timer.start()
+    return timer
+
+
 def bind(handler, port: int, host: str = "127.0.0.1",
          attempts: int = PORT_ATTEMPTS,
          strict: bool = False) -> ThreadingHTTPServer:
@@ -681,8 +768,7 @@ def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True
     print("ctrl-c to stop")
 
     if open_browser:
-        threading.Timer(0.5, webbrowser.open,
-                        args=(f"http://127.0.0.1:{port}",)).start()
+        open_in_browser(f"http://127.0.0.1:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

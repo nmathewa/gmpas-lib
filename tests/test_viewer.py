@@ -407,3 +407,100 @@ def test_coastlines_stay_at_their_own_latitudes_past_a_pole():
     # opposite mistake -- squashed rather than stretched
     assert top > 60.0
     assert bottom < -60.0
+
+
+# ------------------------------------------------------ opening a browser
+
+
+def test_a_headless_session_is_not_offered_a_browser(monkeypatch, capsys):
+    """No DISPLAY and no $BROWSER: say so, rather than fail silently."""
+    from gmpas.viewer import can_open_browser, open_in_browser
+
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("BROWSER", raising=False)
+
+    ok, why = can_open_browser()
+    assert not ok
+    assert "DISPLAY" in why
+
+    open_in_browser("http://127.0.0.1:8765", delay=0)
+    err = capsys.readouterr().err
+    assert "not opening a browser" in err
+    assert "http://127.0.0.1:8765" in err        # the URL stays actionable
+
+
+def test_the_browser_env_var_is_enough_on_its_own(monkeypatch):
+    """$BROWSER is how VS Code routes the URL back to a real browser."""
+    from gmpas.viewer import can_open_browser
+
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setenv("BROWSER", "/some/helper")
+
+    ok, why = can_open_browser()
+    assert ok and why == ""
+
+
+def test_a_terminal_browser_is_refused_not_launched(monkeypatch, capsys):
+    """elinks would seize the very terminal the server logs to."""
+    import webbrowser
+
+    from gmpas.viewer import open_in_browser
+
+    class Console:
+        name = "/usr/bin/elinks"
+        def open(self, url, *a, **k):          # pragma: no cover - must not run
+            raise AssertionError("a terminal browser must never be launched")
+
+    monkeypatch.setenv("BROWSER", "/usr/bin/elinks")
+    monkeypatch.setattr(webbrowser, "get", lambda *a, **k: Console())
+
+    timer = open_in_browser("http://127.0.0.1:8765", delay=0)
+    timer.join()
+    err = capsys.readouterr().err
+    assert "terminal browser" in err
+    assert "http://127.0.0.1:8765" in err
+
+
+def test_a_browser_that_will_not_start_is_reported(monkeypatch, capsys):
+    """webbrowser.open()'s False used to be discarded inside a Timer."""
+    import webbrowser
+
+    from gmpas.viewer import open_in_browser
+
+    class Dud:
+        name = "firefox"
+        def open(self, url, *a, **k):
+            return False                       # could not launch
+
+    monkeypatch.setenv("BROWSER", "firefox")
+    monkeypatch.setattr(webbrowser, "get", lambda *a, **k: Dud())
+
+    timer = open_in_browser("http://127.0.0.1:8765", delay=0)
+    timer.join()
+    assert "did not start" in capsys.readouterr().err
+
+
+def test_a_working_browser_is_opened_and_stays_quiet(monkeypatch, capsys):
+    import webbrowser
+
+    from gmpas.viewer import open_in_browser
+
+    opened = []
+
+    class Good:
+        name = "firefox"
+        def open(self, url, *a, **k):
+            opened.append(url)
+            return True
+
+    monkeypatch.setenv("BROWSER", "firefox")
+    monkeypatch.setattr(webbrowser, "get", lambda *a, **k: Good())
+
+    timer = open_in_browser("http://127.0.0.1:8765", delay=0)
+    timer.join()
+    assert opened == ["http://127.0.0.1:8765"]
+    assert capsys.readouterr().err == ""        # success says nothing
