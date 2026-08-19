@@ -624,6 +624,24 @@ def _handler(viewer: Viewer, html: str = ""):
 PORT_ATTEMPTS = 20
 
 
+def ssh_target() -> str:
+    """The name to SSH *to*, preferring one that resolves off this machine.
+
+    `gethostname()` alone gives the bare label -- `derecho1` -- which is not
+    something a laptop can look up. The fully qualified name usually is:
+    `derecho1.hpc.ucar.edu` can be typed straight into `ssh`, which is the
+    entire point of printing the command at all.
+
+    Only taken when it genuinely extends the short name, since `getfqdn()`
+    falls back to whatever /etc/hosts says and can answer `localhost` or some
+    placeholder domain on a misconfigured box. In that case the short name is
+    no worse and reads less like a promise.
+    """
+    node = socket.gethostname()
+    fqdn = socket.getfqdn()
+    return fqdn if fqdn.startswith(f"{node}.") else node
+
+
 def reach_lines(host: str, port: int) -> list[str]:
     """How to actually open this server, as lines ready to print.
 
@@ -632,11 +650,14 @@ def reach_lines(host: str, port: int) -> list[str]:
     step people miss -- an editor like VS Code forwards the port silently, so
     the first plain-terminal run looks like the server never started.
 
-    Both the host and the login name are known right here, so they are filled
-    in rather than left as <placeholders> for the reader to substitute. Only
-    the login node genuinely cannot be known from a compute node, so that one
-    stays a placeholder.
+    Everything knowable is filled in. That includes the case this banner
+    used to get wrong: a *login* node running the viewer is directly
+    reachable, so telling its user to tunnel via "<login-node>" asks them to
+    hop through the machine they are already on. The direct command comes
+    first now, with the via-a-login-node form kept for a compute node that
+    really cannot be reached from outside.
     """
+    target = ssh_target()
     node = socket.gethostname()
     user = getpass.getuser()
 
@@ -645,16 +666,19 @@ def reach_lines(host: str, port: int) -> list[str]:
             f"listening on 127.0.0.1:{port} — this machine only",
             f"  on this machine:  http://127.0.0.1:{port}",
             f"  from another machine, forward the port first — run this THERE:",
-            f"      ssh -N -L {port}:localhost:{port} {user}@{node}",
+            f"      ssh -N -L {port}:localhost:{port} {user}@{target}",
             f"    then open       http://localhost:{port}",
             f"  (an HPC compute node is different: a tunnel lands on the login"
             f" node and will not reach here, so restart with --host 0.0.0.0)",
         ]
     return [
-        f"listening on {host}:{port} — reachable as {node}:{port}",
+        f"listening on {host}:{port} — reachable as {target}:{port}",
         f"  from your own machine, run this THERE:",
-        f"      ssh -N -L {port}:{node}:{port} {user}@<login-node>",
+        f"      ssh -N -L {port}:localhost:{port} {user}@{target}",
         f"    then open       http://localhost:{port}",
+        f"  (if {node} is a compute node you cannot SSH to directly, go via"
+        f" the login node instead:)",
+        f"      ssh -N -L {port}:{node}:{port} {user}@<login-node>",
     ]
 
 
