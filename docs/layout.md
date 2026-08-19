@@ -1,6 +1,6 @@
 # Layout
 
-- `src/gmpas/mesh.py` — `MpasMesh`, geometry build, `.npz` cache, wind reconstruction
+- `src/gmpas/mesh.py` — `MpasMesh`, geometry build, on-disk `.npy` cache, wind reconstruction
 - `src/gmpas/raster.py` — KD-tree Voronoi rasterizer
 - `src/gmpas/plot.py` — cell / edge / vector / mesh-structure rendering
 - `src/gmpas/data.py` — opening output, pairing with a mesh, time/level selection

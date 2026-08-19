@@ -3,7 +3,8 @@
 An MPAS mesh is static for an entire simulation, so every plot of every
 variable at every timestep shares the same polygons. The slow part of native
 plotting is rebuilding that geometry -- this module builds it vectorized and
-caches it to .npz, so the second and later loads are effectively free.
+caches it to disk (see `cache_path` for why that's a directory of `.npy`
+arrays, not one `.npz`), so the second and later loads are effectively free.
 
 Mesh conventions handled here:
   * lat/lon fields are stored in RADIANS, longitude on [0, 2pi)
