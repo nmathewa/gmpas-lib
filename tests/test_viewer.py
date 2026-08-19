@@ -518,9 +518,10 @@ def test_the_tunnel_command_is_filled_in_not_a_placeholder(monkeypatch):
 
     monkeypatch.setattr(socket, "gethostname", lambda: "dec1042")
     monkeypatch.setattr(getpass, "getuser", lambda: "someone")
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: "dec1042.hpc.example.edu")
 
     text = "\n".join(reach_lines("127.0.0.1", 8765))
-    assert "ssh -N -L 8765:localhost:8765 someone@dec1042" in text
+    assert "ssh -N -L 8765:localhost:8765 someone@dec1042.hpc.example.edu" in text
     assert "http://localhost:8765" in text
     assert "<host>" not in text and "<user>" not in text
 
@@ -534,6 +535,29 @@ def test_binding_all_interfaces_forwards_via_the_node_name(monkeypatch):
     monkeypatch.setattr(socket, "gethostname", lambda: "dec1042")
     monkeypatch.setattr(getpass, "getuser", lambda: "someone")
 
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: "dec1042.hpc.example.edu")
     text = "\n".join(reach_lines("0.0.0.0", 8765))
-    # the compute node is named, but the login node genuinely cannot be known
+    # the directly-reachable form comes first, fully qualified so it can be
+    # typed straight into ssh -- a login node running the viewer is reachable
+    assert "ssh -N -L 8765:localhost:8765 someone@dec1042.hpc.example.edu" in text
+    # with the via-a-login-node form kept for a compute node that is not
     assert "ssh -N -L 8765:dec1042:8765 someone@<login-node>" in text
+
+
+def test_a_bogus_fqdn_falls_back_to_the_short_name(monkeypatch):
+    """getfqdn() answers from /etc/hosts and can be useless.
+
+    Printing `someone@localhost` as the thing to SSH to would be worse than
+    the bare hostname, which is at least honest about being incomplete.
+    """
+    import socket
+
+    from gmpas.viewer import ssh_target
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "dec1042")
+
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: "localhost")
+    assert ssh_target() == "dec1042"
+
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: "dec1042.hpc.example.edu")
+    assert ssh_target() == "dec1042.hpc.example.edu"
