@@ -23,7 +23,8 @@ import numpy as np
 import xarray as xr
 
 from .config import TargetDomain
-from .scrip import write_scrip
+from .mesh import GLOBAL_COVERAGE
+from .scrip import coverage_of, write_scrip
 from .series import parse_time
 
 #: dimensions a field may be stacked along, beyond Time
@@ -215,6 +216,42 @@ def _mpi_launch_prefix(ranks: int, tool: str) -> tuple[list[str], str | None]:
     return [], "no srun/mpirun/mpiexec on PATH -- running single-rank"
 
 
+#: lines of a failed run's output to quote back in the error
+ERROR_TAIL = 6
+
+
+def _run_streaming(cmd, cwd, quiet: bool) -> tuple[int, list[str]]:
+    """Run `cmd`, echoing its output as it arrives, and keep the tail.
+
+    Weight generation is the longest thing gmpas ever waits on, and capturing
+    its output wholesale meant nothing appeared until it finished -- so a run
+    that was progressing and a run that was stuck looked identical for however
+    many hours it took.
+
+    That hid the message that explains the most common HPC stall. Launching
+    this under `srun` from inside an interactive `srun --pty` allocation makes
+    it a nested job step, and Slurm answers `Job step creation temporarily
+    disabled, retrying (Requested nodes are busy)` -- once a second, forever,
+    while the outer step holds the resources the inner one is asking for. That
+    line is the whole diagnosis, and it was being swallowed.
+
+    The last `ERROR_TAIL` lines are still kept for the failure message, so
+    nothing is lost by showing them as they come.
+    """
+    from collections import deque
+
+    tail: deque[str] = deque(maxlen=ERROR_TAIL)
+    proc = subprocess.Popen(cmd, cwd=cwd, text=True, bufsize=1,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    with proc:
+        for line in proc.stdout:
+            line = line.rstrip()
+            tail.append(line)
+            if not quiet and line:
+                print(f"    {line}", flush=True)
+    return proc.returncode, list(tail)
+
+
 def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
                    method: str = "conserve", force: bool = False,
                    ranks: int = 1, quiet: bool = False) -> tuple[Path, bool]:
@@ -258,10 +295,25 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
         print(f"    normalised {wrapped:,} longitudes onto [0, 2pi)")
     domain.to_scrip(dst_scrip)
 
+    # --src_regional tells ESMF the source does not cover the sphere, which
+    # decides how it treats the poles and the seam. It was passed
+    # unconditionally, so a global mesh was described to ESMF as regional --
+    # and paired with --ignore_unmapped, cells it then failed to map came back
+    # silently empty instead of as an error. gmpas already knows which this
+    # is, so say so.
+    src_coverage = coverage_of(src_scrip)
+    src_is_global = src_coverage >= GLOBAL_COVERAGE
+    if not quiet:
+        kind = "global" if src_is_global else "regional"
+        print(f"  source covers {src_coverage * 100:.1f}% of the sphere "
+              f"— treating it as {kind}")
+
     launch, note = _mpi_launch_prefix(ranks, tool)
     cmd = launch + [tool, "-s", src_scrip.name, "-d", dst_scrip.name,
-                    "-w", weights.name, "-m", method,
-                    "--src_regional", "--dst_regional", "--ignore_unmapped",
+                    "-w", weights.name, "-m", method]
+    if not src_is_global:
+        cmd.append("--src_regional")
+    cmd += ["--dst_regional", "--ignore_unmapped",
                     # ESMF's own default logs every message from every rank,
                     # and warns that this "may cause slowdown in performance"
                     # -- real cost under -np 64+ on a shared/parallel
@@ -283,18 +335,16 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
     t0 = time.perf_counter()
     for attempt in range(1, WEIGHT_ATTEMPTS + 1):
         weights.unlink(missing_ok=True)
-        done = subprocess.run(cmd, capture_output=True, text=True, cwd=out_dir)
-        if done.returncode == 0 and weights.exists():
+        code, tail = _run_streaming(cmd, out_dir, quiet)
+        if code == 0 and weights.exists():
             break
         if attempt < WEIGHT_ATTEMPTS and not quiet:
-            print(f"    attempt {attempt} failed (exit {done.returncode}), "
-                  f"retrying")
+            print(f"    attempt {attempt} failed (exit {code}), retrying")
     else:
-        tail = (done.stdout or done.stderr or "").strip().splitlines()[-6:]
-        crash = " — it segfaulted" if done.returncode < 0 else ""
+        crash = " — it segfaulted" if code < 0 else ""
         raise RemapError(
             f"ESMF_RegridWeightGen failed {WEIGHT_ATTEMPTS} times "
-            f"(exit {done.returncode}){crash}.\n"
+            f"(exit {code}){crash}.\n"
             + "\n".join(f"    {line}" for line in tail)
         )
     if not quiet:
@@ -327,7 +377,26 @@ def remappable(ds: xr.Dataset, names) -> tuple[list[str], list[tuple[str, str]]]
         if name not in ds:
             skip.append((name, "not in this file"))
         elif "nCells" in ds[name].dims:
-            keep.append(name)
+            # remap_file walks Time and one level axis and hands the rest to
+            # the weights as a flat per-cell vector, so anything else left in
+            # the shape has nowhere to go. Real MPAS history carries such
+            # fields -- the ozone climatology is (nCells, nOznLevels,
+            # nMonths) -- and reaching them with an unhandled axis fails deep
+            # in the remap with numpy talking about dimensions, naming
+            # neither the field nor the axis. Report them the way an edge
+            # field is reported instead.
+            spare = [d for d in ds[name].dims
+                     if d != "nCells" and d != "Time"
+                     and not d.startswith(LEVEL_PREFIXES)]
+            levels = [d for d in ds[name].dims if d.startswith(LEVEL_PREFIXES)]
+            if spare:
+                skip.append((name, f"has {', '.join(spare)} as well as cells "
+                                   f"— only Time and one level axis are handled"))
+            elif len(levels) > 1:
+                skip.append((name, f"has two level axes ({', '.join(levels)}) "
+                                   f"— only one is handled"))
+            else:
+                keep.append(name)
         elif "nEdges" in ds[name].dims:
             skip.append((name, "on nEdges — needs edge weights"))
         elif "nVertices" in ds[name].dims:
@@ -522,6 +591,23 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
     exactly as before this existed -- no Time coordinate, not a wrong one.
     """
     lat, lon = domain.lats(), domain.lons()
+
+    # The source side is checked per field below, against nCells. The
+    # destination side has to be checked here, because nothing downstream
+    # would say what went wrong: the mismatch surfaces as `cannot reshape
+    # array of size N into shape (nlat, nlon)` from numpy, once per file,
+    # with nothing pointing at the weights that are actually stale.
+    expected = domain.nlat * domain.nlon
+    if weights.n_b != expected:
+        raise ValueError(
+            f"{weights.path.name} was built for a target grid of "
+            f"{weights.n_b} points, but this target domain is "
+            f"{domain.nlat} x {domain.nlon} = {expected}. The weights and the "
+            f"domain disagree -- rebuild the weights for this domain with "
+            f"`--force-weights`, or point at the target_domain the existing "
+            f"weights were made for."
+        )
+
     result: dict[str, xr.DataArray] = {}
     slabs = 0
     worst = 0.0

@@ -117,6 +117,27 @@ def write_scrip(mesh_path: str | Path, out_path: str | Path,
     corner_lat = lat_vert[voc]
     corner_lon = lon_vert[voc]
 
+    # Unwrap each cell's corners onto one branch, around its own centre.
+    #
+    # MPAS stores lonVertex on [0, 2pi), so a cell straddling the antimeridian
+    # already arrives with corners at ~6.28 and ~0.002 -- nothing above put it
+    # there, and normalising cannot take it out. Written verbatim, that cell is
+    # a polygon spanning nearly the whole globe rather than the few kilometres
+    # it really covers.
+    #
+    # That is not only wrong, it is slow, and disproportionately so: ESMF finds
+    # candidate overlaps from cell bounding boxes, and a box spanning 359
+    # degrees of longitude is a candidate against very nearly every target
+    # cell. A few thousand such cells around the seam are enough to turn the
+    # search from roughly N log N into something closer to N x M -- which is
+    # how a mesh that should take a minute takes hours.
+    #
+    # Shifting a corner by a whole turn does not move it on the sphere, so this
+    # changes no geometry. It is the same unwrapping `_cell_polygons` already
+    # does for rendering, applied where a remapper will read it.
+    offset = corner_lon - lon_cell[:, None]
+    corner_lon = corner_lon - TWO_PI * np.round(offset / TWO_PI)
+
     # grid_area is a solid angle, so it is areaCell on the unit sphere. A mesh
     # straight from JIGSAW already carries non-dimensional areas with
     # sphere_radius = 1, and dividing by that radius is right either way.
