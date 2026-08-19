@@ -192,8 +192,10 @@ def test_a_crashing_esmf_is_retried_then_reported(tmp_path, monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(remap_mod.shutil, "which", lambda name: "/fake/esmf")
-    monkeypatch.setattr(remap_mod.subprocess, "run",
-                        lambda *a, **k: (calls.append(1), Result())[1])
+    # _run_streaming is the seam now: it echoes output as it arrives rather
+    # than capturing it wholesale, so there is no subprocess.run to stand in for
+    monkeypatch.setattr(remap_mod, "_run_streaming",
+                        lambda *a, **k: (calls.append(1), (-11, ["boom"]))[1])
     write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (5.0, 0.0)])
     domain = TargetDomain(4, 8, -2.0, 2.0, 0.0, 8.0)
 
@@ -398,15 +400,15 @@ def test_ensure_weights_wraps_the_esmf_call_with_the_launcher(tmp_path, monkeypa
         return {"ESMF_RegridWeightGen": "/fake/esmf",
                 "mpirun": "/fake/mpirun"}.get(name)
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, cwd, quiet):
         calls.append(cmd)
         (tmp_path / "w" / "map_conserve.nc").write_bytes(b"weights")
-        return Result()
+        return 0, []
 
     monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
     monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     monkeypatch.setattr(remap_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(remap_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(remap_mod, "_run_streaming", fake_run)
     write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (5.0, 0.0)])
     domain = TargetDomain(4, 8, -2.0, 2.0, 0.0, 8.0)
 
@@ -433,14 +435,14 @@ def test_ensure_weights_declines_the_launcher_on_a_mpiuni_build(tmp_path, monkey
         return {"ESMF_RegridWeightGen": "/fake/esmf",
                 "mpirun": "/fake/mpirun"}.get(name)
 
-    def fake_run(cmd, **kwargs):
+    def fake_run(cmd, cwd, quiet):
         calls.append(cmd)
         (tmp_path / "w" / "map_conserve.nc").write_bytes(b"weights")
-        return Result()
+        return 0, []
 
     monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: False)
     monkeypatch.setattr(remap_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(remap_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(remap_mod, "_run_streaming", fake_run)
     write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (5.0, 0.0)])
     domain = TargetDomain(4, 8, -2.0, 2.0, 0.0, 8.0)
 

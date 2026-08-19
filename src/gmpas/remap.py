@@ -216,6 +216,42 @@ def _mpi_launch_prefix(ranks: int, tool: str) -> tuple[list[str], str | None]:
     return [], "no srun/mpirun/mpiexec on PATH -- running single-rank"
 
 
+#: lines of a failed run's output to quote back in the error
+ERROR_TAIL = 6
+
+
+def _run_streaming(cmd, cwd, quiet: bool) -> tuple[int, list[str]]:
+    """Run `cmd`, echoing its output as it arrives, and keep the tail.
+
+    Weight generation is the longest thing gmpas ever waits on, and capturing
+    its output wholesale meant nothing appeared until it finished -- so a run
+    that was progressing and a run that was stuck looked identical for however
+    many hours it took.
+
+    That hid the message that explains the most common HPC stall. Launching
+    this under `srun` from inside an interactive `srun --pty` allocation makes
+    it a nested job step, and Slurm answers `Job step creation temporarily
+    disabled, retrying (Requested nodes are busy)` -- once a second, forever,
+    while the outer step holds the resources the inner one is asking for. That
+    line is the whole diagnosis, and it was being swallowed.
+
+    The last `ERROR_TAIL` lines are still kept for the failure message, so
+    nothing is lost by showing them as they come.
+    """
+    from collections import deque
+
+    tail: deque[str] = deque(maxlen=ERROR_TAIL)
+    proc = subprocess.Popen(cmd, cwd=cwd, text=True, bufsize=1,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    with proc:
+        for line in proc.stdout:
+            line = line.rstrip()
+            tail.append(line)
+            if not quiet and line:
+                print(f"    {line}", flush=True)
+    return proc.returncode, list(tail)
+
+
 def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
                    method: str = "conserve", force: bool = False,
                    ranks: int = 1, quiet: bool = False) -> tuple[Path, bool]:
@@ -299,18 +335,16 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
     t0 = time.perf_counter()
     for attempt in range(1, WEIGHT_ATTEMPTS + 1):
         weights.unlink(missing_ok=True)
-        done = subprocess.run(cmd, capture_output=True, text=True, cwd=out_dir)
-        if done.returncode == 0 and weights.exists():
+        code, tail = _run_streaming(cmd, out_dir, quiet)
+        if code == 0 and weights.exists():
             break
         if attempt < WEIGHT_ATTEMPTS and not quiet:
-            print(f"    attempt {attempt} failed (exit {done.returncode}), "
-                  f"retrying")
+            print(f"    attempt {attempt} failed (exit {code}), retrying")
     else:
-        tail = (done.stdout or done.stderr or "").strip().splitlines()[-6:]
-        crash = " — it segfaulted" if done.returncode < 0 else ""
+        crash = " — it segfaulted" if code < 0 else ""
         raise RemapError(
             f"ESMF_RegridWeightGen failed {WEIGHT_ATTEMPTS} times "
-            f"(exit {done.returncode}){crash}.\n"
+            f"(exit {code}){crash}.\n"
             + "\n".join(f"    {line}" for line in tail)
         )
     if not quiet:
