@@ -323,3 +323,70 @@ def test_a_series_exposes_its_times_without_reading_files(tmp_path):
         assert [t.hour for t in s.times] == [0, 1, 2]
     finally:
         s.close()
+
+
+# --------------------------------------------------- the values cache budget
+
+
+def test_the_values_cache_is_bounded_by_bytes_not_entries(tmp_path):
+    """The regression that killed a Derecho login node.
+
+    The cache was capped at 64 *entries*, which is ~130 MB of small-mesh
+    fields but ~20 GB of 41M-cell ones. Scrubbing a long series therefore
+    grew without any bound that scaled with the mesh. The budget is in bytes
+    now, so the same walk stays inside it whatever the field size.
+    """
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=6, n_times=3)
+    s = Series(run)
+    try:
+        s._values_budget = 200            # bytes: room for a couple of fields
+        for step in range(len(s)):
+            s.values("fld", step=step)
+        assert s._values_bytes <= s._values_budget
+        assert s._values_bytes == sum(v.nbytes for v in s._values.values())
+    finally:
+        s.close()
+
+
+def test_a_field_larger_than_the_whole_budget_is_not_cached(tmp_path):
+    """Caching it would evict everything and still be evicted next read."""
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=2, n_times=2)
+    s = Series(run)
+    try:
+        s._values_budget = 1              # smaller than any real field
+        got = s.values("fld", step=0)
+        assert got is not None            # still returned to the caller
+        assert not s._values                # but nothing retained
+        assert s._values_bytes == 0
+    finally:
+        s.close()
+
+
+def test_closing_a_series_releases_the_cached_fields(tmp_path):
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=2, n_times=2)
+    s = Series(run)
+    s.values("fld", step=0)
+    assert s._values_bytes > 0
+    s.close()
+    assert s._values_bytes == 0
+    assert not s._values
+
+
+def test_the_values_budget_honours_its_environment_override(monkeypatch):
+    from gmpas.series import VALUES_CACHE_BYTES, VALUES_CACHE_ENV, values_budget
+
+    monkeypatch.setenv(VALUES_CACHE_ENV, "64")
+    assert values_budget() == 64 * 1024 * 1024
+
+    # an unparseable value must not take the viewer down on startup
+    monkeypatch.setenv(VALUES_CACHE_ENV, "not-a-number")
+    assert values_budget() == VALUES_CACHE_BYTES
+
+    monkeypatch.delenv(VALUES_CACHE_ENV)
+    assert values_budget() == VALUES_CACHE_BYTES
