@@ -23,7 +23,8 @@ import numpy as np
 import xarray as xr
 
 from .config import TargetDomain
-from .scrip import write_scrip
+from .mesh import GLOBAL_COVERAGE
+from .scrip import coverage_of, write_scrip
 from .series import parse_time
 
 #: dimensions a field may be stacked along, beyond Time
@@ -258,10 +259,25 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
         print(f"    normalised {wrapped:,} longitudes onto [0, 2pi)")
     domain.to_scrip(dst_scrip)
 
+    # --src_regional tells ESMF the source does not cover the sphere, which
+    # decides how it treats the poles and the seam. It was passed
+    # unconditionally, so a global mesh was described to ESMF as regional --
+    # and paired with --ignore_unmapped, cells it then failed to map came back
+    # silently empty instead of as an error. gmpas already knows which this
+    # is, so say so.
+    src_coverage = coverage_of(src_scrip)
+    src_is_global = src_coverage >= GLOBAL_COVERAGE
+    if not quiet:
+        kind = "global" if src_is_global else "regional"
+        print(f"  source covers {src_coverage * 100:.1f}% of the sphere "
+              f"— treating it as {kind}")
+
     launch, note = _mpi_launch_prefix(ranks, tool)
     cmd = launch + [tool, "-s", src_scrip.name, "-d", dst_scrip.name,
-                    "-w", weights.name, "-m", method,
-                    "--src_regional", "--dst_regional", "--ignore_unmapped",
+                    "-w", weights.name, "-m", method]
+    if not src_is_global:
+        cmd.append("--src_regional")
+    cmd += ["--dst_regional", "--ignore_unmapped",
                     # ESMF's own default logs every message from every rank,
                     # and warns that this "may cause slowdown in performance"
                     # -- real cost under -np 64+ on a shared/parallel

@@ -127,3 +127,54 @@ def test_a_file_without_a_mesh_says_so(tmp_path):
 def test_a_missing_file_is_reported_clearly(tmp_path):
     with pytest.raises(FileNotFoundError, match="No such mesh file"):
         write_scrip(tmp_path / "absent.nc", tmp_path / "x.scrip.nc")
+
+
+def test_cells_at_the_antimeridian_stay_local(tmp_path):
+    """The seam is where a remap goes from minutes to hours.
+
+    MPAS stores lonVertex on [0, 2pi), so a cell straddling the antimeridian
+    arrives with corners at ~359.9 and ~0.1 degrees. Written through, that is
+    a polygon spanning nearly the globe -- ESMF finds candidate overlaps from
+    bounding boxes, so such a cell is a candidate against very nearly every
+    target cell, and a few thousand of them around the seam turn the search
+    from roughly N log N into something closer to N x M.
+    """
+    from conftest import write_mesh
+    from gmpas.scrip import write_scrip
+
+    mesh = tmp_path / "seam.nc"
+    write_mesh(mesh, [(147.0, -2.0), (359.5, 0.0), (0.5, 0.0), (180.0, 10.0)],
+               radius_deg=1.0)
+    out, _ = write_scrip(mesh, tmp_path / "s.nc")
+
+    with xr.open_dataset(out) as scrip:
+        lon = np.degrees(scrip.grid_corner_lon.values)
+
+    spans = lon.max(axis=1) - lon.min(axis=1)
+    # every cell is ~2 degrees across; none may look global
+    assert spans.max() < 10.0, f"a cell spans {spans.max():.1f} degrees"
+
+
+def test_unwrapping_moves_no_point_on_the_sphere(tmp_path):
+    """Shifting a corner by a whole turn must be a relabelling, not a move."""
+    from conftest import write_mesh
+    from gmpas.scrip import write_scrip
+
+    mesh = tmp_path / "seam.nc"
+    write_mesh(mesh, [(359.5, 0.0), (0.5, 0.0)], radius_deg=1.0)
+    out, _ = write_scrip(mesh, tmp_path / "s.nc")
+
+    with xr.open_dataset(out) as scrip:
+        lon = scrip.grid_corner_lon.values
+        lat = scrip.grid_corner_lat.values
+
+    # corners may sit outside [0, 2pi) now -- that is the point -- but each
+    # must still be the same physical location it was
+    assert (lon < 0).any() or (lon >= 2 * np.pi).any()
+    xyz = np.stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon),
+                    np.sin(lat)], axis=-1)
+    wrapped_lon = np.mod(lon, 2 * np.pi)
+    xyz_wrapped = np.stack([np.cos(lat) * np.cos(wrapped_lon),
+                            np.cos(lat) * np.sin(wrapped_lon),
+                            np.sin(lat)], axis=-1)
+    assert np.allclose(xyz, xyz_wrapped, atol=1e-12)
