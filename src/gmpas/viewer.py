@@ -16,10 +16,12 @@ an SSH tunnel -- the case where ncview's X11 forwarding hurts most.
 from __future__ import annotations
 
 import errno
+import getpass
 import io
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import webbrowser
@@ -622,6 +624,100 @@ def _handler(viewer: Viewer, html: str = ""):
 PORT_ATTEMPTS = 20
 
 
+def ssh_target() -> str:
+    """The name to SSH *to*, preferring one that resolves off this machine.
+
+    `gethostname()` alone gives the bare label -- `node7` -- which is not
+    something a laptop can look up. The fully qualified name usually is:
+    `node7.cluster.example.org` can be typed straight into `ssh`, which is
+    the entire point of printing the command at all.
+
+    Only taken when it genuinely extends the short name, since `getfqdn()`
+    falls back to whatever /etc/hosts says and can answer `localhost` or some
+    placeholder domain on a misconfigured box. In that case the short name is
+    no worse and reads less like a promise.
+    """
+    node = socket.gethostname()
+    fqdn = socket.getfqdn()
+    return fqdn if fqdn.startswith(f"{node}.") else node
+
+
+#: environment a batch scheduler sets on a compute node. Both pairs are read
+#: from the environment at run time -- no site, cluster or hostname is ever
+#: baked in here, so this works on any PBS or Slurm system and knows nothing
+#: about any particular one.
+JOB_ID_VARS = ("PBS_JOBID", "SLURM_JOB_ID")
+SUBMIT_HOST_VARS = ("PBS_O_HOST", "SLURM_SUBMIT_HOST")
+
+
+def in_batch_job() -> bool:
+    """Whether this is running inside a scheduler allocation."""
+    return any(os.environ.get(v) for v in JOB_ID_VARS)
+
+
+def submit_host() -> str:
+    """The host the job was submitted from -- the login node, if known.
+
+    PBS sets `PBS_O_HOST` and Slurm `SLURM_SUBMIT_HOST` to wherever the job
+    was queued, which on a cluster is exactly the node a tunnel has to hop
+    through. Reading it beats asking the user to remember it, and beats
+    hardcoding anything: the value comes from their own session.
+    """
+    for var in SUBMIT_HOST_VARS:
+        value = os.environ.get(var)
+        if value:
+            return value
+    return "<login-node>"
+
+
+def reach_lines(host: str, port: int) -> list[str]:
+    """How to actually open this server, as lines ready to print.
+
+    The tunnel command is the whole point of this banner: on anything but a
+    laptop the viewer sits on the far side of an SSH hop, and that hop is the
+    step people miss -- an editor like VS Code forwards the port silently, so
+    the first plain-terminal run looks like the server never started.
+
+    Which command is right depends on where this is running, and that is
+    knowable rather than guessable. Inside a batch job the viewer is on a
+    compute node, unreachable from outside, and the hop has to go through the
+    submitting host -- which the scheduler names in the environment. Anywhere
+    else, including on a login node, the machine is reachable directly, and
+    telling the reader to go via "<login-node>" would send them hopping
+    through the box they are already on.
+    """
+    target = ssh_target()
+    node = socket.gethostname()
+    user = getpass.getuser()
+
+    if host in ("127.0.0.1", "localhost"):
+        return [
+            f"listening on 127.0.0.1:{port} — this machine only",
+            f"  on this machine:  http://127.0.0.1:{port}",
+            f"  from another machine, forward the port first — run this THERE:",
+            f"      ssh -N -L {port}:localhost:{port} {user}@{target}",
+            f"    then open       http://localhost:{port}",
+            f"  (an HPC compute node is different: a tunnel lands on the login"
+            f" node and will not reach here, so restart with --host 0.0.0.0)",
+        ]
+
+    if in_batch_job():
+        # a compute node: reachable only through whoever queued the job
+        return [
+            f"listening on {host}:{port} — reachable as {node}:{port}",
+            f"  from your own machine, run this THERE:",
+            f"      ssh -N -L {port}:{node}:{port} {user}@{submit_host()}",
+            f"    then open       http://localhost:{port}",
+        ]
+
+    return [
+        f"listening on {host}:{port} — reachable as {target}:{port}",
+        f"  from your own machine, run this THERE:",
+        f"      ssh -N -L {port}:localhost:{port} {user}@{target}",
+        f"    then open       http://localhost:{port}",
+    ]
+
+
 def can_open_browser() -> tuple[bool, str]:
     """Whether opening a browser here is likely to work, and why not if not.
 
@@ -743,8 +839,6 @@ def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True
     so a viewer listening only on the compute node's loopback is unreachable.
     Pass host="0.0.0.0" there, exactly as one does for Jupyter.
     """
-    import socket
-
     viewer = Viewer(data_path, mesh_path, nx=nx, ny=ny)
     server = bind(_handler(viewer), port, host=host, strict=strict_port)
     port = server.server_address[1]
@@ -755,17 +849,11 @@ def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True
           f"{viewer.series.n_files} file(s), "
           f"{len(viewer.plottable_cell_vars())} plottable fields")
 
-    node = socket.gethostname()
-    if host in ("127.0.0.1", "localhost"):
-        print(f"listening on 127.0.0.1:{port} — this machine only")
-        print(f"  open  http://127.0.0.1:{port}")
-        print(f"  if {node} is a remote node, this is NOT reachable through a "
-              f"tunnel to a login node; restart with --host 0.0.0.0")
-    else:
-        print(f"listening on {host}:{port} — reachable as {node}:{port}")
-        print(f"  from your machine:  ssh -N -L {port}:{node}:{port} <login-node>")
-        print(f"  then open           http://localhost:{port}")
+    for line in reach_lines(host, port):
+        print(line)
     print("ctrl-c to stop")
+    # see the note in dashboard.serve: a redirected log stayed empty otherwise
+    sys.stdout.flush()
 
     if open_browser:
         open_in_browser(f"http://127.0.0.1:{port}")

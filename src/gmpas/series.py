@@ -65,7 +65,7 @@ LRU_SIZE = 4
 #: on a small regional mesh and ~320 MB on a 41M-cell global one, so any fixed
 #: entry count is either useless at one end or an out-of-memory kill at the
 #: other: 64 entries was ~130 MB on the mesh it was tuned against and ~20 GB
-#: on a 3.75 km global mesh, which is exactly how it got a Derecho login node
+#: on a 3.75 km global mesh, which is exactly how it got an HPC login node
 #: killed. Sizing by bytes scales itself -- dozens of small fields, or one
 #: large one, for the same footprint either way.
 VALUES_CACHE_BYTES = 512 * 1024 * 1024
