@@ -855,8 +855,17 @@ def test_being_inside_a_step_is_reported(monkeypatch):
     monkeypatch.setenv("SLURM_NTASKS", "8")
     monkeypatch.setenv("SLURM_STEP_ID", "0")
 
-    _, note = remap_mod._mpi_launch_prefix(8, "/fake/esmf")
-    assert "nested" in note and "salloc" in note
+    cmd, note = remap_mod._mpi_launch_prefix(8, "/fake/esmf")
+    # capping the task count is not enough on its own: a correctly sized step
+    # still contends with the outer one for the same nodes, and Slurm retries
+    # "Requested nodes are busy" forever rather than failing
+    assert "--overlap" in cmd
+    assert "salloc" in note
+
+    # and a job that is not nested must not get it
+    monkeypatch.delenv("SLURM_STEP_ID", raising=False)
+    cmd, _ = remap_mod._mpi_launch_prefix(8, "/fake/esmf")
+    assert "--overlap" not in cmd
 
 
 def test_pbs_still_uses_mpirun_untouched(monkeypatch):

@@ -256,18 +256,27 @@ def _srun_prefix(srun: str, ranks: int) -> tuple[list[str], str | None]:
         )
         ranks = granted
 
+    # Nested step: the shell this is running in is itself holding the nodes.
+    # Capping the task count above is not enough on its own -- even a
+    # correctly sized step contends with the outer one for the very same
+    # resources, and Slurm answers "step creation temporarily disabled,
+    # retrying (Requested nodes are busy)" indefinitely rather than failing.
+    # --overlap is the sanctioned way to say "share them": the outer step is
+    # an idle bash prompt, so there is nothing to be crowded out of.
+    extra: list[str] = []
     if os.environ.get("SLURM_STEP_ID") is not None:
+        extra.append("--overlap")
         notes.append(
             "already inside a job step (an interactive `srun --pty` shell "
-            "does this), so this one is nested and Slurm may hold it while "
-            "the outer step keeps the resources -- prefer `salloc` for "
-            "interactive work"
+            "does this), so passing --overlap to let this one share its "
+            "nodes -- `salloc` allocates without a step and avoids the "
+            "question entirely"
         )
 
     note = "; ".join(notes) or None
     if ranks <= 1:
         return [], note or "one task in this allocation -- running single-rank"
-    return [srun, "-n", str(ranks)], note
+    return [srun, "-n", str(ranks), *extra], note
 
 
 #: lines of a failed run's output to quote back in the error
