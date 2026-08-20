@@ -72,3 +72,6 @@ gmpas prep generate hfun.py -o mesh/     # needs $JIGSAWDIR and $MKGRIDFILE
 | [Layout](docs/layout.md) | what lives in which module |
 | [Differences from the MCP server](docs/mcp-server.md) | what changed on the way to a package |
 | [Status](docs/status.md) | what is implemented and what is not |
+
+
+> This document is generated using LLM (Claude)
