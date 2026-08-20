@@ -207,13 +207,67 @@ def _mpi_launch_prefix(ranks: int, tool: str) -> tuple[list[str], str | None]:
 
     srun = shutil.which("srun") if os.environ.get("SLURM_JOB_ID") else None
     if srun:
-        return [srun, "-n", str(ranks)], None
+        return _srun_prefix(srun, ranks)
 
     launcher = shutil.which("mpirun") or shutil.which("mpiexec")
     if launcher:
         return [launcher, "-np", str(ranks)], None
 
     return [], "no srun/mpirun/mpiexec on PATH -- running single-rank"
+
+
+def _slurm_int(name: str) -> int | None:
+    import os
+
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else None
+
+
+def _srun_prefix(srun: str, ranks: int) -> tuple[list[str], str | None]:
+    """`srun -n` for `ranks`, but never more tasks than the job actually has.
+
+    `-n` counts TASKS. `ranks` reaches here from `detect_cores`, which counts
+    CPUs. Those are different numbers, and on Slurm the difference is fatal
+    rather than merely wasteful: `--ntasks=4 --cpus-per-task=24` grants 96
+    CPUs but only 4 tasks, and a step asking for 96 can never be created out
+    of it -- srun sits printing "Job step creation temporarily disabled",
+    waiting for resources this allocation will never have.
+
+    PBS sites never see it. There `mpirun -np` maps processes onto the slots
+    the job already holds instead of negotiating a step, so the same request
+    that hangs under Slurm simply runs. That is why remapping works on one
+    cluster and stalls on another with no change to gmpas.
+
+    Being already inside a step is worth saying too: `srun` from within an
+    interactive `srun --pty` shell is a *nested* step, and the outer one
+    holds the resources the inner one wants. `salloc` does not have that
+    problem, and `--overlap` excuses it.
+    """
+    import os
+
+    notes: list[str] = []
+
+    granted = _slurm_int("SLURM_NTASKS") or _slurm_int("SLURM_NPROCS")
+    if granted is not None and ranks > granted:
+        notes.append(
+            f"this allocation grants {granted} task(s), so asking srun for "
+            f"{granted} rather than {ranks} -- srun -n counts tasks, not "
+            f"cores; raise --ntasks to give ESMF more"
+        )
+        ranks = granted
+
+    if os.environ.get("SLURM_STEP_ID") is not None:
+        notes.append(
+            "already inside a job step (an interactive `srun --pty` shell "
+            "does this), so this one is nested and Slurm may hold it while "
+            "the outer step keeps the resources -- prefer `salloc` for "
+            "interactive work"
+        )
+
+    note = "; ".join(notes) or None
+    if ranks <= 1:
+        return [], note or "one task in this allocation -- running single-rank"
+    return [srun, "-n", str(ranks)], note
 
 
 #: lines of a failed run's output to quote back in the error
