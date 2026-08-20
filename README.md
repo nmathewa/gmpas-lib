@@ -59,6 +59,7 @@ gmpas prep generate hfun.py -o mesh/     # needs $JIGSAWDIR and $MKGRIDFILE
 
 | | |
 |---|---|
+| [**The guide**](docs/guide.md) | **start here** — every feature explained from scratch, no MPAS background assumed |
 | [Why gmpas exists](docs/why.md) | the problem with lat-lon tooling, and why this is fast |
 | [Installation](docs/installation.md) | conda, pip, extras, and the external programs |
 | [Command line](docs/command-line.md) | every command and its flags |
