@@ -8,12 +8,18 @@ import xarray as xr
 
 from conftest import write_grid_mesh
 from gmpas.cli import main
+from gmpas.mesh import EARTH_RADIUS
 from gmpas.prep.region import (
     N_BDY_LAYERS,
     _flood_fill,
     _relaxation_zones,
     _walk_boundary,
+    circle_boundary,
     create_region,
+    ellipse_boundary,
+    great_circle_distance,
+    lonlat_to_xyz,
+    region_from_pts,
     write_graph_info,
 )
 
@@ -278,3 +284,111 @@ def test_cli_accepts_an_explicit_interior_point(tmp_path):
                 "--polygon", "10,10", "10,28", "28,28", "28,10",
                 "--point", "19", "19"]) == 0
     assert out.exists()
+
+
+def test_cli_requires_exactly_one_of_polygon_or_pts(tmp_path, capsys):
+    path = write_grid_mesh(tmp_path / "m.nc", **GRID)
+
+    assert main(["prep", "create-region", str(path)]) == 1
+    assert "exactly one of --polygon or --pts" in capsys.readouterr().err
+
+
+# --------------------------------------------------------- circle/ellipse
+
+def test_circle_boundary_points_are_all_at_the_requested_radius():
+    lat, lon = circle_boundary(-2.0, 147.0, 3_000_000.0, n=100)
+    center = lonlat_to_xyz(np.radians(147.0), np.radians(-2.0))
+    pts = lonlat_to_xyz(np.radians(lon), np.radians(lat))
+    dist_m = great_circle_distance(np.broadcast_to(center, pts.shape), pts) * EARTH_RADIUS
+    assert dist_m == pytest.approx(3_000_000.0, abs=1.0)
+
+
+def test_ellipse_boundary_axis_tips_land_at_the_right_distance_and_bearing():
+    """At orientation=0: r=0 is the semi-major tip, due north; a quarter
+    turn around is the semi-minor tip, due east."""
+    lat, lon = ellipse_boundary(0.0, 0.0, 2_000_000.0, 1_000_000.0, 0.0, n=100)
+
+    assert lat[0] > 0 and lon[0] == pytest.approx(0.0, abs=1e-6)     # north
+    assert lat[25] == pytest.approx(0.0, abs=1e-6) and lon[25] > 0   # east
+
+    center = lonlat_to_xyz(0.0, 0.0)
+    major_tip = lonlat_to_xyz(np.radians(lon[0]), np.radians(lat[0]))
+    minor_tip = lonlat_to_xyz(np.radians(lon[25]), np.radians(lat[25]))
+    major_dist = great_circle_distance(center, major_tip) * EARTH_RADIUS
+    minor_dist = great_circle_distance(center, minor_tip) * EARTH_RADIUS
+    assert major_dist == pytest.approx(2_000_000.0)
+    assert minor_dist == pytest.approx(1_000_000.0)
+
+
+def test_ellipse_orientation_rotates_the_major_axis_clockwise_from_north():
+    """orientation=90 puts the semi-major tip (r=0) due east instead of north."""
+    lat, lon = ellipse_boundary(0.0, 0.0, 2_000_000.0, 1_000_000.0, 90.0, n=100)
+    assert lat[0] == pytest.approx(0.0, abs=1e-6)
+    assert lon[0] > 0
+
+
+# -------------------------------------------------------------------- .pts
+
+def test_pts_circle_matches_the_manus_example(tmp_path):
+    """The exact .pts file from the MPAS-Limited-Area README/docs."""
+    path = tmp_path / "manus.pts"
+    path.write_text(
+        "Name: Manus\n"
+        "Type: circle\n"
+        "Point: -2.0, 147.0\n"
+        "radius: 3000000.0   # Meters\n"
+    )
+    spec = region_from_pts(path)
+    assert spec.name == "Manus"
+    assert (spec.point_lat_deg, spec.point_lon_deg) == (-2.0, 147.0)
+    assert len(spec.boundary_lat_deg) == 100
+
+
+def test_pts_custom_polygon_uses_the_coordinate_lines(tmp_path):
+    path = tmp_path / "custom.pts"
+    path.write_text(
+        "Name: conus\n"
+        "Type: custom\n"
+        "Point: 40.0, -100.0\n"
+        "50.0, -129.0\n"
+        "50.0, -65.0\n"
+        "20.0, -65.0\n"
+        "20.0, -129.0\n"
+    )
+    spec = region_from_pts(path)
+    assert spec.name == "conus"
+    assert spec.boundary_lat_deg.tolist() == [50.0, 50.0, 20.0, 20.0]
+    assert spec.boundary_lon_deg.tolist() == [-129.0, -65.0, -65.0, -129.0]
+
+
+def test_pts_ellipse_requires_all_three_axis_fields(tmp_path):
+    path = tmp_path / "e.pts"
+    path.write_text("Name: e\nType: ellipse\nPoint: 0,0\nSemi-major-axis: 1000\n")
+    with pytest.raises(ValueError, match="semi-minor-axis"):
+        region_from_pts(path)
+
+
+def test_pts_channel_is_rejected(tmp_path):
+    path = tmp_path / "c.pts"
+    path.write_text("Name: c\nType: channel\nPoint: 0,0\n"
+                    "Upper-lat: 10\nLower-lat: -10\n")
+    with pytest.raises(ValueError, match="channel"):
+        region_from_pts(path)
+
+
+def test_pts_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        region_from_pts(tmp_path / "absent.pts")
+
+
+def test_cli_create_region_from_a_pts_circle_file(tmp_path, monkeypatch):
+    path = write_grid_mesh(tmp_path / "m.nc", nrows=40, ncols=40,
+                           lon0_deg=120.0, lat0_deg=-30.0,
+                           dlon_deg=1.5, dlat_deg=1.5, sphere_radius=1.0)
+    pts = tmp_path / "manus.pts"
+    pts.write_text("Name: Manus\nType: circle\nPoint: -2.0, 147.0\n"
+                   "radius: 3000000.0\n")
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["prep", "create-region", str(path), "--pts", str(pts)]) == 0
+    assert (tmp_path / "Manus.region.nc").exists()
