@@ -157,16 +157,55 @@ def test_the_view_cache_does_not_grow_without_bound(small_viewer):
     """Nothing evicted this before: panning and zooming around over a long
     session -- exactly what setting up several animations for different
     variables looks like -- grew _views/_overlays forever, for the life of
-    the server process."""
-    from gmpas.viewer import VIEW_LRU_SIZE
+    the server process.
 
+    The bound is bytes, not entries. An entry is nx*ny*(8+1) bytes, so a count
+    only bounds memory while the window size is fixed: twelve entries is
+    ~178 MB at 1200x700 and ~1.1 GB at 3840x2160.
+    """
     box = small_viewer.home
-    for i in range(VIEW_LRU_SIZE + 8):
+    budget = small_viewer._views.budget
+    for i in range(40):
         small_viewer.view(box, 80 + i, 50)
         small_viewer.overlay(box, 80 + i, 50)
 
-    assert len(small_viewer._views) == VIEW_LRU_SIZE
-    assert len(small_viewer._overlays) == VIEW_LRU_SIZE
+    assert small_viewer._views.nbytes <= budget
+    assert small_viewer._overlays.nbytes <= budget
+    # these entries are tiny, so nothing should have been evicted to hold 40
+    assert len(small_viewer._views) == 40
+
+
+def test_the_view_cache_evicts_once_the_budget_is_reached(small_viewer, monkeypatch):
+    """The property that matters at scale, forced at fixture scale.
+
+    A budget of a few kilobytes against 80x50 indices (~36 KB each) means the
+    cache can hold one, which is exactly what a 4K browser window does to a
+    256 MB budget.
+    """
+    from gmpas.cache import BuildCache
+
+    small_viewer._views = BuildCache(budget=50_000)
+    box = small_viewer.home
+    for i in range(6):
+        small_viewer.view(box, 80 + i, 50)
+
+    assert small_viewer._views.nbytes <= 50_000
+    assert len(small_viewer._views) < 6
+
+
+def test_an_entry_larger_than_the_whole_budget_is_not_cached(small_viewer):
+    """Caching it would evict everything else and still leave it as the sole
+    occupant, to be evicted itself by the next distinct request. Same rule,
+    and same reasoning, as Series._remember."""
+    from gmpas.cache import BuildCache
+
+    small_viewer._views = BuildCache(budget=100)
+    view = small_viewer.view(small_viewer.home, 80, 50)
+
+    assert view.nbytes > 100
+    assert len(small_viewer._views) == 0
+    # and it still returns a working index rather than failing
+    assert view.idx.size == 80 * 50
 
 
 def test_a_frame_can_be_asked_for_at_a_larger_size(small_viewer):

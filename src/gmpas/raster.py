@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import timing
 from .mesh import MpasMesh
 
 #: above this many cells, polygon rendering stops being the faster option
@@ -49,6 +50,11 @@ def rasterize(mesh: MpasMesh, values: np.ndarray,
     the nearest boundary cell and smear it across the whole frame; mask_outside
     blanks anything further from a cell centre than that cell's own radius.
     """
+    with timing.step("raster.rasterize", px=nx * ny):
+        return _rasterize(mesh, values, extent, nx, ny, mask_outside)
+
+
+def _rasterize(mesh, values, extent, nx, ny, mask_outside):
     extent = extent or mesh.extent
     lon, lat = target_grid(extent, nx, ny)
     lon2, lat2 = np.meshgrid(lon, lat)

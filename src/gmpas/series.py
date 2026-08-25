@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from . import timing
 from .data import find_mesh_beside, plottable, select
 from .mesh import MpasMesh, has_mesh
 from .paths import resolve_path
@@ -110,7 +111,8 @@ def expand(paths) -> list[Path]:
             unique.append(p)
     if not unique:
         raise FileNotFoundError(f"no files matched {paths!r}")
-    return order(unique)
+    with timing.step("series.expand", files=len(unique)):
+        return order(unique)
 
 
 def label_of(path: Path) -> str:
@@ -233,15 +235,19 @@ class Series:
         import netCDF4
 
         counts = dict(self._counts)
-        for path in self.files:
-            if path in counts:
-                continue
-            try:
-                with self._lock, netCDF4.Dataset(path) as nc:
-                    dim = nc.dimensions.get("Time")
-                    counts[path] = len(dim) if dim is not None else 1
-            except Exception:
-                counts[path] = 1          # unreadable: leave it as one step
+        opened = 0
+        with timing.step("series.scan", files=len(self.files)) as t:
+            for path in self.files:
+                if path in counts:
+                    continue
+                try:
+                    opened += 1
+                    with self._lock, netCDF4.Dataset(path) as nc:
+                        dim = nc.dimensions.get("Time")
+                        counts[path] = len(dim) if dim is not None else 1
+                except Exception:
+                    counts[path] = 1      # unreadable: leave it as one step
+            t.note(opened=opened)
         self._counts = counts
         # plain assignment, so a reader mid-request keeps a consistent list
         self.steps, self.labels = self._axis()

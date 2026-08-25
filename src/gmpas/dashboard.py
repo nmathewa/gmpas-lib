@@ -214,7 +214,7 @@ def build(data_path=None, mesh_path: str = "", hfun_path: str = "",
                       f"{len(run.series)} steps · {n_vars} cell variables", run))
         built.append(("mesh", "mesh",
                       f"{run.mesh.path.name} · {run.mesh.n_cells:,} cells",
-                      MeshViewer(run.mesh.path, nx=nx, ny=ny)))
+                      MeshViewer(run.mesh, nx=nx, ny=ny)))
     elif mesh_path:
         mv = MeshViewer(mesh_path, nx=nx, ny=ny)
         built.append(("mesh", "mesh",

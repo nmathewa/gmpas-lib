@@ -28,6 +28,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from ..cache import BuildCache
 from ..raster import target_grid
 from ..viewer import PageHandler, _overlay, _png, bind, ramp
 from .hfun import GRADIENT_GUIDELINE, Hfun, diagnose
@@ -56,9 +57,8 @@ class HfunViewer:
         # a distance function is defined over the whole sphere, so there is no
         # domain to fit to -- the home view is the world
         self.home = (-180.0, 180.0, -90.0, 90.0)
-        self._frames: dict[tuple, np.ndarray] = {}
-        self._overlays: dict[tuple, bytes] = {}
-        self._lock = threading.Lock()
+        self._frames = BuildCache()
+        self._overlays = BuildCache()
 
     # -- fields ----------------------------------------------------------
 
@@ -115,20 +115,23 @@ class HfunViewer:
     def values(self, field: str, extent, nx: int, ny: int) -> np.ndarray:
         """The field on this view's pixel centres, from one `get_hfun` call."""
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        with self._lock:
-            if key not in self._frames:
-                lon, lat = target_grid(tuple(extent), nx, ny)
-                lon2, lat2 = np.meshgrid(lon, lat)
-                h = self.hfun.sample_degrees(lon2, lat2)
+        def build():
+            lon, lat = target_grid(tuple(extent), nx, ny)
+            lon2, lat2 = np.meshgrid(lon, lat)
+            h = self.hfun.sample_degrees(lon2, lat2)
 
-                # Past a pole there is no sphere left to have a grid distance.
-                # get_hfun answers anyway -- sin and cos are periodic, so it
-                # folds back and returns a mirror image of the other side --
-                # and that fabricated band has no coastline to sit under.
-                # Frames are rendered 1.4x wider than the window, so a global
-                # view always asks for some of it. Blank it instead.
-                self._frames[key] = np.where(np.abs(lat2) > 90.0, np.nan, h)
-            h = self._frames[key]
+            # Past a pole there is no sphere left to have a grid distance.
+            # get_hfun answers anyway -- sin and cos are periodic, so it
+            # folds back and returns a mirror image of the other side --
+            # and that fabricated band has no coastline to sit under.
+            # Frames are rendered 1.4x wider than the window, so a global
+            # view always asks for some of it. Blank it instead.
+            return np.where(np.abs(lat2) > 90.0, np.nan, h)
+
+        # A user's get_hfun is arbitrary code and can be slow, which is the
+        # whole complaint in issue 25 -- so it must not run under a lock that
+        # every other request in the process is waiting on.
+        h = self._frames.get(key, build)
 
         if field == "cell_width_km":
             return h
@@ -140,10 +143,7 @@ class HfunViewer:
     def overlay(self, extent, nx=None, ny=None) -> bytes:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        with self._lock:
-            if key not in self._overlays:
-                self._overlays[key] = _overlay(extent, nx, ny)
-            return self._overlays[key]
+        return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
 
     def frame(self, field: str, extent, nx=None, ny=None,
               compress: int = 1) -> tuple[bytes, float, float]:

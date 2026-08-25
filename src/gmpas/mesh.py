@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from . import timing
 from .paths import cache_dir, resolve_path
 
 R2D = 180.0 / np.pi
@@ -98,11 +99,12 @@ def _signature(path: Path) -> str:
     nCells/nEdges come from the header, which netCDF reads without touching any
     data, so this stays cheap enough to run on every load.
     """
-    st = path.stat()
-    n_cells, n_edges = _header_dims(path)
-    raw = (f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}"
-           f"|{n_cells}|{n_edges}")
-    return hashlib.sha1(raw.encode()).hexdigest()[:16]
+    with timing.step("mesh.signature"):
+        st = path.stat()
+        n_cells, n_edges = _header_dims(path)
+        raw = (f"{path.resolve()}|{st.st_size}|{st.st_mtime_ns}"
+               f"|{n_cells}|{n_edges}")
+        return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
 def cache_path(path: Path) -> Path:
@@ -225,7 +227,8 @@ class MpasMesh:
             # not the branch-and-bound search query() runs afterward -- nearest
             # cell results are identical either way, and construction is
             # measurably faster on a large mesh.
-            self._tree = cKDTree(self.xyz_cell, balanced_tree=False)
+            with timing.step("mesh.tree_build", cells=self.n_cells):
+                self._tree = cKDTree(self.xyz_cell, balanced_tree=False)
         return self._tree
 
     def cell_of(self, lon: np.ndarray, lat: np.ndarray) -> np.ndarray:
@@ -261,8 +264,10 @@ class MpasMesh:
             print(f"gmpas: no cache for {path.name} yet — building geometry at "
                   f"{cache} (first use of this mesh; large global meshes can "
                   f"take a while and real memory)", file=sys.stderr)
-            _build_to_dir(path, cache)
-        return cls._mapped(path, cache)
+            with timing.step("mesh.build"):
+                _build_to_dir(path, cache)
+        with timing.step("mesh.cache_load"):
+            return cls._mapped(path, cache)
 
     @classmethod
     def _mapped(cls, path: Path, cache: Path) -> "MpasMesh":
@@ -524,6 +529,10 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
 
     nc = netCDF4.Dataset(path)
     nc.set_auto_mask(False)
+    # bound before the try: the cleanup handler touches it, and the earliest
+    # failures in here (missing mesh variables, no room to build) happen well
+    # before the loop sizes are known
+    bar = None
     try:
         missing = [v for v in MESH_VARS if v not in nc.variables]
         if missing:
@@ -543,6 +552,22 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
         n_edges = len(nc.dimensions["nEdges"])
         max_edges = len(nc.dimensions["maxEdges"])
 
+        # Five chunked passes follow (vertices, cells, edges, cell scalars,
+        # edge scalars). Total blocks is what makes an ETA meaningful; below
+        # one block per pass the mesh is small enough that the whole build is
+        # over before a bar would render, so say nothing.
+        def _blocks(n):
+            return (n + chunk - 1) // chunk
+
+        total_blocks = (_blocks(n_vertices) + 2 * _blocks(n_cells)
+                        + 2 * _blocks(n_edges))
+        if total_blocks > 5:
+            bar = timing.Progress(total_blocks, unit="block")
+
+        def tick():
+            if bar is not None:
+                bar.advance()
+
         # lon_v/lat_v must stay fully resident for the fancy-indexing below
         # (lon_v[voc], lat_v[voe] pick arbitrary, non-sequential vertices), so
         # unlike everything else in this function they can't become a genuine
@@ -555,6 +580,7 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             j = min(i + chunk, n_vertices)
             lon_v[i:j] = _wrap180(lon_v_var[i:j] * R2D)
             lat_v[i:j] = lat_v_var[i:j] * R2D
+            tick()
 
         bounds = _Bounds()
 
@@ -577,6 +603,7 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             verts.append(block)
             cw.append(wrapped)
             bounds.update(block)
+            tick()
         verts.close(); cw.close()
 
         segs = _NpyWriter(tmp / "edge_segs.npy", dt, (n_edges, 2, 2))
@@ -591,6 +618,7 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             block, wrapped = _unwrap_polygons(block)
             segs.append(block)
             ew.append(wrapped)
+            tick()
         segs.close(); ew.close()
 
         # nothing past this point indexes by vertex, so the full nVertices
@@ -637,6 +665,7 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
 
             lonc_w.append(_wrap180(lonc_var[i:j] * R2D))
             latc_w.append(latc_var[i:j] * R2D)
+            tick()
         xyz_w.close(); area_w.close(); lonc_w.close(); latc_w.close()
 
         # pure elementwise scale/wrap, no reduction at all -- the simplest
@@ -651,7 +680,11 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             lone_w.append(_wrap180(lone_var[i:j] * R2D))
             late_w.append(late_var[i:j] * R2D)
             ang_w.append(ang_var[i:j])
+            tick()
         lone_w.close(); late_w.close(); ang_w.close()
+
+        if bar is not None:
+            bar.close()
 
         coverage = float(area_sum / (4.0 * np.pi * radius**2))
         extent = ((-180.0, 180.0, -90.0, 90.0) if coverage >= GLOBAL_COVERAGE
@@ -667,6 +700,8 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
     except BaseException:
         # a build that died because the filesystem was full must not leave its
         # partial output sitting on that filesystem
+        if bar is not None:
+            bar.close()
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     finally:

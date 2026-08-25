@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from . import timing
 from .mesh import MpasMesh, has_mesh
 from .paths import resolve_path
 
@@ -59,17 +60,24 @@ def find_mesh_beside(dpath: Path, n_cells: int) -> Path | None:
     """
     import netCDF4
 
-    for cand in sorted(dpath.parent.glob("*.nc")):
-        if cand == dpath:
-            continue
+    with timing.step("mesh.discover") as t:
+        candidates = sorted(dpath.parent.glob("*.nc"))
+        opened = 0
         try:
-            with netCDF4.Dataset(cand) as nc:
-                dim = nc.dimensions.get("nCells")
-                if has_mesh(nc) and dim is not None and len(dim) == n_cells:
-                    return cand
-        except Exception:
-            continue
-    return None
+            for cand in candidates:
+                if cand == dpath:
+                    continue
+                try:
+                    opened += 1
+                    with netCDF4.Dataset(cand) as nc:
+                        dim = nc.dimensions.get("nCells")
+                        if has_mesh(nc) and dim is not None and len(dim) == n_cells:
+                            return cand
+                except Exception:
+                    continue
+            return None
+        finally:
+            t.note(scanned=len(candidates), opened=opened)
 
 
 def spatial_dim(da: xr.DataArray) -> str:
