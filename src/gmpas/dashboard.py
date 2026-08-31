@@ -151,9 +151,13 @@ def router(sources: list[Source]):
 
 
 def serve(sources: list[Source], port: int = 8765, host: str = "127.0.0.1",
-          open_browser: bool = True, strict_port: bool = False,
+          open_browser: bool = False, strict_port: bool = False,
           banner: str = ""):
-    """Start one server carrying every source, and block until interrupted."""
+    """Start one server carrying every source, and block until interrupted.
+
+    `open_browser` is off by default: see `viewer.open_in_browser` for why
+    launching one unasked is the wrong default where gmpas actually runs.
+    """
     import sys
 
     from .viewer import bind, open_in_browser, reach_lines

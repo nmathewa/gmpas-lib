@@ -23,16 +23,15 @@ none of it is modified.
 from __future__ import annotations
 
 import json
-import socket
-import threading
-import webbrowser
+import sys
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
 from ..cache import BuildCache
 from ..mesh import MpasMesh
-from ..viewer import PageHandler, ViewIndex, _overlay, _png, bind, ramp
+from ..viewer import (PageHandler, ViewIndex, _overlay, _png, bind,
+                      ramp, reach_lines)
 from .layout import page
 
 #: the one colormap this section uses. Sequential and perceptually uniform,
@@ -204,7 +203,7 @@ def _handler(viewer: MeshViewer, html: str):
 
 
 def serve(mesh_path, port: int = 8765, nx: int = 1200, ny: int = 700,
-          open_browser: bool = True, host: str = "127.0.0.1",
+          host: str = "127.0.0.1",
           strict_port: bool = False):
     """Start the mesh viewer and block until interrupted.
 
@@ -221,21 +220,14 @@ def serve(mesh_path, port: int = 8765, nx: int = 1200, ny: int = 700,
     print(f"{viewer.mesh.n_cells:,} cells, {viewer.mesh.n_edges:,} edges, {kind} — "
           f"cell width {width.min():.3g} to {width.max():.3g} km")
 
-    node = socket.gethostname()
-    if host in ("127.0.0.1", "localhost"):
-        print(f"listening on 127.0.0.1:{port} — this machine only")
-        print(f"  open  http://127.0.0.1:{port}")
-        print(f"  if {node} is a remote node, this is NOT reachable through a "
-              f"tunnel to a login node; restart with --host 0.0.0.0")
-    else:
-        print(f"listening on {host}:{port} — reachable as {node}:{port}")
-        print(f"  from your machine:  ssh -N -L {port}:{node}:{port} <login-node>")
-        print(f"  then open           http://localhost:{port}")
+    # reach_lines rather than a hand-rolled banner: this one still printed
+    # "<login-node>" for the reader to substitute, and could not tell a login
+    # node from a compute node. The shared one reads the scheduler's own
+    # environment and prints a command with nothing left to fill in.
+    for line in reach_lines(host, port):
+        print(line)
     print("ctrl-c to stop")
-
-    if open_browser:
-        threading.Timer(0.5, webbrowser.open,
-                        args=(f"http://127.0.0.1:{port}",)).start()
+    sys.stdout.flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

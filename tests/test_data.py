@@ -390,3 +390,102 @@ def test_the_values_budget_honours_its_environment_override(monkeypatch):
 
     monkeypatch.delenv(VALUES_CACHE_ENV)
     assert values_budget() == VALUES_CACHE_BYTES
+
+
+# --------------------------------------------- files that are not really data
+
+
+def test_an_applestore_sidecar_is_not_mistaken_for_output(tmp_path):
+    """`._history....nc` is a resource fork, and it sorted first.
+
+    A run directory that has been through a Mac carries one of these beside
+    every real file. They share the timestamp `order()` sorts on, and break
+    the tie in their own favour, so the sidecar became `files[0]` -- the one
+    file the constructor opens -- and the viewer died on it before serving
+    anything.
+    """
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=2)
+    real = sorted(run.glob("history.*.nc"))
+    for path in real:
+        (path.parent / f"._{path.name}").write_bytes(b"Mac OS X\x00\x02" * 8)
+
+    s = Series(run)
+    try:
+        assert [p.name for p in s.files] == [p.name for p in real]
+    finally:
+        s.close()
+
+
+def test_an_explicitly_named_sidecar_is_still_honoured(tmp_path):
+    """Filtering applies to globbing, not to a path somebody typed.
+
+    Deciding that a named file was not meant is worse than any error opening
+    it produces -- the user can see the name they gave.
+    """
+    from gmpas.series import expand
+
+    run = _run_dir(tmp_path, n_files=1)
+    sidecar = run / "._history.2012-02-25_00.00.00.nc"
+    sidecar.write_bytes(b"Mac OS X\x00\x02")
+
+    assert expand(sidecar) == [sidecar]
+
+
+def test_an_unreadable_file_is_skipped_rather_than_fatal(tmp_path, capsys):
+    """A half-written file is a normal state on HPC, not a corrupt run.
+
+    A model still writing its newest history file, or a transfer still in
+    flight, used to take the whole viewer down with a netCDF traceback
+    instead of serving the files that were fine.
+    """
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=3)
+    truncated = sorted(run.glob("*.nc"))[0]
+    truncated.write_bytes(b"CDF\x01 truncated")   # right suffix, no contents
+
+    s = Series(run)
+    try:
+        assert truncated not in s.files
+        assert len(s.files) == 2
+    finally:
+        s.close()
+
+    err = capsys.readouterr().err
+    assert truncated.name in err                  # never dropped in silence
+
+
+def test_a_directory_of_nothing_readable_still_says_so(tmp_path):
+    """Skipping the unreadable is not the same as pretending it worked."""
+    import pytest
+
+    from gmpas.series import Series
+
+    run = tmp_path / "run"
+    run.mkdir()
+    for i in range(2):
+        (run / f"history.2012-02-25_{i:02d}.00.00.nc").write_bytes(b"not netcdf")
+
+    with pytest.raises(OSError, match="no readable file"):
+        Series(run)
+
+
+def test_every_series_shares_one_netcdf_lock(tmp_path):
+    """The hazard is HDF5's, not any object's, so the lock cannot be per-object.
+
+    Two Series in one process -- which is what a dashboard holds -- used to
+    take different locks and enter the C library together. That does not
+    corrupt a frame, it kills the process with SIGSEGV and no traceback.
+    """
+    from gmpas import netcdf
+    from gmpas.series import Series
+
+    run = _run_dir(tmp_path, n_files=2)
+    a, b = Series(run), Series(run)
+    try:
+        assert a._lock is b._lock is netcdf.LOCK
+    finally:
+        a.close()
+        b.close()

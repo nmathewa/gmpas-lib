@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import threading
 from collections import OrderedDict
 from datetime import datetime
@@ -27,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-from . import timing
+from . import netcdf, timing
 from .data import find_mesh_beside, plottable, select
 from .mesh import MpasMesh, has_mesh
 from .paths import resolve_path
@@ -88,6 +89,29 @@ def values_budget() -> int:
         return VALUES_CACHE_BYTES
 
 
+def is_sidecar(path: Path) -> bool:
+    """Whether this is a metadata shadow of a real file rather than data.
+
+    macOS writes an AppleDouble sidecar next to every file it copies onto a
+    filesystem that cannot hold a resource fork -- `._history.....nc`, four
+    kilobytes carrying the same `.nc` suffix as the file it shadows. Any run
+    directory that has been through a Mac, a USB stick, or an rsync from one
+    holds a shadow copy of itself, and this is common on HPC precisely because
+    that is how data arrives there.
+
+    They matter more than their size suggests: `order()` sorts on the
+    timestamp in the name, which a sidecar copies verbatim, and ties break on
+    the name, where `._x.nc` sorts before `x.nc`. So the sidecar became
+    `files[0]` -- the one file `Series.__init__` opens eagerly -- and the
+    viewer died with `NetCDF: Unknown file format` before serving a frame.
+
+    Only ever applied to names *found by globbing*: a path given explicitly is
+    always honoured, since guessing that a user did not mean the file they
+    named is worse than any error it produces.
+    """
+    return path.name.startswith("._")
+
+
 def expand(paths) -> list[Path]:
     """Turn a path, glob, directory or list into a sorted list of files."""
     if isinstance(paths, (str, Path)):
@@ -97,10 +121,11 @@ def expand(paths) -> list[Path]:
     for item in paths:
         p = resolve_path(item)
         if p.is_dir():
-            out.extend(p.glob("*.nc"))
+            out.extend(f for f in p.glob("*.nc") if not is_sidecar(f))
         elif any(ch in str(item) for ch in "*?["):
             base = p.parent
-            out.extend(sorted(base.glob(Path(str(item)).name)))
+            out.extend(sorted(f for f in base.glob(Path(str(item)).name)
+                              if not is_sidecar(f)))
         else:
             out.append(p)
 
@@ -164,10 +189,16 @@ class Series:
         # frame rather than raising. `_scan`'s own handles are included, even
         # though they never touch this cache, because the race is in the
         # underlying C library, not just this dict.
-        self._lock = threading.Lock()
+        #
+        # And for that same reason it is the *process-wide* lock rather than
+        # one per Series: a per-instance lock cannot exclude the other Series
+        # a dashboard holds, nor the `MpasMesh.load` on its mesh page, and
+        # those enter HDF5 concurrently with this one's background scan. See
+        # netcdf.LOCK.
+        self._lock = netcdf.LOCK
 
         with self._lock:
-            first = self._dataset(self.files[0])
+            first = self._open_first()
 
         if mesh_path:
             self.mesh = MpasMesh.load(resolve_path(mesh_path))
@@ -218,6 +249,53 @@ class Series:
                 steps.append((path, i))
                 labels.append(base if n == 1 else f"{base} +{i}")
         return steps, labels
+
+    def _open_first(self) -> xr.Dataset:
+        """The first file that actually opens, dropping any that do not.
+
+        Caller must hold `self._lock`.
+
+        One unreadable file used to end the run: `__init__` opened `files[0]`
+        eagerly and let the netCDF error out of the constructor, so `gmpas
+        view` on a directory exited with a traceback instead of serving the
+        other thousand files. On HPC that is a normal state, not a corrupt
+        one -- a model still running leaves its newest history file half
+        written, and a transfer still in flight leaves a truncated one.
+
+        A file that cannot be opened is dropped from the axis rather than
+        held with a placeholder: its timestep count is unknown, so any
+        placeholder would put a step on the slider that renders nothing. It
+        is reported by name on stderr, never skipped in silence -- if the
+        file was supposed to be readable, that is the only clue the user
+        gets, and the alternative reads as gmpas quietly losing data.
+        """
+        problems: list[str] = []
+        failures: list[Exception] = []
+        while self.files:
+            try:
+                ds = self._dataset(self.files[0])
+            except Exception as exc:
+                bad = self.files.pop(0)
+                problems.append(f"  {bad.name}: {exc}")
+                failures.append(exc)
+                continue
+            if problems:
+                print(f"gmpas: skipped {len(problems)} unreadable file(s):\n"
+                      + "\n".join(problems), file=sys.stderr)
+            return ds
+
+        # A path that simply is not there stays a FileNotFoundError. It is the
+        # overwhelmingly common way to get here -- a typo in an argument -- and
+        # the CLI turns that one into a plain message rather than a traceback.
+        # Widening it to OSError would have made `gmpas info typo.nc` traceback.
+        kind = (FileNotFoundError
+                if failures and all(isinstance(e, FileNotFoundError)
+                                    for e in failures)
+                else OSError)
+        raise kind(
+            "no readable file among those matched — every candidate failed "
+            "to open:\n" + "\n".join(problems)
+        )
 
     def _scan(self) -> None:
         """Count timesteps in every file, then swap the axis in.

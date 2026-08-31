@@ -52,16 +52,18 @@ examples:
   gmpas target -o dst.scrip.nc              reads target_domain from this directory
   gmpas target run/history.nc               and which fields would be remapped
 
-  gmpas view  run/                          browse interactively in a browser
-  gmpas view  run/ --host 0.0.0.0 --no-browser   on an HPC compute node
+  gmpas view  run/                          serve it, and print a URL to open
+  gmpas view  run/ --host 0.0.0.0           on an HPC compute node
 
   gmpas prep hfun     hfun.py --check     the mesh you are about to build
   gmpas prep generate hfun.py -o mesh/    run JIGSAW and build it
 
-on a cluster the job runs on a compute node but your tunnel lands on the login
-node, so bind all interfaces and tunnel to the node by name:
+`view` never opens a browser for you -- it prints the URL and, when that is on
+another machine, the exact ssh command to reach it. Copy them; nothing here
+needs a display. On a cluster the job runs on a compute node but your tunnel
+lands on the login node, so bind all interfaces and tunnel to the node by name:
 
-  compute node:  gmpas view /scratch/run/ --host 0.0.0.0 --no-browser
+  compute node:  gmpas view /scratch/run/ --host 0.0.0.0
   your machine:  ssh -N -L 8765:<compute-node>:8765 <login-node>
                  then open http://localhost:8765
 
@@ -524,7 +526,7 @@ def _dashboard(args, data_path=None, mesh_path="", hfun_path="") -> int:
     # and was allowed to wander to 8766 when busy, leaving the tunnel pointing
     # at nothing and looking, from the browser, exactly like a dead server.
     serve(sources, port=DEFAULT_PORT if args.port is None else args.port,
-          host=args.host, open_browser=not args.no_browser,
+          host=args.host, open_browser=args.browser,
           strict_port=args.port is not None, banner=banner)
     return 0
 
@@ -560,7 +562,7 @@ def _generic_view(args) -> int:
                     f"{gv.steps} step{'s' if gv.steps != 1 else ''}",
                     _handler(gv, PAGE))
     serve([source], port=DEFAULT_PORT if args.port is None else args.port,
-          host=args.host, open_browser=not args.no_browser,
+          host=args.host, open_browser=args.browser,
           strict_port=args.port is not None,          # see the note in _dashboard
           banner=f"gmpas view --generic · {gv.path.name}")
     return 0
@@ -707,6 +709,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="mesh geometry cache directory for this run, overriding "
              "$GMPAS_CACHE_DIR (default: $GMPAS_CACHE_DIR or ~/.cache/gmpas/mesh)")
 
+    def browser_opts(sp):
+        """Opting *in* to a browser, and keeping the old opt-out accepted.
+
+        Not opening one is now the default, so `--no-browser` asks for what
+        already happens. It stays accepted and hidden rather than removed:
+        it is in every existing job script, every note someone wrote down and
+        this project's own older docs, and failing those runs with "unrecognized
+        argument" to make a point about a flag that is now a no-op would be
+        pure cost to the user.
+        """
+        sp.add_argument("--browser", action="store_true",
+                        help="also try to open a browser here (off by "
+                             "default: on a login or compute node this "
+                             "usually lands in a terminal browser)")
+        sp.add_argument("--no-browser", action="store_true",
+                        help=argparse.SUPPRESS)
+
     def common(sp):
         # nargs="+" so an unquoted glob works too: the shell expands it into
         # many arguments, and Series.expand already accepts a list
@@ -803,8 +822,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "node so a tunnel from the login node can reach it")
     v.add_argument("--width", type=int, default=1200, help="raster width in pixels")
     v.add_argument("--height", type=int, default=700)
-    v.add_argument("--no-browser", action="store_true",
-                   help="do not open a browser (useful over an SSH tunnel)")
+    browser_opts(v)
     v.set_defaults(func=_view)
 
     # -- preprocessing ---------------------------------------------------
@@ -837,8 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--width", type=int, default=1200,
                     help="raster width in pixels")
     pv.add_argument("--height", type=int, default=700)
-    pv.add_argument("--no-browser", action="store_true",
-                    help="do not open a browser (useful over an SSH tunnel)")
+    browser_opts(pv)
     pv.add_argument("--cache-dir", **_cache_dir_opt)
     pv.set_defaults(func=_prep_view)
 
@@ -863,8 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--width", type=int, default=1200,
                     help="raster width in pixels")
     ph.add_argument("--height", type=int, default=700)
-    ph.add_argument("--no-browser", action="store_true",
-                    help="do not open a browser (useful over an SSH tunnel)")
+    browser_opts(ph)
     ph.add_argument("--cache-dir", **_cache_dir_opt)
     ph.set_defaults(func=_prep_hfun)
 
@@ -1014,7 +1030,12 @@ def main(argv=None) -> int:
     except (RemapError, MeshCacheError, GenerateError) as exc:
         print(f"\ngmpas: {exc}", file=sys.stderr)
         return 1
-    except (FileNotFoundError, KeyError, ValueError) as exc:
+    except (OSError, KeyError, ValueError) as exc:
+        # OSError rather than FileNotFoundError alone: a file that is present
+        # but unreadable -- truncated mid-transfer, still being written by a
+        # running model, no permission on a shared scratch directory -- is
+        # exactly as much a user's problem to fix and as little a bug, and it
+        # used to come out as a netCDF traceback.
         print(f"gmpas: {exc}", file=sys.stderr)
         return 1
     except ModuleNotFoundError as exc:

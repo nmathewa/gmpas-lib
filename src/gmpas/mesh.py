@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-from . import timing
+from . import netcdf, timing
 from .paths import cache_dir, resolve_path
 
 R2D = 180.0 / np.pi
@@ -254,20 +254,25 @@ class MpasMesh:
         if not path.exists():
             raise FileNotFoundError(f"No such mesh file: {path}")
 
-        if not use_cache:
-            return cls._build(path)
+        # Every path below reaches netCDF -- the signature's header probe, a
+        # cache build, or a full read -- and a dashboard calls this while a
+        # Series is scanning a run directory on its own thread. See netcdf.LOCK
+        # for why sharing HDF5 between two threads ends the process outright.
+        with netcdf.LOCK:
+            if not use_cache:
+                return cls._build(path)
 
-        cache = cache_path(path)
-        if (cache / "meta.json").exists():
-            print(f"gmpas: using cached mesh geometry ({cache})", file=sys.stderr)
-        else:
-            print(f"gmpas: no cache for {path.name} yet — building geometry at "
-                  f"{cache} (first use of this mesh; large global meshes can "
-                  f"take a while and real memory)", file=sys.stderr)
-            with timing.step("mesh.build"):
-                _build_to_dir(path, cache)
-        with timing.step("mesh.cache_load"):
-            return cls._mapped(path, cache)
+            cache = cache_path(path)
+            if (cache / "meta.json").exists():
+                print(f"gmpas: using cached mesh geometry ({cache})", file=sys.stderr)
+            else:
+                print(f"gmpas: no cache for {path.name} yet — building geometry at "
+                      f"{cache} (first use of this mesh; large global meshes can "
+                      f"take a while and real memory)", file=sys.stderr)
+                with timing.step("mesh.build"):
+                    _build_to_dir(path, cache)
+            with timing.step("mesh.cache_load"):
+                return cls._mapped(path, cache)
 
     @classmethod
     def _mapped(cls, path: Path, cache: Path) -> "MpasMesh":

@@ -21,16 +21,14 @@ arrays -- so frames are computed per view box and kept.
 from __future__ import annotations
 
 import json
-import socket
-import threading
-import webbrowser
+import sys
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
 from ..cache import BuildCache
 from ..raster import target_grid
-from ..viewer import PageHandler, _overlay, _png, bind, ramp
+from ..viewer import PageHandler, _overlay, _png, bind, ramp, reach_lines
 from .hfun import GRADIENT_GUIDELINE, Hfun, diagnose
 from .layout import page
 
@@ -226,7 +224,7 @@ def report(viewer: HfunViewer) -> str:
 
 
 def serve(hfun_path, port: int = 8765, nx: int = 1200, ny: int = 700,
-          open_browser: bool = True, host: str = "127.0.0.1",
+          host: str = "127.0.0.1",
           strict_port: bool = False):
     """Start the distance-function viewer and block until interrupted.
 
@@ -240,21 +238,14 @@ def serve(hfun_path, port: int = 8765, nx: int = 1200, ny: int = 700,
 
     print(report(viewer))
 
-    node = socket.gethostname()
-    if host in ("127.0.0.1", "localhost"):
-        print(f"listening on 127.0.0.1:{port} — this machine only")
-        print(f"  open  http://127.0.0.1:{port}")
-        print(f"  if {node} is a remote node, this is NOT reachable through a "
-              f"tunnel to a login node; restart with --host 0.0.0.0")
-    else:
-        print(f"listening on {host}:{port} — reachable as {node}:{port}")
-        print(f"  from your machine:  ssh -N -L {port}:{node}:{port} <login-node>")
-        print(f"  then open           http://localhost:{port}")
+    # reach_lines rather than a hand-rolled banner: this one still printed
+    # "<login-node>" for the reader to substitute, and could not tell a login
+    # node from a compute node. The shared one reads the scheduler's own
+    # environment and prints a command with nothing left to fill in.
+    for line in reach_lines(host, port):
+        print(line)
     print("ctrl-c to stop")
-
-    if open_browser:
-        threading.Timer(0.5, webbrowser.open,
-                        args=(f"http://127.0.0.1:{port}",)).start()
+    sys.stdout.flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

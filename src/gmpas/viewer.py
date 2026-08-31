@@ -616,6 +616,43 @@ def _handler(viewer: Viewer, html: str = ""):
 PORT_ATTEMPTS = 20
 
 
+def _loopback_only(name: str, timeout: float = 1.0) -> bool:
+    """Whether `name` is known to point at this machine and nowhere else.
+
+    A name that resolves purely to 127.0.0.0/8 or ::1 cannot be what somebody
+    else's laptop connects to, whatever it looks like. That is not a rare
+    misconfiguration: the stock Debian/Ubuntu `/etc/hosts` maps the machine's
+    own fully qualified name to 127.0.1.1, so `getfqdn()` hands back something
+    plausible -- `box.example.dom` -- that is a loopback alias and nothing more.
+
+    Only *proves* the negative. A name that fails to resolve here is left
+    alone rather than rejected: a cluster login node commonly resolves from
+    the outside world and not from inside its own network namespace, and
+    discarding a correct name is the worse error -- the reader can see whether
+    a hostname looks right, but cannot recover one gmpas silently dropped.
+
+    Resolution runs on a thread and is abandoned after `timeout`, because this
+    is on the path to printing a banner: a wedged resolver is common on a busy
+    login node, and waiting on it would stall a viewer that is already serving.
+    """
+    import ipaddress
+
+    result: list[bool] = []
+
+    def _look() -> None:
+        try:
+            infos = socket.getaddrinfo(name, None)
+        except OSError:
+            return                            # unresolvable: prove nothing
+        addrs = [ipaddress.ip_address(i[4][0]) for i in infos]
+        result.append(bool(addrs) and all(a.is_loopback for a in addrs))
+
+    worker = threading.Thread(target=_look, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    return result[0] if result else False
+
+
 def ssh_target() -> str:
     """The name to SSH *to*, preferring one that resolves off this machine.
 
@@ -626,12 +663,16 @@ def ssh_target() -> str:
 
     Only taken when it genuinely extends the short name, since `getfqdn()`
     falls back to whatever /etc/hosts says and can answer `localhost` or some
-    placeholder domain on a misconfigured box. In that case the short name is
-    no worse and reads less like a promise.
+    placeholder domain on a misconfigured box, and only when it is not a
+    loopback alias -- see `_loopback_only`, which is what a stock Linux
+    /etc/hosts turns the machine's own FQDN into. In either case the short
+    name is no worse and reads less like a promise.
     """
     node = socket.gethostname()
     fqdn = socket.getfqdn()
-    return fqdn if fqdn.startswith(f"{node}.") else node
+    if not fqdn.startswith(f"{node}."):
+        return node
+    return node if _loopback_only(fqdn) else fqdn
 
 
 #: environment a batch scheduler sets on a compute node. Both pairs are read
@@ -683,6 +724,20 @@ def reach_lines(host: str, port: int) -> list[str]:
     user = getpass.getuser()
 
     if host in ("127.0.0.1", "localhost"):
+        if in_batch_job():
+            # The one case where the printed tunnel would not work: a tunnel
+            # from a laptop lands on the login node, and from there the
+            # compute node's own loopback is a different machine's loopback.
+            # There is no command to give that fixes it, so say the one thing
+            # that does rather than offering a tunnel that cannot land.
+            return [
+                f"listening on 127.0.0.1:{port} — this compute node only, and "
+                f"nothing outside {node} can reach that",
+                f"  you are inside a batch job, so a tunnel from your machine "
+                f"lands on {submit_host()} and stops there.",
+                f"  restart with --host 0.0.0.0 to be reachable, and gmpas "
+                f"will print the tunnel command for it.",
+            ]
         return [
             f"listening on 127.0.0.1:{port} — this machine only",
             f"  on this machine:  http://127.0.0.1:{port}",
@@ -736,14 +791,45 @@ CONSOLE_BROWSERS = frozenset(
 
 
 def _console_browser(controller) -> bool:
+    """Whether launching this would take over the terminal rather than open a window.
+
+    A delegator counts as one when nothing graphical is running: it will pass
+    the URL to the system default, and on a node with no display the system
+    default is a text browser. That is the case `CONSOLE_BROWSERS` alone
+    cannot see, because the name gmpas is handed is `xdg-open`.
+    """
     name = getattr(controller, "name", "") or ""
     if not name:                              # MacOSX / WindowsDefault: GUI
         return False
-    return os.path.basename(name.split()[0]) in CONSOLE_BROWSERS
+    exe = os.path.basename(name.split()[0])
+    if exe in CONSOLE_BROWSERS:
+        return True
+    headless = not (os.environ.get("DISPLAY") or
+                    os.environ.get("WAYLAND_DISPLAY"))
+    return exe in DELEGATING_BROWSERS and headless
+
+
+#: openers that do not render anything themselves but hand the URL to
+#: whatever the system considers the default. On a desktop that is a GUI
+#: browser; on a headless node it resolves to w3m or elinks, which is how a
+#: text browser ends up seizing the terminal even though `CONSOLE_BROWSERS`
+#: names every one of them -- the name gmpas sees is the delegator's.
+DELEGATING_BROWSERS = frozenset({"xdg-open", "gio", "gvfs-open",
+                                 "x-www-browser", "sensible-browser"})
 
 
 def open_in_browser(url: str, delay: float = 0.5) -> "threading.Timer | None":
     """Open `url`, or say plainly why it could not -- but never in silence.
+
+    Only ever called when asked for (`gmpas view --browser`). It used to be
+    the default, which is backwards for a tool whose main home is an HPC
+    login or compute node: there the best case is a browser that cannot open,
+    and the realistic case is that `webbrowser` resolves a *delegating*
+    opener like `xdg-open`, which then launches elinks or w3m straight into
+    the terminal running the server. What that renders is the viewer's
+    JavaScript shell with no JavaScript -- an unusable page, on top of the
+    log the user was reading. The URL and the tunnel command printed above
+    are what is actually wanted there, and they are printed either way.
 
     `webbrowser.open` returns False when it cannot launch anything and raises
     on some platforms; both results used to be dropped inside a Timer thread,
@@ -764,15 +850,14 @@ def open_in_browser(url: str, delay: float = 0.5) -> "threading.Timer | None":
     """
     ok, why = can_open_browser()
     if not ok:
-        print(f"gmpas: not opening a browser -- {why}.\n"
+        print(f"gmpas: --browser asked for, but not opening a browser -- {why}.\n"
               f"       open {url} yourself (see the tunnel note above if this "
-              f"is a remote node), or pass --no-browser to stop asking.",
-              file=sys.stderr)
+              f"is a remote node).", file=sys.stderr)
         return None
 
     def _say(reason: str) -> None:
         print(f"gmpas: could not open a browser ({reason}) -- open {url} "
-              f"yourself, or pass --no-browser to stop asking.", file=sys.stderr)
+              f"yourself. The server is up either way.", file=sys.stderr)
 
     def _try() -> None:
         try:
@@ -822,7 +907,7 @@ def bind(handler, port: int, host: str = "127.0.0.1",
     return ThreadingHTTPServer((host, 0), handler)      # 0 = any free port
 
 
-def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True,
+def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=False,
           host="127.0.0.1", strict_port=False):
     """Start the viewer and block until interrupted.
 
@@ -830,6 +915,9 @@ def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=True
     compute node: an SSH tunnel from your machine lands on the *login* node,
     so a viewer listening only on the compute node's loopback is unreachable.
     Pass host="0.0.0.0" there, exactly as one does for Jupyter.
+
+    `open_browser` is off by default: see `open_in_browser` for why launching
+    one unasked is the wrong default where gmpas actually runs.
     """
     viewer = Viewer(data_path, mesh_path, nx=nx, ny=ny)
     server = bind(_handler(viewer), port, host=host, strict=strict_port)
