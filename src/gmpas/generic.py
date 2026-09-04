@@ -100,7 +100,10 @@ class GenericViewer:
         import xarray as xr
 
         self.path = Path(path)
-        self.ds = xr.open_dataset(self.path, decode_timedelta=False, engine="netcdf4")
+        from . import netcdf
+        with netcdf.LOCK:                 # see netcdf.LOCK: HDF5 is not thread-safe
+            self.ds = xr.open_dataset(self.path, decode_timedelta=False,
+                                      engine="netcdf4")
         self.lat_name, self.lon_name = _find_latlon(self.ds)
         self.time_name = _find_time(self.ds, self.lat_name, self.lon_name)
 

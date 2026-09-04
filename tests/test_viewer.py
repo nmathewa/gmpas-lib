@@ -157,16 +157,55 @@ def test_the_view_cache_does_not_grow_without_bound(small_viewer):
     """Nothing evicted this before: panning and zooming around over a long
     session -- exactly what setting up several animations for different
     variables looks like -- grew _views/_overlays forever, for the life of
-    the server process."""
-    from gmpas.viewer import VIEW_LRU_SIZE
+    the server process.
 
+    The bound is bytes, not entries. An entry is nx*ny*(8+1) bytes, so a count
+    only bounds memory while the window size is fixed: twelve entries is
+    ~178 MB at 1200x700 and ~1.1 GB at 3840x2160.
+    """
     box = small_viewer.home
-    for i in range(VIEW_LRU_SIZE + 8):
+    budget = small_viewer._views.budget
+    for i in range(40):
         small_viewer.view(box, 80 + i, 50)
         small_viewer.overlay(box, 80 + i, 50)
 
-    assert len(small_viewer._views) == VIEW_LRU_SIZE
-    assert len(small_viewer._overlays) == VIEW_LRU_SIZE
+    assert small_viewer._views.nbytes <= budget
+    assert small_viewer._overlays.nbytes <= budget
+    # these entries are tiny, so nothing should have been evicted to hold 40
+    assert len(small_viewer._views) == 40
+
+
+def test_the_view_cache_evicts_once_the_budget_is_reached(small_viewer, monkeypatch):
+    """The property that matters at scale, forced at fixture scale.
+
+    A budget of a few kilobytes against 80x50 indices (~36 KB each) means the
+    cache can hold one, which is exactly what a 4K browser window does to a
+    256 MB budget.
+    """
+    from gmpas.cache import BuildCache
+
+    small_viewer._views = BuildCache(budget=50_000)
+    box = small_viewer.home
+    for i in range(6):
+        small_viewer.view(box, 80 + i, 50)
+
+    assert small_viewer._views.nbytes <= 50_000
+    assert len(small_viewer._views) < 6
+
+
+def test_an_entry_larger_than_the_whole_budget_is_not_cached(small_viewer):
+    """Caching it would evict everything else and still leave it as the sole
+    occupant, to be evicted itself by the next distinct request. Same rule,
+    and same reasoning, as Series._remember."""
+    from gmpas.cache import BuildCache
+
+    small_viewer._views = BuildCache(budget=100)
+    view = small_viewer.view(small_viewer.home, 80, 50)
+
+    assert view.nbytes > 100
+    assert len(small_viewer._views) == 0
+    # and it still returns a working index rather than failing
+    assert view.idx.size == 80 * 50
 
 
 def test_a_frame_can_be_asked_for_at_a_larger_size(small_viewer):
@@ -622,3 +661,141 @@ def test_a_job_without_a_submit_host_still_says_something_useful(monkeypatch):
 
     text = "\n".join(reach_lines("0.0.0.0", 8787))
     assert "ssh -N -L 8787:dec0965:8787 someone@<login-node>" in text
+
+
+# ------------------------------------------- not opening a browser by default
+
+
+def test_a_delegating_opener_counts_as_a_terminal_browser_when_headless():
+    """`xdg-open` is the name gmpas sees; w3m is what it launches.
+
+    CONSOLE_BROWSERS names every terminal browser, and caught none of this:
+    the controller reports itself as the delegator. With nothing graphical
+    running, whatever it hands the URL to renders into this terminal.
+    """
+    import os
+
+    from gmpas.viewer import _console_browser
+
+    class Ctl:
+        name = "/usr/bin/xdg-open"
+
+    seen = {k: os.environ.pop(k, None) for k in ("DISPLAY", "WAYLAND_DISPLAY")}
+    try:
+        assert _console_browser(Ctl()) is True
+        os.environ["DISPLAY"] = ":0"
+        assert _console_browser(Ctl()) is False    # a desktop: it opens a window
+    finally:
+        os.environ.pop("DISPLAY", None)
+        for k, v in seen.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_view_does_not_open_a_browser_unless_asked(monkeypatch):
+    """The default is to print the URL, not to launch anything.
+
+    On a login node the realistic outcome of launching was a text browser
+    rendering the viewer's JavaScript shell over the log the user was reading.
+    """
+    from gmpas import cli
+
+    opened = []
+    monkeypatch.setattr("gmpas.dashboard.build",
+                        lambda *a, **k: ([], "banner"))
+    monkeypatch.setattr("gmpas.dashboard.serve",
+                        lambda *a, **k: opened.append(k["open_browser"]))
+
+    args = cli.build_parser().parse_args(["view", "run/"])
+    assert args.browser is False
+    cli._dashboard(args, data_path=args.path)
+    assert opened == [False]
+
+    args = cli.build_parser().parse_args(["view", "run/", "--browser"])
+    cli._dashboard(args, data_path=args.path)
+    assert opened == [False, True]
+
+
+def test_the_old_no_browser_flag_still_parses():
+    """It is in every job script already, and now asks for the default."""
+    from gmpas import cli
+
+    args = cli.build_parser().parse_args(["view", "run/", "--no-browser"])
+    assert args.browser is False
+
+
+def test_a_loopback_only_fqdn_is_not_offered_as_an_ssh_target(monkeypatch):
+    """A stock /etc/hosts maps the machine's own FQDN to 127.0.1.1.
+
+    That name looks perfectly plausible -- `box.example.dom` -- and is a
+    loopback alias, so the ssh command built from it connects to nothing.
+    """
+    import socket
+
+    from gmpas import viewer
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "box")
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: "box.example.dom")
+    monkeypatch.setattr(viewer, "_loopback_only", lambda name, timeout=1.0: True)
+
+    assert viewer.ssh_target() == "box"
+
+
+def test_a_name_that_does_not_resolve_here_is_left_alone(monkeypatch):
+    """Unresolvable is not disproved: login nodes resolve from outside.
+
+    Dropping a correct hostname is the worse error, since the reader can
+    sanity-check one that is shown and cannot recover one that is not.
+    """
+    import socket
+
+    from gmpas import viewer
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "dec1042")
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: "dec1042.hpc.example.edu")
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no")))
+
+    assert viewer.ssh_target() == "dec1042.hpc.example.edu"
+
+
+def test_a_job_bound_to_loopback_is_told_the_one_thing_that_helps(monkeypatch):
+    """Inside a job there is no tunnel command that reaches loopback.
+
+    The hop lands on the login node, where 127.0.0.1 is a different machine.
+    Printing a tunnel there would be printing a command that cannot work.
+    """
+    import socket
+
+    from gmpas.viewer import reach_lines
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "dec1042")
+    monkeypatch.setenv("PBS_JOBID", "123456.desched1")
+    monkeypatch.setenv("PBS_O_HOST", "derecho7")
+
+    text = "\n".join(reach_lines("127.0.0.1", 8765))
+    assert "--host 0.0.0.0" in text
+    assert "derecho7" in text
+    assert "ssh -N -L" not in text            # no command that cannot land
+
+
+def test_nothing_launches_a_browser_behind_the_guards():
+    """`webbrowser.open` walks its whole list, and that list ends in elinks.
+
+    `gmpas prep view` and `gmpas prep hfun` each carried their own copy of
+    serve() that called it directly, so neither the terminal-browser refusal
+    nor the opt-in default applied to them: they opened a text browser over
+    the running server's own log. The single guarded path in viewer.py, which
+    resolves exactly one controller and vets it, is the only one left.
+    """
+    import pathlib
+
+    import gmpas
+
+    root = pathlib.Path(gmpas.__file__).parent
+    users = sorted(p.relative_to(root).as_posix()
+                   for p in root.rglob("*.py")
+                   if "webbrowser" in p.read_text())
+    assert users == ["viewer.py"]
+
+    assert "webbrowser.open(" not in (root / "viewer.py").read_text()

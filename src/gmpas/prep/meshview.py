@@ -23,15 +23,15 @@ none of it is modified.
 from __future__ import annotations
 
 import json
-import socket
-import threading
-import webbrowser
+import sys
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from ..cache import BuildCache
 from ..mesh import MpasMesh
-from ..viewer import PageHandler, ViewIndex, _overlay, _png, bind, ramp
+from ..viewer import (PageHandler, ViewIndex, _overlay, _png, bind,
+                      ramp, reach_lines)
 from .layout import page
 
 #: the one colormap this section uses. Sequential and perceptually uniform,
@@ -50,13 +50,19 @@ class MeshViewer:
     """Everything the mesh-only routes need, built once at startup."""
 
     def __init__(self, mesh_path, nx: int = 1200, ny: int = 700):
-        self.mesh = MpasMesh.load(mesh_path)
+        # Accepts an already-loaded mesh as well as a path. The dashboard shows
+        # a run's data page and its mesh page side by side, and both are the
+        # same mesh -- loading it twice meant two of every derived structure,
+        # including two KD-trees, which on a large mesh is the single most
+        # expensive thing either page does.
+        self.mesh = (mesh_path if isinstance(mesh_path, MpasMesh)
+                     else MpasMesh.load(mesh_path))
         self.nx, self.ny = nx, ny
         self.home = self.mesh.extent
-        self._views: dict[tuple, ViewIndex] = {}
-        self._overlays: dict[tuple, bytes] = {}
+        self._views = BuildCache()
+        self._overlays = BuildCache()
         self._values: dict[str, np.ndarray] = {}
-        self._lock = threading.Lock()
+        self._limits: dict[str, tuple[float, float]] = {}
 
     # -- fields ----------------------------------------------------------
 
@@ -69,17 +75,33 @@ class MeshViewer:
             self._values[field] = np.asarray(FIELDS[field][1](self.mesh))
         return self._values[field]
 
+    def limits(self, field: str) -> tuple[float, float]:
+        """(min, max) over the whole mesh for one field, without keeping it.
+
+        `describe()` needs these for every field at once, but the page only
+        ever renders one at a time. Going through `values()` would leave every
+        field's full-length array resident for the life of the process -- two
+        of them, and each is 8 bytes per cell, which on a 41M-cell mesh is most
+        of a gigabyte to populate a sidebar. So the array is built, reduced,
+        and dropped, unless something else already had a reason to keep it.
+        """
+        if field not in self._limits:
+            v = (self._values[field] if field in self._values
+                 else np.asarray(FIELDS[field][1](self.mesh)))
+            self._limits[field] = (float(np.nanmin(v)), float(np.nanmax(v)))
+        return self._limits[field]
+
     def describe(self) -> dict:
         fields = []
         for name, (label, _) in FIELDS.items():
-            v = self.values(name)
+            vmin, vmax = self.limits(name)
             fields.append({
                 "name": name,
                 "label": label,
                 # fixed, whole-mesh limits: the front end has no vmin/vmax box
                 # because there is nothing view-dependent to tune
-                "vmin": float(np.nanmin(v)),
-                "vmax": float(np.nanmax(v)),
+                "vmin": vmin,
+                "vmax": vmax,
             })
         cells, edges = int(self.mesh.n_cells), int(self.mesh.n_edges)
         coverage = round(self.mesh.coverage * 100, 1)
@@ -116,24 +138,21 @@ class MeshViewer:
     def view(self, extent, nx=None, ny=None) -> ViewIndex:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        with self._lock:
-            if key not in self._views:
-                self._views[key] = ViewIndex(self.mesh, extent, nx, ny)
-            return self._views[key]
+        return self._views.get(key, lambda: ViewIndex(self.mesh, extent, nx, ny))
 
     def overlay(self, extent, nx=None, ny=None) -> bytes:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        with self._lock:
-            if key not in self._overlays:
-                self._overlays[key] = _overlay(extent, nx, ny)
-            return self._overlays[key]
+        return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
 
     def frame(self, field: str, extent, nx=None, ny=None,
               compress: int = 1) -> tuple[bytes, float, float]:
         v = self.values(field)
         img = self.view(extent, nx, ny).frame(v)
-        lo, hi = float(np.nanmin(v)), float(np.nanmax(v))
+        # whole-mesh limits, so they are the same for every view of this field
+        # -- reducing over the full cell array again on each frame is a pass
+        # over every cell in the mesh to re-derive two constants
+        lo, hi = self.limits(field)
         return _png(img, CMAP, lo, hi, compress), lo, hi
 
 
@@ -184,7 +203,7 @@ def _handler(viewer: MeshViewer, html: str):
 
 
 def serve(mesh_path, port: int = 8765, nx: int = 1200, ny: int = 700,
-          open_browser: bool = True, host: str = "127.0.0.1",
+          host: str = "127.0.0.1",
           strict_port: bool = False):
     """Start the mesh viewer and block until interrupted.
 
@@ -201,21 +220,14 @@ def serve(mesh_path, port: int = 8765, nx: int = 1200, ny: int = 700,
     print(f"{viewer.mesh.n_cells:,} cells, {viewer.mesh.n_edges:,} edges, {kind} — "
           f"cell width {width.min():.3g} to {width.max():.3g} km")
 
-    node = socket.gethostname()
-    if host in ("127.0.0.1", "localhost"):
-        print(f"listening on 127.0.0.1:{port} — this machine only")
-        print(f"  open  http://127.0.0.1:{port}")
-        print(f"  if {node} is a remote node, this is NOT reachable through a "
-              f"tunnel to a login node; restart with --host 0.0.0.0")
-    else:
-        print(f"listening on {host}:{port} — reachable as {node}:{port}")
-        print(f"  from your machine:  ssh -N -L {port}:{node}:{port} <login-node>")
-        print(f"  then open           http://localhost:{port}")
+    # reach_lines rather than a hand-rolled banner: this one still printed
+    # "<login-node>" for the reader to substitute, and could not tell a login
+    # node from a compute node. The shared one reads the scheduler's own
+    # environment and prints a command with nothing left to fill in.
+    for line in reach_lines(host, port):
+        print(line)
     print("ctrl-c to stop")
-
-    if open_browser:
-        threading.Timer(0.5, webbrowser.open,
-                        args=(f"http://127.0.0.1:{port}",)).start()
+    sys.stdout.flush()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

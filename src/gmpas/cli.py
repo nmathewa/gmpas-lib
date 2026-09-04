@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from . import __version__
+from .timing import Progress, clock
 
 #: only the default port is allowed to wander when busy
 DEFAULT_PORT = 8765
@@ -37,60 +38,6 @@ def human(n: float) -> str:
     return f"{n:.1f} GB"
 
 
-class Progress:
-    """A bar when someone is watching, periodic lines when nobody is.
-
-    Under a scheduler stdout is a log file, and a carriage-returning bar just
-    fills it with thousands of partial lines. So the same information is
-    emitted either way, in whichever shape suits the destination.
-    """
-
-    def __init__(self, total: int, width: int = 32, every: int = 10):
-        self.total = total
-        self.width = width
-        self.every = every            # percent between lines when not a tty
-        self.done = 0
-        self.t0 = time.perf_counter()
-        self.tty = sys.stdout.isatty()
-        self._last = -1
-
-    def advance(self, label: str = "") -> None:
-        self.done += 1
-        elapsed = time.perf_counter() - self.t0
-        frac = self.done / self.total if self.total else 1.0
-        eta = (elapsed / self.done) * (self.total - self.done) if self.done else 0
-
-        if self.tty:
-            filled = int(self.width * frac)
-            bar = "#" * filled + "-" * (self.width - filled)
-            sys.stdout.write(
-                f"\r  [{bar}] {self.done}/{self.total} {frac * 100:3.0f}%  "
-                f"{elapsed / self.done:.1f}s/file  eta {clock(eta)}   "
-            )
-            sys.stdout.flush()
-        else:
-            pct = int(frac * 100)
-            if pct // self.every > self._last // self.every or self.done == self.total:
-                self._last = pct
-                print(f"  {self.done}/{self.total} ({pct}%)  "
-                      f"{elapsed / self.done:.1f}s/file  eta {clock(eta)}")
-
-    def close(self) -> None:
-        if self.tty:
-            sys.stdout.write("\r" + " " * (self.width + 60) + "\r")
-            sys.stdout.flush()
-
-
-def clock(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    m, sec = divmod(int(seconds), 60)
-    if m < 60:
-        return f"{m}m{sec:02d}s"
-    h, m = divmod(m, 60)
-    return f"{h}h{m:02d}m"
-
-
 EXAMPLES = """
 examples:
   gmpas info  run/history.2012-02-25_12.00.00.nc
@@ -105,16 +52,18 @@ examples:
   gmpas target -o dst.scrip.nc              reads target_domain from this directory
   gmpas target run/history.nc               and which fields would be remapped
 
-  gmpas view  run/                          browse interactively in a browser
-  gmpas view  run/ --host 0.0.0.0 --no-browser   on an HPC compute node
+  gmpas view  run/                          serve it, and print a URL to open
+  gmpas view  run/ --host 0.0.0.0           on an HPC compute node
 
   gmpas prep hfun     hfun.py --check     the mesh you are about to build
   gmpas prep generate hfun.py -o mesh/    run JIGSAW and build it
 
-on a cluster the job runs on a compute node but your tunnel lands on the login
-node, so bind all interfaces and tunnel to the node by name:
+`view` never opens a browser for you -- it prints the URL and, when that is on
+another machine, the exact ssh command to reach it. Copy them; nothing here
+needs a display. On a cluster the job runs on a compute node but your tunnel
+lands on the login node, so bind all interfaces and tunnel to the node by name:
 
-  compute node:  gmpas view /scratch/run/ --host 0.0.0.0 --no-browser
+  compute node:  gmpas view /scratch/run/ --host 0.0.0.0
   your machine:  ssh -N -L 8765:<compute-node>:8765 <login-node>
                  then open http://localhost:8765
 
@@ -124,6 +73,10 @@ one time series across files, which is how MPAS writes output.
 environment:
   GMPAS_CACHE_DIR   where cached mesh geometry goes (default ~/.cache/gmpas/mesh)
   GMPAS_DATA_DIR    tried first when resolving relative paths
+  GMPAS_VALUES_CACHE_MB  field values held per series (default 512)
+  GMPAS_VIEW_CACHE_MB    view indices and overlays held per viewer (default 256)
+  GMPAS_TIMING      1 reports where startup time went, 2 adds per-frame stages
+  GMPAS_TIMING_FILE write those lines to a file instead of stderr
   JIGSAWDIR         the jigsaw executable, or the directory holding it
   MKGRIDFILE        the mkgrid executable, or the directory holding it
                     both required by `gmpas prep generate`
@@ -213,10 +166,12 @@ def _render_one(job):
 def _plot_series(args) -> int:
     """Render every step, in parallel.
 
-    Each worker builds its own KD-tree and view geometry, which sounds
-    wasteful but is not: the mesh cache is memory-mapped, so every process
-    shares one copy of the geometry through the page cache rather than each
-    reading its own.
+    Each worker builds its own KD-tree and view geometry. The geometry part of
+    that is genuinely cheap -- the mesh cache is memory-mapped, so every
+    process shares one copy through the page cache rather than reading its own
+    -- but the KD-tree and the series scan are not cached anywhere, so they are
+    paid again in full by every worker. Resolving the mesh here and naming it
+    explicitly at least spares each of them the directory probe.
     """
     import os
     from multiprocessing import Pool
@@ -225,6 +180,12 @@ def _plot_series(args) -> int:
 
     series = Series(args.path, args.mesh or "")
     n = len(series)
+    # Which file the mesh came from is already known now, so hand workers the
+    # answer rather than the question: without this each job re-runs
+    # `find_mesh_beside`, which opens every .nc in the directory until it finds
+    # one carrying mesh variables. On a run of a few thousand history files,
+    # over a parallel filesystem, that is thousands of round trips per frame.
+    mesh_path = str(series.mesh.path)
     series.close()
 
     jobs = args.jobs or os.cpu_count() or 1
@@ -234,7 +195,7 @@ def _plot_series(args) -> int:
         "extent": args.extent, "symmetric": args.symmetric,
         "method": args.method, "title": args.title, "pattern": args.out,
     }
-    work = [(args.path, args.mesh or "", args.var, s, opts) for s in range(n)]
+    work = [(args.path, mesh_path, args.var, s, opts) for s in range(n)]
 
     print(f"rendering {n} steps with {jobs} worker(s)", file=sys.stderr)
     if jobs == 1:
@@ -565,7 +526,7 @@ def _dashboard(args, data_path=None, mesh_path="", hfun_path="") -> int:
     # and was allowed to wander to 8766 when busy, leaving the tunnel pointing
     # at nothing and looking, from the browser, exactly like a dead server.
     serve(sources, port=DEFAULT_PORT if args.port is None else args.port,
-          host=args.host, open_browser=not args.no_browser,
+          host=args.host, open_browser=args.browser,
           strict_port=args.port is not None, banner=banner)
     return 0
 
@@ -601,7 +562,7 @@ def _generic_view(args) -> int:
                     f"{gv.steps} step{'s' if gv.steps != 1 else ''}",
                     _handler(gv, PAGE))
     serve([source], port=DEFAULT_PORT if args.port is None else args.port,
-          host=args.host, open_browser=not args.no_browser,
+          host=args.host, open_browser=args.browser,
           strict_port=args.port is not None,          # see the note in _dashboard
           banner=f"gmpas view --generic · {gv.path.name}")
     return 0
@@ -748,6 +709,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="mesh geometry cache directory for this run, overriding "
              "$GMPAS_CACHE_DIR (default: $GMPAS_CACHE_DIR or ~/.cache/gmpas/mesh)")
 
+    def browser_opts(sp):
+        """Opting *in* to a browser, and keeping the old opt-out accepted.
+
+        Not opening one is now the default, so `--no-browser` asks for what
+        already happens. It stays accepted and hidden rather than removed:
+        it is in every existing job script, every note someone wrote down and
+        this project's own older docs, and failing those runs with "unrecognized
+        argument" to make a point about a flag that is now a no-op would be
+        pure cost to the user.
+        """
+        sp.add_argument("--browser", action="store_true",
+                        help="also try to open a browser here (off by "
+                             "default: on a login or compute node this "
+                             "usually lands in a terminal browser)")
+        sp.add_argument("--no-browser", action="store_true",
+                        help=argparse.SUPPRESS)
+
     def common(sp):
         # nargs="+" so an unquoted glob works too: the shell expands it into
         # many arguments, and Series.expand already accepts a list
@@ -844,8 +822,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "node so a tunnel from the login node can reach it")
     v.add_argument("--width", type=int, default=1200, help="raster width in pixels")
     v.add_argument("--height", type=int, default=700)
-    v.add_argument("--no-browser", action="store_true",
-                   help="do not open a browser (useful over an SSH tunnel)")
+    browser_opts(v)
     v.set_defaults(func=_view)
 
     # -- preprocessing ---------------------------------------------------
@@ -878,8 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--width", type=int, default=1200,
                     help="raster width in pixels")
     pv.add_argument("--height", type=int, default=700)
-    pv.add_argument("--no-browser", action="store_true",
-                    help="do not open a browser (useful over an SSH tunnel)")
+    browser_opts(pv)
     pv.add_argument("--cache-dir", **_cache_dir_opt)
     pv.set_defaults(func=_prep_view)
 
@@ -904,8 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--width", type=int, default=1200,
                     help="raster width in pixels")
     ph.add_argument("--height", type=int, default=700)
-    ph.add_argument("--no-browser", action="store_true",
-                    help="do not open a browser (useful over an SSH tunnel)")
+    browser_opts(ph)
     ph.add_argument("--cache-dir", **_cache_dir_opt)
     ph.set_defaults(func=_prep_hfun)
 
@@ -1039,16 +1014,28 @@ def main(argv=None) -> int:
     if getattr(args, "cache_dir", None):
         os.environ["GMPAS_CACHE_DIR"] = args.cache_dir
 
+    from . import timing
     from .mesh import MeshCacheError
     from .prep.generate import GenerateError
     from .remap import RemapError
 
+    # --cache-dir may have just rewritten the environment, and GMPAS_TIMING is
+    # read when `step` is bound rather than on every call, so re-resolve here
+    # to catch anything set between import and now.
+    timing.refresh()
+
     try:
-        return args.func(args)
+        with timing.step("cli.total", cmd=getattr(args, "cmd", None)):
+            return args.func(args)
     except (RemapError, MeshCacheError, GenerateError) as exc:
         print(f"\ngmpas: {exc}", file=sys.stderr)
         return 1
-    except (FileNotFoundError, KeyError, ValueError) as exc:
+    except (OSError, KeyError, ValueError) as exc:
+        # OSError rather than FileNotFoundError alone: a file that is present
+        # but unreadable -- truncated mid-transfer, still being written by a
+        # running model, no permission on a shared scratch directory -- is
+        # exactly as much a user's problem to fix and as little a bug, and it
+        # used to come out as a netCDF traceback.
         print(f"gmpas: {exc}", file=sys.stderr)
         return 1
     except ModuleNotFoundError as exc:

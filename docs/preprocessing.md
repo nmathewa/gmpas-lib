@@ -25,7 +25,7 @@ KD-tree turns each view box into a pixel-to-cell index once, and every field
 and every frame at that extent is then a gather.
 
 Same flags as `view` for tunnelling and size: `-p/--port`, `--host`,
-`--width`, `--height`, `--no-browser`. On a compute node use `--host 0.0.0.0`
+`--width`, `--height`, `--browser`. On a compute node use `--host 0.0.0.0`
 and tunnel, exactly as for `view`.
 
 Two fields are offered, both derived from geometry the mesh cache already

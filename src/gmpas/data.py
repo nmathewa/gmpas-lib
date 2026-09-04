@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
+from . import netcdf, timing
 from .mesh import MpasMesh, has_mesh
 from .paths import resolve_path
 
@@ -29,7 +30,8 @@ def open_data(data_path: str | Path,
     dpath = resolve_path(data_path)
     if not dpath.exists():
         raise FileNotFoundError(f"No such data file: {dpath}")
-    ds = xr.open_dataset(dpath, decode_timedelta=False, engine="netcdf4")
+    with netcdf.LOCK:                     # see netcdf.LOCK: HDF5 is not thread-safe
+        ds = xr.open_dataset(dpath, decode_timedelta=False, engine="netcdf4")
 
     if mesh_path:
         return ds, MpasMesh.load(resolve_path(mesh_path))
@@ -59,17 +61,34 @@ def find_mesh_beside(dpath: Path, n_cells: int) -> Path | None:
     """
     import netCDF4
 
-    for cand in sorted(dpath.parent.glob("*.nc")):
-        if cand == dpath:
-            continue
+    with timing.step("mesh.discover") as t:
+        # AppleDouble sidecars are `.nc` by name only -- see series.is_sidecar.
+        # Skipping them here is not just tidiness: on a parallel filesystem
+        # every candidate opened is a metadata round trip, and a Mac-copied
+        # run directory doubles the number of them.
+        from .series import is_sidecar
+        candidates = sorted(f for f in dpath.parent.glob("*.nc")
+                            if not is_sidecar(f))
+        opened = 0
         try:
-            with netCDF4.Dataset(cand) as nc:
-                dim = nc.dimensions.get("nCells")
-                if has_mesh(nc) and dim is not None and len(dim) == n_cells:
-                    return cand
-        except Exception:
-            continue
-    return None
+            for cand in candidates:
+                if cand == dpath:
+                    continue
+                try:
+                    opened += 1
+                    # netcdf.LOCK per candidate rather than around the whole
+                    # scan: this runs while a Series may be scanning the same
+                    # directory on another thread, and holding it for every
+                    # file would stall that for the entire probe.
+                    with netcdf.LOCK, netCDF4.Dataset(cand) as nc:
+                        dim = nc.dimensions.get("nCells")
+                        if has_mesh(nc) and dim is not None and len(dim) == n_cells:
+                            return cand
+                except Exception:
+                    continue
+            return None
+        finally:
+            t.note(scanned=len(candidates), opened=opened)
 
 
 def spatial_dim(da: xr.DataArray) -> str:
