@@ -803,3 +803,143 @@ def test_two_level_axes_are_reported_rather_than_guessed_between(tmp_path, weigh
     keep, skip = remappable(ds, ["both"])
     assert keep == []
     assert "two level axes" in dict(skip)["both"]
+
+
+# ------------------------------------------ srun counts tasks, not cores
+
+
+def test_srun_never_asks_for_more_tasks_than_the_job_has(monkeypatch):
+    """The difference between a CPU count and a task count is fatal here.
+
+    `--ntasks=4 --cpus-per-task=24` grants 96 CPUs but 4 tasks. detect_cores
+    answers in CPUs, and a step asking for 96 tasks can never be created out
+    of that allocation -- srun waits for resources it will never be given.
+    """
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda name: "/usr/bin/srun" if name == "srun" else None)
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+    monkeypatch.delenv("SLURM_STEP_ID", raising=False)
+
+    cmd, note = remap_mod._mpi_launch_prefix(64, "/fake/esmf")
+    assert cmd == ["/usr/bin/srun", "-n", "4"]
+    assert "4 task" in note and "not\ncores" not in note
+
+
+def test_a_job_with_enough_tasks_is_left_alone(monkeypatch):
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda name: "/usr/bin/srun" if name == "srun" else None)
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    monkeypatch.setenv("SLURM_NTASKS", "64")
+    monkeypatch.delenv("SLURM_STEP_ID", raising=False)
+
+    cmd, note = remap_mod._mpi_launch_prefix(64, "/fake/esmf")
+    assert cmd == ["/usr/bin/srun", "-n", "64"]
+    assert note is None
+
+
+def test_being_inside_a_step_is_reported(monkeypatch):
+    """`srun` from an interactive `srun --pty` shell nests, and Slurm stalls it."""
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda name: "/usr/bin/srun" if name == "srun" else None)
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    monkeypatch.setenv("SLURM_NTASKS", "8")
+    monkeypatch.setenv("SLURM_STEP_ID", "0")
+
+    cmd, note = remap_mod._mpi_launch_prefix(8, "/fake/esmf")
+    # capping the task count is not enough on its own: a correctly sized step
+    # still contends with the outer one for the same nodes, and Slurm retries
+    # "Requested nodes are busy" forever rather than failing
+    assert "--overlap" in cmd
+    assert "salloc" in note
+
+    # and a job that is not nested must not get it
+    monkeypatch.delenv("SLURM_STEP_ID", raising=False)
+    cmd, _ = remap_mod._mpi_launch_prefix(8, "/fake/esmf")
+    assert "--overlap" not in cmd
+
+
+def test_pbs_still_uses_mpirun_untouched(monkeypatch):
+    """Derecho's path: no SLURM_JOB_ID, so none of the above applies."""
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod, "_esmf_supports_mpi", lambda tool: True)
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda name: {"mpirun": "/usr/bin/mpirun"}.get(name))
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+
+    cmd, note = remap_mod._mpi_launch_prefix(64, "/fake/esmf")
+    assert cmd == ["/usr/bin/mpirun", "-np", "64"]
+    assert note is None
+
+
+# ------------------------------------- the launcher must match ESMF's MPI
+
+
+def _fake_esmf(tmp_path, comm):
+    """An ESMF install whose esmf.mk declares ESMF_COMM=<comm>."""
+    root = tmp_path / comm
+    (root / "bin").mkdir(parents=True, exist_ok=True)
+    (root / "lib").mkdir(exist_ok=True)
+    (root / "lib" / "esmf.mk").write_text(f"ESMF_COMM={comm}\n")
+    tool = root / "bin" / "ESMF_RegridWeightGen"
+    tool.write_text("")
+    return str(tool)
+
+
+def test_open_mpi_is_launched_with_mpirun_not_srun(tmp_path, monkeypatch):
+    """srun cannot always bootstrap Open MPI, and the failure is silent.
+
+    Without matching PMI support every task comes up as its own
+    MPI_COMM_WORLD of size one -- N single-rank runs that never find each
+    other, all writing the same output, aborting over the wreckage. Seen as
+    several Open MPI job families each reporting itself rank 0.
+    """
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda n: {"srun": "/usr/bin/srun",
+                                   "mpirun": "/usr/bin/mpirun"}.get(n))
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+    monkeypatch.delenv("ESMFMKFILE", raising=False)
+
+    cmd, note = remap_mod._mpi_launch_prefix(4, _fake_esmf(tmp_path, "openmpi"))
+    assert cmd == ["/usr/bin/mpirun", "-np", "4"]
+    assert "Open MPI" in note
+
+
+def test_mpich_still_goes_through_srun(tmp_path, monkeypatch):
+    """MPICH and friends speak Slurm's PMI2, so srun is right for them."""
+    import gmpas.remap as remap_mod
+
+    monkeypatch.setattr(remap_mod.shutil, "which",
+                        lambda n: {"srun": "/usr/bin/srun",
+                                   "mpirun": "/usr/bin/mpirun"}.get(n))
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    monkeypatch.setenv("SLURM_NTASKS", "4")
+    monkeypatch.delenv("SLURM_STEP_ID", raising=False)
+    monkeypatch.delenv("ESMFMKFILE", raising=False)
+
+    cmd, _ = remap_mod._mpi_launch_prefix(4, _fake_esmf(tmp_path, "mpich3"))
+    assert cmd[0] == "/usr/bin/srun"
+
+
+def test_the_mpi_flavour_is_read_from_esmf_mk(tmp_path, monkeypatch):
+    import gmpas.remap as remap_mod
+
+    monkeypatch.delenv("ESMFMKFILE", raising=False)
+    assert remap_mod._esmf_comm(_fake_esmf(tmp_path, "openmpi")) == "openmpi"
+    assert remap_mod._esmf_comm(_fake_esmf(tmp_path, "mpiuni")) == "mpiuni"
+    # unchanged: mpiuni is still the one that rules out MPI entirely
+    assert remap_mod._esmf_supports_mpi(_fake_esmf(tmp_path, "mpiuni")) is False
+    assert remap_mod._esmf_supports_mpi("/nonexistent/esmf") is None
