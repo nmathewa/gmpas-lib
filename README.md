@@ -31,7 +31,7 @@ pip install "gmpas[plot]"    # + matplotlib and cartopy, for plotting
 conda env create -f environment.yml && conda activate gmpas && pip install -e . --no-deps
 ```
 
-mesh generation requires [JIGSAW](https://github.com/dengwirda/jigsaw) and, MPI and PnetCDF
+Mesh generation requires [JIGSAW](https://github.com/dengwirda/jigsaw), MPI and PnetCDF.
 
 ```bash
 gmpas --version
