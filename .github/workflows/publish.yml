@@ -1,0 +1,79 @@
+name: publish
+
+# Releases only. The Zenodo webhook already fires on `release: published` and
+# mints the DOI; this puts PyPI on the same trigger, so one GitHub release
+# updates both. Until this existed, PyPI was a manual `twine upload` -- which is
+# why 0.4.4 and 0.4.5 were tagged and released but never reached it.
+on:
+  release:
+    types: [published]
+  # For re-running a failed upload without cutting a new release. Pick the tag
+  # in the "Run workflow" dialog; the version guard below still applies.
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No conda here, unlike tests.yml. This is a pure-Python wheel -- hatchling
+      # reads pyproject.toml and copies src/gmpas in. None of cartopy, netCDF4 or
+      # ESMF is needed to *build* the package, only to run it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      # pyproject.toml and __init__.py are already checked against each other by
+      # test_version.py. Nothing checks either against the *tag*, and a mismatch
+      # here is the expensive kind: PyPI filenames are immutable, so publishing
+      # 0.4.6 under tag v0.4.7 cannot be corrected, only yanked.
+      - name: Check the tag matches the package version
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          echo "tag=$tag  pyproject=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
+            exit 1
+          fi
+
+      - name: Check the metadata renders on PyPI
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: upload to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+
+    # Trusted publishing: PyPI verifies this workflow's OIDC identity instead of
+    # checking a token, so there is no secret in the repo to leak or rotate. The
+    # environment name is part of what PyPI matches on -- it must stay `pypi`
+    # unless the publisher on PyPI is changed to agree.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/gmpas/
+    permissions:
+      id-token: write        # required to mint the OIDC token; nothing else is
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
