@@ -129,6 +129,24 @@ def _info(args) -> int:
     return 0
 
 
+def _sel(pairs) -> dict[str, int]:
+    """Parse --sel dim=index pairs into what `select` wants.
+
+    Names a field's other stacking axes -- `--sel nMonths=2` for ozone by
+    month -- so --level is left meaning one axis and nothing is guessed.
+    """
+    out = {}
+    for pair in pairs or []:
+        name, eq, idx = pair.partition("=")
+        if not eq or not name.strip():
+            raise SystemExit(f"--sel wants dim=index, got {pair!r}")
+        try:
+            out[name.strip()] = int(idx)
+        except ValueError:
+            raise SystemExit(f"--sel index must be a whole number, got {idx!r}") from None
+    return out
+
+
 def _render_one(job):
     """Render a single step. Top level so it survives being sent to a worker."""
     import matplotlib
@@ -143,7 +161,8 @@ def _render_one(job):
     series = Series(paths, mesh_path)
     try:
         da = series.dataarray(var, step)
-        values = series.values(var, step=step, level=opts["level"])
+        values = series.values(var, step=step, level=opts["level"],
+                               sel=opts["sel"])
         style = Style.preset(opts["style"])
         label = field_label(da)
         title = opts["title"] or f"{var} — {series.labels[step]}"
@@ -191,7 +210,8 @@ def _plot_series(args) -> int:
     jobs = args.jobs or os.cpu_count() or 1
     jobs = max(1, min(jobs, n))
     opts = {
-        "level": args.level, "style": args.style, "cmap": args.cmap,
+        "level": args.level, "sel": _sel(args.sel),
+        "style": args.style, "cmap": args.cmap,
         "extent": args.extent, "symmetric": args.symmetric,
         "method": args.method, "title": args.title, "pattern": args.out,
     }
@@ -239,7 +259,8 @@ def _plot_single(args) -> int:
         return 1
 
     da = series.dataarray(args.var, args.time)
-    values = series.values(args.var, step=args.time, level=args.level)
+    values = series.values(args.var, step=args.time, level=args.level,
+                           sel=_sel(args.sel))
     dim = spatial_dim(da)
     kwargs = dict(label=field_label(da), title=args.title or args.var,
                   style=Style.preset(args.style), cmap=args.cmap,
@@ -747,6 +768,10 @@ def build_parser() -> argparse.ArgumentParser:
     o.add_argument("-o", "--out", default="plot.png", help="output path")
     o.add_argument("-t", "--time", type=int, default=0)
     o.add_argument("-l", "--level", type=int, default=0)
+    o.add_argument("--sel", action="append", metavar="DIM=INDEX",
+                   help="pin another stacking axis, e.g. --sel nMonths=2; "
+                        "repeatable. Also names an axis outright, e.g. "
+                        "--sel nIsoLevels=3")
     o.add_argument("--method", default="auto", choices=["auto", "poly", "raster"])
     o.add_argument("--cmap", default="")
     o.add_argument("--extent", default="", help="named region, or blank to fit the mesh")

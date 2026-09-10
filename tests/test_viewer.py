@@ -136,6 +136,62 @@ def small_viewer(tmp_path):
     v.series.close()
 
 
+def test_a_second_stacking_axis_is_pinned_rather_than_dropped(tmp_path):
+    """`select` refuses two free axes; a browser cannot show an exception.
+
+    The slider takes the first axis, the rest are held at 0, and `describe`
+    says so -- the alternative is hiding the field from the variable list.
+    """
+    import xarray as xr
+
+    from conftest import write_mesh
+    from gmpas.viewer import Viewer
+
+    run = tmp_path / "run"
+    run.mkdir()
+    mesh = write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (10.0, 0.0)])
+    vals = np.arange(2 * 5 * 12, dtype="f4").reshape(2, 5, 12)
+    xr.Dataset({
+        "o3clim": (("nCells", "nOznLevels", "nMonths"), vals),
+    }).to_netcdf(run / "history.2012-02-25_00.00.00.nc")
+
+    v = Viewer(run, mesh_path=str(mesh), nx=20, ny=20)
+    try:
+        row = next(r for r in v.describe()["variables"] if r["name"] == "o3clim")
+        assert row["levels"] == 5              # the slider drives nOznLevels
+        assert row["dim"] == "nOznLevels"
+        assert row["pinned"] == ["nMonths"]
+
+        assert v.values("o3clim", 0, 3) == pytest.approx(vals[:, 3, 0])
+    finally:
+        v.series.close()
+
+
+def test_the_values_cache_separates_two_pinnings_of_one_field(tmp_path):
+    """(var, step, level) alone served January's slice for every month."""
+    import xarray as xr
+
+    from conftest import write_mesh
+    from gmpas.series import Series
+
+    run = tmp_path / "run"
+    run.mkdir()
+    mesh = write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (10.0, 0.0)])
+    vals = np.arange(2 * 5 * 12, dtype="f4").reshape(2, 5, 12)
+    xr.Dataset({
+        "o3clim": (("nCells", "nOznLevels", "nMonths"), vals),
+    }).to_netcdf(run / "history.2012-02-25_00.00.00.nc")
+
+    s = Series(run, mesh_path=str(mesh))
+    try:
+        jan = s.values("o3clim", step=0, level=3, sel={"nMonths": 0})
+        jul = s.values("o3clim", step=0, level=3, sel={"nMonths": 6})
+        assert jan == pytest.approx(vals[:, 3, 0])
+        assert jul == pytest.approx(vals[:, 3, 6])
+    finally:
+        s.close()
+
+
 def test_the_view_cache_keys_on_size_not_just_extent(small_viewer):
     """Panning renders a margin, so the same extent is requested at two sizes.
 

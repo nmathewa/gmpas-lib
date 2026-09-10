@@ -14,10 +14,6 @@ from .paths import resolve_path
 #: MPAS spatial dimensions, in the order tools care about
 SPATIAL_DIMS = ("nCells", "nEdges", "nVertices")
 
-#: dimensions to slice away before plotting, with the kwarg that selects them
-INDEX_DIMS = ("Time", "nVertLevels", "nVertLevelsP1", "nSoilLevels",
-              "nIsoLevelsT", "nIsoLevelsZ")
-
 
 def open_data(data_path: str | Path,
               mesh_path: str | Path = "") -> tuple[xr.Dataset, MpasMesh]:
@@ -102,11 +98,54 @@ def spatial_dim(da: xr.DataArray) -> str:
     )
 
 
-def select(da: xr.DataArray, time: int = 0, level: int = 0) -> np.ndarray:
-    """Reduce a field to one value per mesh element."""
-    for dim in INDEX_DIMS:
+def level_dims(da: xr.DataArray) -> list[str]:
+    """The stacking axes of a field: whatever is left once Time and the mesh go.
+
+    Defined by exclusion rather than by a list of known names. The vertical
+    dimension is whatever the person who wrote the diagnostic called it --
+    nVertLevels and nSoilLevels from the model core, nIsoLevelsT/nIsoLevelsZ
+    from MPAS's own isobaric diagnostics, or a custom nIsoLevels from a build
+    that writes its own -- and a name list silently mis-plots every convention
+    it has not been told about.
+    """
+    return [str(d) for d in da.dims if d != "Time" and d not in SPATIAL_DIMS]
+
+
+def select(da: xr.DataArray, time: int = 0, level: int = 0,
+           sel: dict[str, int] | None = None) -> np.ndarray:
+    """Reduce a field to one value per mesh element.
+
+    `level` indexes the field's stacking axis. Some fields have more than one
+    -- `o3clim(nCells, nOznLevels, nMonths)` is ozone by level *and* by month
+    -- and one index cannot mean both: taking `level` as March as well as the
+    third level draws a plausible map of the wrong thing. So every axis but
+    one must be pinned through `sel`, a {dim: index} mapping, and which axis
+    `level` refers to stops being a guess. `remap.remappable` declines the
+    same ambiguity rather than resolving it, for the same reason.
+
+    `sel` also names an axis outright -- `sel={"nIsoLevels": 3}` -- which is
+    how to reach a specific axis of a field whose dimensions this code has
+    never heard of.
+    """
+    sel = dict(sel or {})
+    unknown = [d for d in sel if d not in da.dims]
+    if unknown:
+        raise KeyError(
+            f"{da.name!r} has dims {da.dims}, so sel={{{', '.join(unknown)}}} "
+            f"selects nothing."
+        )
+
+    free = [d for d in level_dims(da) if d not in sel]
+    if len(free) > 1:
+        raise ValueError(
+            f"{da.name!r} has {len(free)} stacking axes ({', '.join(free)}), so "
+            f"level={level} is ambiguous -- it would index every one of them. "
+            f"Pin all but the one you want to vary, e.g. sel={{{free[0]!r}: 0}}."
+        )
+
+    picks = {"Time": time, **sel, **{d: level for d in free}}
+    for dim, idx in picks.items():
         if dim in da.dims:
-            idx = time if dim == "Time" else level
             n = da.sizes[dim]
             if not -n <= idx < n:
                 raise IndexError(f"{dim}={idx} out of range for {da.name!r} (size {n})")

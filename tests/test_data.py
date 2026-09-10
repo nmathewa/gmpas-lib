@@ -91,6 +91,68 @@ def test_out_of_range_index_names_the_dimension_and_size(diag_beside_mesh):
     ds.close()
 
 
+def test_a_custom_vertical_dimension_is_indexed_like_any_other(tmp_path):
+    """A build writing temperature_isobaric(Time, nCells, nIsoLevels).
+
+    The axis is not one of the model core's, and the levels come last rather
+    than in the middle, so this pins that neither the name nor the position
+    is what makes a stacking axis.
+    """
+    vals = np.arange(2 * 4 * 5, dtype="f4").reshape(2, 4, 5)
+    ds = xr.Dataset({
+        "temperature_isobaric": (("Time", "nCells", "nIsoLevels"), vals),
+        "iso_levels": (("nIsoLevels",), np.array([1000., 850., 700., 500., 250.], "f4")),
+    })
+
+    for k in range(5):
+        assert select(ds.temperature_isobaric, time=1, level=k) == pytest.approx(
+            vals[1, :, k]
+        )
+
+
+def test_two_stacking_axes_are_refused_rather_than_indexed_together(tmp_path):
+    """o3clim is ozone by level *and* by month; one index cannot mean both."""
+    ds = xr.Dataset({
+        "o3clim": (("nCells", "nOznLevels", "nMonths"),
+                   np.arange(4 * 5 * 12, dtype="f4").reshape(4, 5, 12)),
+    })
+
+    with pytest.raises(ValueError, match="nOznLevels, nMonths"):
+        select(ds.o3clim, level=3)
+
+
+def test_sel_pins_the_axes_level_does_not_vary(tmp_path):
+    vals = np.arange(4 * 5 * 12, dtype="f4").reshape(4, 5, 12)
+    ds = xr.Dataset({"o3clim": (("nCells", "nOznLevels", "nMonths"), vals)})
+
+    # pin the month, and `level` means the level
+    assert select(ds.o3clim, level=3, sel={"nMonths": 2}) == pytest.approx(vals[:, 3, 2])
+    # pin the level, and the same `level` argument means the month
+    assert select(ds.o3clim, level=7, sel={"nOznLevels": 4}) == pytest.approx(
+        vals[:, 4, 7]
+    )
+    # or name every axis and leave `level` unused
+    assert select(ds.o3clim, sel={"nOznLevels": 1, "nMonths": 7}) == pytest.approx(
+        vals[:, 1, 7]
+    )
+
+
+def test_sel_on_a_dimension_the_field_does_not_have_is_an_error():
+    ds = xr.Dataset({"theta": (("nCells", "nVertLevels"), np.zeros((4, 3), "f4"))})
+
+    with pytest.raises(KeyError, match="nMonth"):
+        select(ds.theta, sel={"nMonth": 2})
+
+
+def test_out_of_range_sel_names_the_dimension_and_size():
+    ds = xr.Dataset({
+        "o3clim": (("nCells", "nOznLevels", "nMonths"), np.zeros((4, 5, 12), "f4")),
+    })
+
+    with pytest.raises(IndexError, match="nMonths=99"):
+        select(ds.o3clim, level=0, sel={"nMonths": 99})
+
+
 # ------------------------------------------------------------------- grouping
 
 
