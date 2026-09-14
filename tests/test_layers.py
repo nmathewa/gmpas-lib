@@ -88,7 +88,7 @@ COUNTS = {name: 3 for name in SPATIAL}
     ({"layers": [{"kind": "contourf", "var": "t", "options": {"transform": 1}}]},
      "unknown option"),
     ({"layers": [{"kind": "contourf", "var": "t", "options": {"cmap": "__import__"}}]},
-     "not a matplotlib colormap"),
+     "not a known colormap"),
     ({"layers": [{"kind": "coastlines", "options": {"color": "red; x"}}]}, "not a colour"),
     ({"layers": [{"kind": "contour", "var": "t", "options": {"label_fmt": "%s%n"}}]},
      "printf number format"),

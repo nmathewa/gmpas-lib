@@ -142,11 +142,21 @@ def scale(opts: dict, lo: float, hi: float):
 
     cmap = get(opts.get("cmap") or "viridis", bool(opts.get("reverse")),
                opts.get("under_color"), opts.get("over_color"), opts.get("missing_color"))
-    extend = opts.get("extend") or "neither"
     bands = opts.get("bands")
     if bands:
         edges = band_edges(lo, hi, bands)
-        return cmap, colors.BoundaryNorm(edges, cmap.N, extend=extend), edges
+        if bands > cmap.N:
+            # more bands than colours -- GrADS' 13-colour rainbow over 20
+            # levels -- repeats colours, as GrADS does, instead of failing
+            cmap = get(opts.get("cmap") or "viridis", bool(opts.get("reverse")),
+                       opts.get("under_color"), opts.get("over_color"),
+                       opts.get("missing_color")).resampled(int(bands))
+        # No `extend` on the norm: values outside the range take the colormap's
+        # own under/over colours (its end colours unless set), and `extend`
+        # only draws the colorbar's triangles. Putting it on the norm makes the
+        # norm spend two of the colormap's colours on the ends, which a
+        # 13-colour GrADS rainbow over 13 bands does not have.
+        return cmap, colors.BoundaryNorm(edges, cmap.N), edges
     kind = opts.get("norm") or "linear"
     if kind == "log":
         norm = colors.LogNorm(vmin=lo, vmax=hi)
