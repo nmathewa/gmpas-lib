@@ -31,10 +31,10 @@ import numpy as np
 
 from . import data as _data
 from . import layers as _layers
-from . import netcdf
+from . import netcdf, palettes
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
-from .viewer import CMAPS, _overlay, _png, ramp
+from .viewer import _overlay, _png, ramp
 
 # How each axis is recognised, strongest evidence first. These are the CF
 # conventions' own markers, the same ones cf_xarray keys on -- `standard_name`,
@@ -189,6 +189,33 @@ _GRID_KINDS = ("pcolormesh", "contourf", "contour", "imshow")
 #: a non-map variable is read whole to plot it; past this it is refused
 PLOT_READ_BYTES = 256 * 1024 * 1024
 
+#: the fast map's colour options: the layer colour-scale options that make
+#: sense for a raster, checked by the same code as a layer's
+COLOUR_OPTIONS = {
+    **{k: _layers._COLOUR_SCALE[k] for k in ("reverse", "norm", "gamma", "linthresh",
+                                             "extend", "under_color", "over_color")},
+    "bands": {**_layers._RASTER_COLOUR["bands"], "max": 252},   # 252 data palette entries
+    "missing_color": _layers._RASTER_COLOUR["missing_color"],
+}
+
+
+def clean_colour(colour) -> dict:
+    """A fast-map colour option set from the page, checked, or {} for none."""
+    import json
+
+    if colour in (None, "", {}):
+        return {}
+    if isinstance(colour, (str, bytes)):
+        if len(colour) > 4000:
+            raise ValueError("colour options are too large")
+        try:
+            colour = json.loads(colour)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"colour options are not valid JSON: {exc}") from None
+    opts = _layers._clean_options(colour, COLOUR_OPTIONS, "colour: ")
+    _layers._check_colour_options(opts, "colour: ")
+    return opts
+
 #: a figure-per-frame GIF renders each step through matplotlib (~0.3 s each)
 GIF_FIGURE_FRAMES = 1000
 
@@ -310,6 +337,7 @@ class GenericViewer:
         self._steps, self.labels = self._axis()
         self.scanning = False
         self.series = self
+        palettes.register()           # cmo.*, ferret.*, grads.* for this viewer's picker
 
         if background_scan and len(self.files) > 1:
             self.scanning = True
@@ -562,8 +590,11 @@ class GenericViewer:
             "home": list(self.home),
             "nx": self.nx,
             "ny": self.ny,
-            "cmaps": CMAPS,
-            "ramps": {name: ramp(name) for name in CMAPS},
+            "cmaps": [n for names in self._palette_groups().values() for n in names],
+            "ramps": {n: ramp(n) for names in self._palette_groups().values()
+                      for n in names},
+            "palettes": self._palette_groups(),
+            "colour_options": COLOUR_OPTIONS,
             "kind_labels": KIND_LABELS,
             "layer_schema": _layers.schema(),
             "variables": variables,
@@ -589,7 +620,22 @@ class GenericViewer:
                              dtype=np.float64)
         return arr[np.ix_(frow - r0, fcol - c0)]
 
+    @staticmethod
+    def clean_colour(colour) -> dict:
+        """The fast map's colour options, checked (see `clean_colour`)."""
+        return clean_colour(colour)
+
+    def _palette_groups(self) -> dict:
+        if not hasattr(self, "_groups"):
+            self._groups = palettes.groups()
+        return self._groups
+
     def _raster(self, var, step, level, extent, nx, ny) -> np.ndarray:
+        return self._raster_masked(var, step, level, extent, nx, ny)[0]
+
+    def _raster_masked(self, var, step, level, extent, nx, ny):
+        """`_raster`, and which pixels fall on the grid at all -- so a colour for
+        missing cells paints NaN data but never the area beyond a regional grid."""
         """The field sampled onto exactly the (ny, nx) pixels of `extent`.
 
         Row 0 is the southernmost row, as `_png` expects. Pixels beyond a
@@ -603,11 +649,12 @@ class GenericViewer:
         cols, col_in = _nearest_along(self.lon, lon_t, self.cyclic)
         rows, row_in = _nearest_along(self.lat, lat_t, False)
         img = np.full((ny, nx), np.nan)
+        on_grid = row_in[:, None] & col_in[None, :]
         if not (row_in.any() and col_in.any()):
-            return img
+            return img, on_grid
         vals = self._gather(var, step, level, rows[row_in], cols[col_in])
         img[np.ix_(row_in, col_in)] = vals
-        return img
+        return img, on_grid
 
     def _slice(self, var: str, time: int, level: int, extent) -> np.ndarray:
         """The grid's own cells inside `extent`, ascending, at native resolution."""
@@ -619,15 +666,29 @@ class GenericViewer:
         return self._gather(var, time, level, i, j)
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
-              nx=None, ny=None, compress=1):
+              nx=None, ny=None, compress=1, colour=None, meta=None):
+        """A map frame. With no `colour` options this is `viewer._png`, byte for
+        byte; with them, `palettes.encode`, and `meta["colorbar"]` describes
+        the bar the page should draw beside it."""
         nx, ny = nx or self.nx, ny or self.ny
         if var not in self._spatial_vars():
             # no colour range for a plain plot; 0..1 is an unused placeholder
             return self.plot(var, time, level, "auto", extent, nx, ny), 0.0, 1.0
 
-        img = self._raster(var, time, level, extent, nx, ny)
+        opts = clean_colour(colour)
+        if not opts:
+            img = self._raster(var, time, level, extent, nx, ny)
+            lo, hi = self._range(img, vmin, vmax)
+            return _png(img, cmap, lo, hi, compress), lo, hi
+        from .palettes import encode
+
+        img, on_grid = self._raster_masked(var, time, level, extent, nx, ny)
         lo, hi = self._range(img, vmin, vmax)
-        return _png(img, cmap, lo, hi, compress), lo, hi
+        png, spec = encode.png(img, {**opts, "cmap": cmap or "viridis"}, lo, hi, compress,
+                               outside=~on_grid)
+        if meta is not None:
+            meta["colorbar"] = spec
+        return png, lo, hi
 
     @staticmethod
     def _range(img, vmin, vmax) -> tuple[float, float]:
@@ -770,7 +831,7 @@ class GenericViewer:
             return da.load()
 
     def _draw(self, fig, var, time, level, kind, extent, cmap, vmin, vmax, lon, lat,
-              layers=None):
+              layers=None, colour=None):
         """Put one plot on `fig`. Shared by the live plot, figures and GIF frames."""
         import matplotlib.pyplot as plt  # noqa: F401  (backend already chosen)
 
@@ -790,6 +851,20 @@ class GenericViewer:
             method = kind if kind != "map" else (
                 "imshow" if self._even(da) else "pcolormesh")
             opts = dict(cmap=cmap or None, vmin=vmin, vmax=vmax)
+            colours = clean_colour(colour)
+            if colours:
+                # the fast map's colours, in a figure: the same range rule as
+                # the map (_range) and the same colormap and norm (palettes.scale)
+                lo, hi = self._range(np.asarray(da.values, float), vmin, vmax)
+                levels = None
+                if colours.get("bands") and method in ("contour", "contourf"):
+                    # contours band by their levels, not by a norm
+                    levels = list(palettes.band_edges(lo, hi, colours["bands"]))
+                    colours = {**colours, "bands": None}
+                cm, norm, _ = palettes.scale({**colours, "cmap": cmap or "viridis"}, lo, hi)
+                opts = dict(cmap=cm, norm=norm, extend=colours.get("extend") or "neither")
+                if levels is not None:
+                    opts["levels"] = levels
             if method != "contour":
                 # under the map, not beside it: a 2:1 map leaves a vertical
                 # colorbar twice the map's height and the plot squeezed
@@ -913,7 +988,8 @@ class GenericViewer:
         return (0.5 * (extent[0] + extent[1]), 0.5 * (extent[2] + extent[3]))
 
     def _render(self, var, time, level, kind, extent, figsize, dpi,
-                cmap=None, vmin=None, vmax=None, lon=None, lat=None, layers=None) -> bytes:
+                cmap=None, vmin=None, vmax=None, lon=None, lat=None, layers=None,
+                colour=None) -> bytes:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -921,7 +997,7 @@ class GenericViewer:
         fig = plt.figure(figsize=figsize, dpi=dpi, layout="constrained")
         try:
             self._draw(fig, var, time, level, kind, extent, cmap, vmin, vmax, lon, lat,
-                       layers)
+                       layers, colour)
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=dpi)
             return buf.getvalue()
@@ -929,7 +1005,8 @@ class GenericViewer:
             plt.close(fig)
 
     def plot(self, var, time, level, kind, extent, width=900, height=560,
-             cmap=None, vmin=None, vmax=None, lon=None, lat=None, layers=None) -> bytes:
+             cmap=None, vmin=None, vmax=None, lon=None, lat=None, layers=None,
+             colour=None) -> bytes:
         """The live plot pane: `kind` drawn at the browser's pixel size.
 
         `layers` is the composite's stack (JSON text or a dict) when `kind` is
@@ -938,12 +1015,12 @@ class GenericViewer:
         width, height = int(np.clip(width, 200, 4000)), int(np.clip(height, 150, 3000))
         return self._render(var, time, level, kind, extent,
                             (width / 100, height / 100), 100, cmap, vmin, vmax, lon, lat,
-                            layers)
+                            layers, colour)
 
     # -- export ------------------------------------------------------------
 
     def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
-               kind="map", lon=None, lat=None, layers=None) -> bytes:
+               kind="map", lon=None, lat=None, layers=None, colour=None) -> bytes:
         """A publication-shaped figure of what is on screen.
 
         Sized by the same `Style` presets as the MPAS path. The fast map
@@ -956,10 +1033,10 @@ class GenericViewer:
         if var not in self._spatial_vars() and kind == "map":
             kind = "auto"
         return self._render(var, time, level, kind, extent, st.figsize, st.dpi,
-                            cmap, vmin, vmax, lon, lat, layers)
+                            cmap, vmin, vmax, lon, lat, layers, colour)
 
     def gif(self, var, level, extent, cmap, vmin, vmax, nx=None, ny=None, fps=8,
-            kind="map", lon=None, lat=None, layers=None) -> bytes:
+            kind="map", lon=None, lat=None, layers=None, colour=None) -> bytes:
         """Every timestep as one animated GIF, drawn the way the screen is.
 
         The fast map re-containers its own palette frames, as `Viewer.gif`
@@ -988,7 +1065,7 @@ class GenericViewer:
                                          vmin, vmax)
             for step in range(n):
                 png, _, _ = self.frame(var, step, level, extent, cmap, vmin, vmax,
-                                       nx, ny, compress=1)
+                                       nx, ny, compress=1, colour=colour)
                 frames.append(Image.open(io.BytesIO(png)).convert("P"))
             transparency = {"transparency": 255}
         else:

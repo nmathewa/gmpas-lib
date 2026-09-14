@@ -542,6 +542,8 @@ def _plot_extras(q: dict) -> dict:
         out["kind"] = q["kind"]
     if q.get("layers"):
         out["layers"] = q["layers"]            # JSON text; gmpas.layers checks it
+    if q.get("colour"):
+        out["colour"] = q["colour"]            # JSON text; generic.clean_colour checks it
     for key in ("lon", "lat"):
         if q.get(key):
             out[key] = float(q[key])
@@ -572,6 +574,11 @@ def _handler(viewer: Viewer, html: str = ""):
                                       "application/json")
                 if url.path == "/api/frame":
                     extent = [float(v) for v in q["extent"].split(",")]
+                    # colour options only for a viewer that has them (--generic);
+                    # the MPAS viewer's frame call is exactly what it was
+                    colours: dict = {}
+                    if hasattr(viewer, "clean_colour") and q.get("colour"):
+                        colours = {"colour": q["colour"], "meta": {}}
                     png, lo, hi = viewer.frame(
                         q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
                         extent, q.get("cmap", "viridis"),
@@ -580,10 +587,15 @@ def _handler(viewer: Viewer, html: str = ""):
                         int(q["nx"]) if q.get("nx") else None,
                         int(q["ny"]) if q.get("ny") else None,
                         int(q.get("compress", 1)),
+                        **colours,
                     )
                     self.send_response(200)
                     self.send_header("Content-Type", "image/png")
                     self.send_header("X-Range", f"{lo},{hi}")
+                    if colours.get("meta", {}).get("colorbar"):
+                        # ASCII JSON: header values are latin-1
+                        spec = json.dumps(colours["meta"]["colorbar"])
+                        self.send_header("X-Colorbar", spec)
                     self.send_header("Content-Length", str(len(png)))
                     self.end_headers()
                     return self.wfile.write(png)
