@@ -1053,7 +1053,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #stage.plotting #msg{top:auto;bottom:14px}   /* keep off the figure's own title */
 /* --generic layers: a stack editor in a wider right panel */
 body.layering #right{width:330px}
-body.layering #cmapsec,body.layering #rangesec{display:none}
+body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:none}
 #lyList{margin-top:8px;border:1px solid var(--line);border-radius:4px}
 .lyrow{display:flex;align-items:center;gap:5px;padding:5px 6px;
        border-bottom:1px solid var(--line);font-size:12px;cursor:pointer;user-select:none}
@@ -1066,8 +1066,12 @@ body.layering #cmapsec,body.layering #rangesec{display:none}
 .lyrow button{padding:1px 5px;font-size:11px;min-width:0}
 .lygroup{color:var(--dim);font-size:10px;text-transform:uppercase}
 #lyEdit{margin-top:10px}
-#lyEdit .f,#lyFigForm .f{display:grid;grid-template-columns:108px 1fr;gap:4px 8px;
-       align-items:center;margin-bottom:4px;font-size:11px;color:var(--dim)}
+#lyEdit .f,#lyFigForm .f,#colourForm .f{display:grid;grid-template-columns:78px 1fr;
+       gap:4px 6px;align-items:center;margin-bottom:4px;font-size:11px;color:var(--dim)}
+#colourForm .f input,#colourForm .f select{width:100%;box-sizing:border-box;font-size:11px;
+       padding:2px 4px}
+#colourForm .f .pair{display:flex;gap:4px}
+#colourForm .f input[type=color]{width:26px;padding:0;flex:none}
 #lyEdit .f input,#lyEdit .f select,#lyFigForm .f input,#lyFigForm .f select{
        width:100%;box-sizing:border-box;font-size:11px;padding:2px 4px}
 #lyEdit .f .pair{display:flex;gap:4px}
@@ -1100,6 +1104,12 @@ body.layering #cmapsec,body.layering #rangesec{display:none}
      pointer-events:none}
 #bar{padding:8px 14px;border-top:1px solid var(--line)}
 #ramp{height:14px;border-radius:2px;border:1px solid var(--line)}
+/* --generic colour options: a row with out-of-range triangles either side */
+.cbrow{display:flex;align-items:center}
+.cbrow #ramp{flex:1}
+#cbunder,#cbover{display:none;width:12px;height:16px;flex:none}
+#cbunder{clip-path:polygon(100% 0,100% 100%,0 50%)}
+#cbover{clip-path:polygon(0 0,100% 50%,0 100%)}
 #ticks{display:flex;justify-content:space-between;margin-top:3px;color:var(--dim);
        font-size:11px;font-variant-numeric:tabular-nums}
 #cblabel{color:var(--dim);font-size:11px;margin-bottom:4px}
@@ -1163,7 +1173,8 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
   </div>
   <div id="bar">
     <div id="cblabel"></div>
-    <div id="ramp"></div>
+    <div class="cbrow">
+      <div id="cbunder"></div><div id="ramp"></div><div id="cbover"></div></div>
     <div id="ticks"></div>
   </div>
 </div>
@@ -1189,6 +1200,13 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
   </div>
 
   <div class="sec" id="cmapsec"><label>colormap</label><select id="cmap"></select></div>
+
+  <div class="sec" id="coloursec" style="display:none"><label>colour options</label>
+    <div id="colourForm"></div>
+    <div class="row" style="margin-top:6px"><button id="colourReset">reset</button></div>
+    <div class="hint" id="colourhint">bands, out-of-range and missing colours, reverse,
+      and a power scale -- also used by figures and animations</div>
+  </div>
 
   <div class="sec" id="rangesec"><label>colour range</label>
     <div class="row">
@@ -1278,7 +1296,21 @@ function clamp(){
 async function boot(){
   M = await (await fetch("api/meta")).json();
   $("#title").textContent = M.file;
-  M.cmaps.forEach(c=>{const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
+  if(M.palettes){                      // --generic: palettes grouped by their source
+    const names={matplotlib:"matplotlib", cmocean:"cmocean",
+                 ferret:"Ferret", grads:"GrADS"};
+    Object.entries(M.palettes).forEach(([group, list])=>{
+      if(!list.length) return;
+      const og=document.createElement("optgroup"); og.label=names[group]||group;
+      list.forEach(c=>{
+        const o=document.createElement("option"); o.textContent=c; og.append(o); });
+      $("#cmap").append(og);
+    });
+    colourOpen();
+  }else{
+    M.cmaps.forEach(c=>{
+      const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
+  }
   if(M.layer_schema){                  // --generic: colormap suggestions for layer forms
     const dl=document.createElement("datalist"); dl.id="lyCmaps";
     M.cmaps.forEach(c=>{ const o=document.createElement("option"); o.value=c;
@@ -1483,17 +1515,71 @@ function graticule(){
   }
 }
 
+let lastBar=null;          // --generic: the server's description of the bar
 function colorbar(lo,hi){
+  const fmt=v=>Math.abs(v)>=1e4||(v!==0&&Math.abs(v)<1e-3)
+    ? v.toExponential(2) : v.toPrecision(4);
+  if(lastBar){ return colorbarSpec(lastBar, fmt); }
+  $("#cbunder").style.display="none"; $("#cbover").style.display="none";
   const stops=M.ramps[$("#cmap").value];
   $("#ramp").style.background=`linear-gradient(90deg,${stops.join(",")})`;
   const n=5, out=[];
   for(let i=0;i<n;i++){
     const v=lo+(hi-lo)*i/(n-1);
-    out.push(`<span>${Math.abs(v)>=1e4||(v!==0&&Math.abs(v)<1e-3)?v.toExponential(2):v.toPrecision(4)}</span>`);
+    out.push(`<span>${fmt(v)}</span>`);
   }
   $("#ticks").innerHTML=out.join("");
   $("#cblabel").textContent=cur?cur.label:"";
 }
+// Bands as hard colour steps, triangles for the out-of-range colours: drawn
+// from the colours the server used for the image, so the two cannot disagree.
+function colorbarSpec(spec, fmt){
+  const s=spec.stops;
+  if(spec.edges){
+    const w=100/s.length;
+    $("#ramp").style.background="linear-gradient(90deg,"+
+      s.map((c,i)=>`${c} ${(i*w).toFixed(3)}% ${((i+1)*w).toFixed(3)}%`).join(",")+")";
+  }else{
+    $("#ramp").style.background=`linear-gradient(90deg,${s.join(",")})`;
+  }
+  const tri=(id, colour)=>{ const el=$(id);
+    el.style.display=colour?"block":"none"; if(colour) el.style.background=colour; };
+  tri("#cbunder", spec.under); tri("#cbover", spec.over);
+  const ticks = spec.edges && spec.edges.length<=13 ? spec.edges
+    : [0,1,2,3,4].map(i=>spec.lo+(spec.hi-spec.lo)*i/4);
+  $("#ticks").innerHTML=ticks.map(v=>`<span>${fmt(v)}</span>`).join("");
+  $("#cblabel").textContent=cur?cur.label:"";
+}
+
+// ------------------------------------------------------- colour options
+// --generic only: the fast map's bands, out-of-range and missing colours,
+// reverse and power scale. Saved per file; sent as one JSON parameter the
+// server checks against the same table layers use.
+let COL={};
+function colourKey(){ return "gmpas.colour."+M.file; }
+function colourParam(){
+  if(!M || !M.colour_options) return "";
+  return Object.keys(COL).length ? JSON.stringify(COL) : "";
+}
+function colourOpen(){
+  if(!M.colour_options) return;
+  try{ COL=JSON.parse(localStorage.getItem(colourKey())||"{}")||{}; }catch(e){ COL={}; }
+  $("#coloursec").style.display="";
+  colourForm();
+}
+function colourForm(){
+  const host=$("#colourForm"); host.innerHTML="";
+  Object.entries(M.colour_options).forEach(([k, spec])=>lyField(host, k.replace("_"," "),
+    spec, COL[k], v=>{
+      if(v===null) delete COL[k]; else COL[k]=v;
+      try{ localStorage.setItem(colourKey(), JSON.stringify(COL)); }catch(e){}
+      stopPlayback(); draw();
+    }));
+}
+$("#colourReset").onclick=()=>{
+  COL={}; try{ localStorage.removeItem(colourKey()); }catch(e){}
+  colourForm(); stopPlayback(); draw();
+};
 
 async function draw(){
   if(!cur) return;
@@ -1513,10 +1599,12 @@ async function draw(){
     nx:Math.round(M.nx*OUTSET), ny:Math.round(M.ny*OUTSET)});
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
+  if(colourParam()) p.set("colour", colourParam());
   const t0=performance.now();
   const r=await fetch("api/frame?"+p, {signal: ctrl.signal});
   if(!r.ok){ say((await r.json()).error); return; }
   const [lo,hi]=r.headers.get("X-Range").split(",").map(Number);
+  lastBar = r.headers.get("X-Colorbar") ? JSON.parse(r.headers.get("X-Colorbar")) : null;
   const url=URL.createObjectURL(await r.blob());
   const img=$("#data"), old=img.src;
   img.onload=()=>{ if(old.startsWith("blob:")) URL.revokeObjectURL(old); };
@@ -1546,6 +1634,7 @@ async function drawPlot(){
     if($("#vmin").value) p.set("vmin",$("#vmin").value);
     if($("#vmax").value) p.set("vmax",$("#vmax").value);
     if($("#kind").value==="layers") p.set("layers", JSON.stringify(LY));
+    if(colourParam()) p.set("colour", colourParam());
     const t0=performance.now();
     const r=await fetch("api/plot?"+p, {signal: ctrl.signal});
     if(!r.ok){
@@ -1699,7 +1788,10 @@ function lyField(host, label, spec, value, set){
     const pick=document.createElement("input"); pick.type="color";
     pick.value=/^#[0-9a-f]{6}$/i.test(text.value||dflt) ? (text.value||dflt) : "#000000";
     pick.oninput=()=>{ text.value=pick.value; set(pick.value); };
-    text.onchange=()=>set(text.value.trim()||null);
+    text.onchange=()=>{
+      if(/^#[0-9a-f]{6}$/i.test(text.value.trim())) pick.value=text.value.trim();
+      set(text.value.trim()||null);
+    };
     input.append(text, pick);
   }else{
     input=document.createElement("input");
@@ -1793,11 +1885,12 @@ let lastRange=null;
 
 function animParams(){
   return {varName:cur.name, level:$("#level").value, box:boxOf(view),
-          cmap:$("#cmap").value, vmin:$("#vmin").value, vmax:$("#vmax").value};
+          cmap:$("#cmap").value, vmin:$("#vmin").value, vmax:$("#vmax").value,
+          colour:colourParam()};
 }
 function animKeyOf(p){
   return JSON.stringify([p.varName, p.level, p.box.map(v=>+v.toFixed(4)),
-                         p.cmap, p.vmin, p.vmax]);
+                         p.cmap, p.vmin, p.vmax, p.colour||""]);
 }
 
 function animRow(key, entry){
@@ -1882,6 +1975,7 @@ async function animLoad(key, params){
       const p=new URLSearchParams({var:params.varName, time:i, level:params.level,
         extent:fetchBox.join(","), cmap:params.cmap, nx, ny,
         vmin:params.vmin, vmax:params.vmax, compress:$("#quality").value});
+      if(params.colour) p.set("colour", params.colour);
       const r=await fetch("api/frame?"+p);
       if(!r.ok) throw new Error((await r.json()).error);
       urls[i]=URL.createObjectURL(await r.blob());
@@ -2027,6 +2121,7 @@ async function exportAs(kind, label){
   if(cur.kinds){                       // --generic: export what is on screen
     p.set("kind", $("#kind").value);
     if($("#kind").value==="layers") p.set("layers", JSON.stringify(LY));
+    if(colourParam()) p.set("colour", colourParam());
     const pt=probePt||{lon:view.clon, lat:view.clat};
     p.set("lon", pt.lon); p.set("lat", pt.lat);
   }
