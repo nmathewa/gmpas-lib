@@ -277,6 +277,21 @@ def test_a_gif_freezes_colour_ranges_and_contour_values(gv):
     assert Image.open(io.BytesIO(gif)).n_frames == gv.steps
 
 
+def test_layers_and_the_hovmoller_are_offered_side_by_side(gv, monkeypatch):
+    """Both extend the same plot calls; each must get its own argument."""
+    assert {"layers", "hovmoller"} <= set(gv.kinds("t"))
+    assert gv.hovmoller("t", 0, band=(-10.0, 10.0)).dims[0] == gv.time_name
+    # a GIF frame that lost the stack would quietly draw the default one instead
+    drawn = []
+    draw = L.draw
+    monkeypatch.setattr(L, "draw", lambda gv_, fig, stack, *a, **k: (
+        drawn.append([layer["kind"] for layer in stack["layers"]]),
+        draw(gv_, fig, stack, *a, **k))[1])
+    gv.gif("t", 0, gv.home, None, None, None, kind="layers",
+           layers={"layers": [{"kind": "barbs", "u": "u", "v": "v"}]})
+    assert drawn and all(kinds == ["barbs"] for kinds in drawn)
+
+
 def test_the_stack_travels_over_http(gv):
     import threading
     import urllib.error

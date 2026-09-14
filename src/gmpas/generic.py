@@ -24,6 +24,7 @@ from __future__ import annotations
 import io
 import sys
 import threading
+import time as _time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -31,7 +32,8 @@ import numpy as np
 
 from . import data as _data
 from . import layers as _layers
-from . import netcdf
+from . import netcdf, timing
+from .cache import BuildCache, view_budget
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
 from .viewer import CMAPS, _overlay, _png, ramp
@@ -181,6 +183,7 @@ KIND_LABELS = {
     "step": "step",
     "hist": "histogram",
     "series": "line: time series at point",
+    "hovmoller": "Hovmöller (time × lon)",
     "profile": "line: profile at point",
     "layers": "layers (composite)",
 }
@@ -191,6 +194,84 @@ PLOT_READ_BYTES = 256 * 1024 * 1024
 
 #: a figure-per-frame GIF renders each step through matplotlib (~0.3 s each)
 GIF_FIGURE_FRAMES = 1000
+
+#: one Hovmöller read (a chunk of steps of one file) decodes at most this much
+HOV_READ_BYTES = 64 * 1024 * 1024
+
+#: how a Hovmöller is drawn; "auto" picks by size, see GenericViewer._hov_method
+HOV_METHODS = ("auto", "contourf", "pcolormesh", "contour")
+
+#: Drawing limits, from rendering a year of hourly 0.25-degree columns (8760 x
+#: 1440 = 12.6M cells). A smooth field: imshow 2.9 s / 0.8 GB, filled contour
+#: 4.1 s / 0.3 GB, pcolormesh 11.9 s / 1.2 GB. A noisy one -- what hourly
+#: precipitation is -- filled contour 28.7 s / 2.1 GB, contour lines 24.4 s /
+#: 1.3 GB, imshow 4.8 s. At 2.9M noisy cells filled contour is 4.8 s / 0.5 GB.
+#: So "auto" contours only small results and draws the rest with imshow, and an
+#: explicit contour or pcolormesh past HOV_RENDER_CELLS is refused, not left to
+#: tie up a login node for half a minute. Display only: the values are the same.
+HOV_CONTOUR_CELLS = 1_000_000
+HOV_RENDER_CELLS = 3_000_000
+
+
+class HovmollerCancelled(Exception):
+    """A Hovmöller job was superseded by a request for a different one."""
+
+
+def _hov_columns(lon_file: np.ndarray, cyclic: bool, lon0: float, lon1: float):
+    """Which columns a longitude range covers, as contiguous file slices.
+
+    Returns (pieces, x). `pieces` are (file_slice, reversed) in ascending-x
+    order -- one slice, or two when the range wraps the 0/360 seam, because a
+    contiguous read is far cheaper than the integer-sequence read an unsorted
+    index list falls back to. `x` is the longitude of every selected column,
+    strictly increasing and unwrapped past the seam, so a range from 330 to
+    30 reads as 330..390 rather than folding back on itself.
+
+    No interpolation: the columns are the grid's own. On a grid that repeats
+    its seam column (0 and 360), a full turn drops the duplicate.
+    """
+    n = lon_file.size
+    descending = n > 1 and lon_file[0] > lon_file[-1]
+    asc = lon_file[::-1] if descending else lon_file
+    asc = np.asarray(asc, dtype=np.float64)
+
+    def piece(k0: int, k1: int):                       # ascending indices, inclusive
+        if descending:
+            return slice(n - 1 - k1, n - k0), True
+        return slice(k0, k1 + 1), False
+
+    if lon1 <= lon0:
+        raise ValueError(f"longitude range {lon0:g}..{lon1:g} must increase")
+    if n == 1:
+        return [piece(0, 0)], asc.copy()
+    step = float(np.median(np.diff(asc)))
+    usable = n - 1 if cyclic and asc[-1] - asc[0] >= 360.0 - 0.5 * step else n
+
+    if not cyclic:
+        k = np.nonzero((asc >= lon0) & (asc <= lon1))[0]
+        if not k.size:
+            raise ValueError(f"no grid column between longitude {lon0:g} and {lon1:g}")
+        return [piece(int(k[0]), int(k[-1]))], asc[k[0]:k[-1] + 1].copy()
+
+    if lon1 - lon0 >= 360.0 - 0.5 * step:              # the whole circle
+        shift = 360.0 * np.floor((lon0 - asc[0]) / 360.0)
+        return [piece(0, usable - 1)], asc[:usable] + shift
+
+    lo = asc[0] + np.mod(lon0 - asc[0], 360.0)          # lon0 in the grid's own turn
+    hi = lo + (lon1 - lon0)
+    shift = lon0 - lo                                   # a multiple of 360
+    first = np.nonzero((asc[:usable] >= lo) & (asc[:usable] <= hi))[0]
+    second = np.nonzero(asc[:usable] + 360.0 <= hi)[0]
+    pieces, xs = [], []
+    if first.size:
+        pieces.append(piece(int(first[0]), int(first[-1])))
+        xs.append(asc[first[0]:first[-1] + 1])
+    if second.size:
+        pieces.append(piece(int(second[0]), int(second[-1])))
+        xs.append(asc[second[0]:second[-1] + 1] + 360.0)
+    if not pieces:
+        raise ValueError(f"no grid column between longitude {lon0:g} and {lon1:g}")
+    return pieces, np.concatenate(xs) + shift
 
 
 def _fmt_times(values, units: str = "") -> list[str]:
@@ -310,6 +391,11 @@ class GenericViewer:
         self._steps, self.labels = self._axis()
         self.scanning = False
         self.series = self
+        # Hovmöller results and the jobs reading them; see hovmoller_progress
+        self._hov_cache = BuildCache(budget=view_budget())
+        self._hov_jobs: dict = {}
+        self._hov_errors: dict = {}
+        self._hov_lock = threading.Lock()
 
         if background_scan and len(self.files) > 1:
             self.scanning = True
@@ -465,7 +551,22 @@ class GenericViewer:
         first = self.files[0].name
         return first if len(self.files) == 1 else f"{first}  +{len(self.files) - 1} more"
 
+    def stop_jobs(self, timeout: float = 30.0) -> None:
+        """Cancel every Hovmöller job and wait for it to let go of its files.
+
+        A job reads on its own thread; left running past its viewer -- a
+        server shutting down, a test finishing -- it keeps entering HDF5 while
+        whatever runs next may be writing a file without the lock.
+        """
+        with self._hov_lock:
+            jobs = list(self._hov_jobs.values())
+        for job in jobs:
+            job["cancel"].set()
+        for job in jobs:
+            job["finished"].wait(timeout)
+
     def close(self) -> None:
+        self.stop_jobs()
         with self._lock:
             for ds in self._open.values():
                 ds.close()
@@ -517,6 +618,7 @@ class GenericViewer:
             out = ["map", *_GRID_KINDS, "hist"]
             if self.time_name in da.dims or len(self.files) > 1:
                 out.append("series")
+                out.append("hovmoller")
             if self._stack_dims(da):
                 out.append("profile")
             out.append("layers")
@@ -665,6 +767,267 @@ class GenericViewer:
                 "lat": round(float(self.lat[i]), 4),
                 "value": value}
 
+    # -- Hovmöller: time x longitude, averaged over a latitude band ---------
+
+    def _hov_spec(self, var: str, level: int, band, lons=None, steps=None) -> dict:
+        """Resolve a Hovmöller request to grid indices, or refuse it by name.
+
+        Everything downstream -- the reads, the job key, the size estimate --
+        works from these resolved indices, never from the floats asked for, so
+        two bands that select the same rows are the same Hovmöller.
+        """
+        if self.scanning:
+            raise ValueError(
+                "the time axis is still being counted across the files; a "
+                "Hovmöller over steps whose numbering is about to change would "
+                "mix them up -- try again when the scan finishes"
+            )
+        if var not in self._spatial_vars():
+            raise ValueError(f"{var!r} is not on the map, so it has no Hovmöller")
+        lat0, lat1 = (float(v) for v in band)
+        if not lat1 >= lat0:
+            raise ValueError(f"latitude band {lat0:g}..{lat1:g} must not decrease")
+        rows = np.nonzero((self._lat_file >= lat0) & (self._lat_file <= lat1))[0]
+        if not rows.size:
+            raise ValueError(f"no grid row between latitude {lat0:g} and {lat1:g}")
+        if lons is None:
+            lons = (float(self.lon.min()), float(self.lon.min()) + 360.0) if self.cyclic \
+                else (float(self.lon.min()), float(self.lon.max()))
+        pieces, x = _hov_columns(self._lon_file, self.cyclic,
+                                 float(lons[0]), float(lons[1]))
+
+        n = len(self._steps)
+        a, b = (0, n - 1) if steps is None else (int(steps[0]), int(steps[1]))
+        if not 0 <= a <= b < n:
+            raise ValueError(f"steps {a}..{b} are outside 0..{n - 1}")
+        snapshot = tuple(self._steps[a:b + 1])     # a plain list slice: atomic
+
+        estimate = len(snapshot) * x.size * 8
+        if estimate > self._hov_cache.budget:
+            raise ValueError(
+                f"{len(snapshot)} steps x {x.size} longitudes is "
+                f"~{estimate / 2**20:.0f} MB, over the "
+                f"{self._hov_cache.budget // 2**20} MB "
+                f"a result may take; narrow the step or longitude range "
+                f"(GMPAS_VIEW_CACHE_MB raises the limit)"
+            )
+        stack = self._stack_dims(self.ds[var])
+        if stack and not 0 <= int(level) < int(self.ds[var].sizes[stack[0]]):
+            raise ValueError(f"{stack[0]}={level} is out of range for {var!r}")
+        r0, r1 = int(rows[0]), int(rows[-1])
+        key = (var, int(level), r0, r1,
+               tuple((sl.start, sl.stop, rev) for sl, rev in pieces),
+               tuple((str(path), local) for path, local in snapshot))
+        return {"var": var, "level": int(level), "rows": slice(r0, r1 + 1),
+                "lat": np.asarray(self._lat_file[r0:r1 + 1], dtype=np.float64),
+                "pieces": pieces, "x": x, "steps": snapshot, "first": a, "key": key}
+
+    def _hov_chunk_steps(self, da, n_rows: int, n_cols: int) -> int:
+        """How many steps one read may take.
+
+        Bounded by what a read decodes, not only by the band it keeps: ERA5
+        chunks a whole global field per step, so a 10-degree band still
+        decompresses the globe. Values count as 8 bytes -- packed int16
+        decodes to floating point.
+        """
+        per_step = n_rows * n_cols * 8
+        chunks = da.encoding.get("chunksizes")
+        if chunks and len(chunks) == da.ndim:
+            sizes = dict(zip(da.dims, chunks, strict=False))
+            touched = 8
+            for dim, want in ((self.lat_dim, n_rows), (self.lon_dim, n_cols)):
+                size = int(sizes.get(dim, want) or want)
+                touched *= max(want, size)
+            per_step = max(per_step, touched)
+        return max(1, HOV_READ_BYTES // max(per_step, 1))
+
+    def hovmoller(self, var: str, level: int = 0, band=(-15.0, 15.0), lons=None,
+                  steps=None, progress=None, cancel=None):
+        """`var` averaged over a latitude band, as (time, lon), across every file.
+
+        The band mean weights each row by cos(latitude) -- the area a row's
+        cells cover on the sphere -- and skips NaNs, renormalising the weights
+        over the cells that are valid; a longitude with none is NaN. There is
+        no interpolation: longitude is the grid's own columns, and the rows
+        averaged are those whose centres lie inside the band, inclusive.
+
+        Reads go file by file in chunks of steps, each open-and-read under the
+        netCDF lock and reduced outside it, so frames keep being served while a
+        long run is read. `progress(done, total)` is called after each chunk;
+        `cancel`, an Event, stops the run at the next one.
+        """
+        import xarray as xr
+
+        spec = self._hov_spec(var, level, band, lons, steps)
+        total = len(spec["steps"])
+        w = np.cos(np.deg2rad(spec["lat"]))[None, :, None]
+        out = np.full((total, spec["x"].size), np.nan)
+        times: list = []
+        dated = self.time_name is not None
+
+        # consecutive steps of one file read together
+        runs: list[tuple[Path, list[int]]] = []
+        for path, local in spec["steps"]:
+            if runs and runs[-1][0] == path and runs[-1][1][-1] == local - 1:
+                runs[-1][1].append(local)
+            else:
+                runs.append((path, [local]))
+
+        done = 0
+        with timing.step("generic.hovmoller", steps=total, files=len(runs),
+                         cols=int(spec["x"].size)):
+            for path, locals_ in runs:
+                start = 0
+                while start < len(locals_):
+                    if cancel is not None and cancel.is_set():
+                        raise HovmollerCancelled()
+                    with self._lock:
+                        ds = self._dataset(path, check=path != self.files[0])
+                        if var not in ds:
+                            raise KeyError(f"{var!r} not in {path.name}")
+                        da = ds[var]
+                        count = self._hov_chunk_steps(da, w.shape[1], spec["x"].size)
+                        take = locals_[start:start + count]
+                        has_time = self.time_name in da.dims
+                        if has_time:
+                            da = da.isel({self.time_name: slice(take[0], take[-1] + 1)})
+                        da = self._pick_levels(da, spec["level"])
+                        da = da.isel({self.lat_dim: spec["rows"]})
+                        parts = []
+                        for sl, rev in spec["pieces"]:
+                            part = da.isel({self.lon_dim: sl})
+                            order = ((self.time_name,) if has_time else ()) + \
+                                (self.lat_dim, self.lon_dim)
+                            arr = np.asarray(part.transpose(*order).values,
+                                             dtype=np.float64)
+                            parts.append(arr[..., ::-1] if rev else arr)
+                        if dated:
+                            tvar = ds.variables.get(self.time_name)
+                            if has_time and tvar is not None and np.issubdtype(
+                                    tvar.dtype, np.datetime64):
+                                times.extend(tvar.values[take[0]:take[-1] + 1])
+                            else:
+                                dated = False
+                    _time.sleep(0)                       # let a frame request in
+                    block = np.concatenate(parts, axis=-1)
+                    if not has_time:
+                        block = block[None]
+                    valid = np.isfinite(block)
+                    num = np.where(valid, block * w, 0.0).sum(axis=1)
+                    den = (valid * w).sum(axis=1)
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        out[done:done + len(take)] = np.where(den > 0, num / den, np.nan)
+                    done += len(take)
+                    start += len(take)
+                    if progress is not None:
+                        progress(done, total)
+
+        if dated and len(times) == total:
+            tname, tvals = self.time_name, np.asarray(times)
+        else:
+            tname, tvals = "step", np.arange(spec["first"], spec["first"] + total)
+        src = self.ds[var]
+        lat = spec["lat"]
+        return xr.DataArray(
+            out, dims=(tname, "lon"), coords={tname: tvals, "lon": spec["x"]}, name=var,
+            attrs={**{k: v for k, v in src.attrs.items()
+                      if k in ("units", "long_name", "standard_name")},
+                   "band": f"latitude {min(lat[0], lat[-1]):g} to {max(lat[0], lat[-1]):g} "
+                           f"({lat.size} rows)",
+                   "longitude_range": f"{spec['x'][0]:g} to {spec['x'][-1]:g}",
+                   "weighting": "cos(latitude), NaN skipped",
+                   "level": self._level_text(var, spec["level"]) or "none"})
+
+    # -- Hovmöller jobs: long runs read in the background --------------------
+
+    def hovmoller_progress(self, var: str, level: int, hov: dict | None, extent) -> dict:
+        """Where a Hovmöller stands, starting it if nothing has: done, running or
+        error. Never blocks; the page polls this through HTTP 202."""
+        spec = self._hov_spec(var, level, *self._hov_args(hov, extent))
+        key = spec["key"]
+        with self._hov_lock:
+            if self._hov_cache.peek(key) is not None:
+                return {"state": "done", "progress": [len(spec["steps"])] * 2}
+            if key in self._hov_errors:
+                return {"state": "error", "error": self._hov_errors[key]}
+            job = self._hov_start(key, var, level, hov, extent)
+            return {"state": "running", "progress": [job["done"], job["total"]]}
+
+    def _hov_args(self, hov: dict | None, extent):
+        hov = hov or {}
+        band = hov.get("band") or (extent[2], extent[3])
+        lons = hov.get("lons") or (extent[0], extent[1])
+        return band, lons, hov.get("steps")
+
+    def _hov_start(self, key, var, level, hov, extent) -> dict:
+        """The job for `key`, started if needed. Caller holds `_hov_lock`.
+
+        One job runs at a time: a request for a different Hovmöller cancels the
+        running one at its next chunk, unless an export is waiting on it --
+        typing a new band otherwise leaves the old read holding the lock.
+        """
+        job = self._hov_jobs.get(key)
+        if job is not None and not job["finished"].is_set():
+            return job
+        for other in self._hov_jobs.values():
+            if not other["finished"].is_set() and other["waiters"] == 0:
+                other["cancel"].set()
+        job = {"done": 0, "total": 0, "waiters": 0, "result": None, "error": None,
+               "cancel": threading.Event(), "finished": threading.Event()}
+        band, lons, steps = self._hov_args(hov, extent)
+        job["total"] = len(self._hov_spec(var, level, band, lons, steps)["steps"])
+
+        def progress(done, total):
+            job["done"], job["total"] = done, total
+
+        def run():
+            try:
+                result = self.hovmoller(var, level, band, lons, steps,
+                                        progress=progress, cancel=job["cancel"])
+                job["result"] = result
+                self._hov_cache.get(key, lambda: result)
+            except HovmollerCancelled:
+                pass
+            except Exception as exc:                        # remembered, not retried
+                with self._hov_lock:
+                    self._hov_errors[key] = f"{type(exc).__name__}: {exc}"
+                    while len(self._hov_errors) > 16:
+                        self._hov_errors.pop(next(iter(self._hov_errors)))
+            finally:
+                job["finished"].set()
+                with self._hov_lock:
+                    for k in [k for k, j in self._hov_jobs.items()
+                              if j["finished"].is_set() and j is not job]:
+                        self._hov_jobs.pop(k)
+
+        self._hov_jobs[key] = job
+        threading.Thread(target=run, daemon=True, name="gmpas-hovmoller").start()
+        return job
+
+    def _hov_result(self, var: str, level: int, hov: dict | None, extent):
+        """The Hovmöller, waiting for its job if one is reading it. For figures
+        and exports, which must return the finished thing."""
+        spec = self._hov_spec(var, level, *self._hov_args(hov, extent))
+        key = spec["key"]
+        while True:
+            with self._hov_lock:
+                cached = self._hov_cache.peek(key)
+                if cached is not None:
+                    return cached
+                if key in self._hov_errors:
+                    raise ValueError(self._hov_errors[key])
+                job = self._hov_start(key, var, level, hov, extent)
+                job["waiters"] += 1
+            job["finished"].wait()
+            with self._hov_lock:
+                job["waiters"] -= 1
+            if job["result"] is not None:
+                return job["result"]
+            if not job["cancel"].is_set():
+                with self._hov_lock:
+                    if key in self._hov_errors:
+                        raise ValueError(self._hov_errors[key])
+
     # -- plots, the way xarray.DataArray.plot draws them -----------------
 
     def _file_index(self, i: int, j: int) -> dict:
@@ -770,7 +1133,7 @@ class GenericViewer:
             return da.load()
 
     def _draw(self, fig, var, time, level, kind, extent, cmap, vmin, vmax, lon, lat,
-              layers=None):
+              hov=None, layers=None):
         """Put one plot on `fig`. Shared by the live plot, figures and GIF frames."""
         import matplotlib.pyplot as plt  # noqa: F401  (backend already chosen)
 
@@ -779,6 +1142,9 @@ class GenericViewer:
         if kind == "layers":
             stack = self.layer_stack(layers, var)
             return _layers.draw(self, fig, stack, time, level, extent)
+        if kind == "hovmoller":
+            return self._draw_hovmoller(fig, var, time, level, extent, cmap, vmin, vmax,
+                                        hov)
 
         spatial = var in self._spatial_vars()
         if spatial and kind in (*_GRID_KINDS, "map"):
@@ -867,6 +1233,105 @@ class GenericViewer:
                 getattr(da.plot, kind)(ax=ax, **opts)
         return ax
 
+    def _hov_method(self, da, method: str) -> str:
+        """The drawing a Hovmöller gets. "auto": filled contours while that is
+        quick, then imshow on evenly spaced axes, else pcolormesh."""
+        cells = int(da.size)
+        auto = method in (None, "", "auto")
+        if auto:
+            if cells <= HOV_CONTOUR_CELLS:
+                return "contourf"
+            if self._hov_even(da):
+                return "imshow"
+            method = "pcolormesh"         # uneven time: imshow would misplace rows
+        if method not in HOV_METHODS:
+            raise ValueError(f"Hovmöller method {method!r} is not one of {HOV_METHODS}")
+        if method != "imshow" and cells > HOV_RENDER_CELLS:
+            hint = "narrow the step or longitude range" if auto else \
+                "use auto, or narrow the step or longitude range"
+            raise ValueError(
+                f"{cells:,} cells is over the {HOV_RENDER_CELLS:,} a {method} Hovmöller "
+                f"draws in reasonable time; {hint}"
+            )
+        return method
+
+    @staticmethod
+    def _hov_even(da) -> bool:
+        for dim in da.dims:
+            v = np.asarray(da[dim].values)
+            v = v.astype("datetime64[s]").astype(np.int64) if np.issubdtype(
+                v.dtype, np.datetime64) else v.astype(float)
+            d = np.diff(v)
+            if d.size and not np.allclose(d, d[0], rtol=1e-6):
+                return False
+        return True
+
+    def _draw_hovmoller(self, fig, var, time, level, extent, cmap, vmin, vmax, hov):
+        hov = hov or {}
+        da = self._hov_result(var, level, hov, extent)
+        method = self._hov_method(da, hov.get("method", "auto"))
+        down = hov.get("ydir", "down") != "up"
+        tdim = da.dims[0]
+        ax = fig.add_subplot()
+        opts = dict(ax=ax, x="lon", y=tdim, yincrease=not down)
+        if method == "contour":
+            da.plot.contour(cmap=cmap or None, vmin=vmin, vmax=vmax, **opts)
+        else:
+            kw = dict(cmap=cmap or None, vmin=vmin, vmax=vmax,
+                      cbar_kwargs={"label": _data.field_label(self.ds[var]),
+                                   "shrink": 0.9})
+            if method == "imshow":
+                # imshow on datetimes wants numbers; the extent carries the dates
+                self._hov_imshow(ax, da, down, kw)
+            else:
+                getattr(da.plot, method)(**opts, **kw)
+        level_text = self._level_text(var, level)
+        parts = [var] + ([level_text] if level_text else []) + [
+            f"mean {da.attrs['band'].split(' (')[0]}",
+            f"lon {da.lon.values[0]:g}..{da.lon.values[-1]:g}"]
+        ax.set_title(" · ".join(parts), fontsize=10)
+        ax.set_xlabel("longitude [degrees east]")
+        ax._gmpas_hov_time = (tdim, np.asarray(da[tdim].values))
+        return ax
+
+    def _hov_imshow(self, ax, da, down: bool, kw: dict):
+        import matplotlib.dates as mdates
+
+        tdim = da.dims[0]
+        t = np.asarray(da[tdim].values)
+        dated = np.issubdtype(t.dtype, np.datetime64)
+        tnum = mdates.date2num(t) if dated else t.astype(float)
+        lon = np.asarray(da.lon.values, float)
+        half_t = 0.5 * (tnum[1] - tnum[0]) if tnum.size > 1 else 0.5
+        half_x = 0.5 * (lon[1] - lon[0]) if lon.size > 1 else 0.5
+        cbar = kw.pop("cbar_kwargs")
+        im = ax.imshow(da.values, aspect="auto", interpolation="nearest",
+                       origin="lower", cmap=kw["cmap"], vmin=kw["vmin"], vmax=kw["vmax"],
+                       extent=(lon[0] - half_x, lon[-1] + half_x,
+                               tnum[0] - half_t, tnum[-1] + half_t))
+        if dated:
+            ax.yaxis_date()
+        if down:
+            ax.invert_yaxis()
+        ax.set_ylabel(tdim)
+        ax.figure.colorbar(im, ax=ax, **cbar)
+
+    @staticmethod
+    def _hov_axis(fig, ax) -> dict:
+        """Where each step's row sits in the rendered image, top-down pixels,
+        with the axes' horizontal span -- the page's current-step marker."""
+        import matplotlib.dates as mdates
+
+        tdim, t = ax._gmpas_hov_time
+        dated = np.issubdtype(t.dtype, np.datetime64)
+        ynum = mdates.date2num(t) if dated else t.astype(float)
+        height = fig.bbox.height
+        pts = ax.transData.transform(np.column_stack([np.zeros_like(ynum), ynum]))
+        box = ax.get_window_extent()
+        return {"y": [int(round(height - y)) for y in pts[:, 1]],
+                "box": [int(round(box.x0)), int(round(box.x1)),
+                        int(round(fig.bbox.width)), int(round(height))]}
+
     def _title(self, var: str, time: int, level: int) -> str:
         """`t · 2024-01-01 06:00 · pressure_level 500 hPa`.
 
@@ -874,19 +1339,25 @@ class GenericViewer:
         -- `pressure_level = 1e+03...` -- which says less than this does.
         """
         parts = [var, self.labels[time]]
-        stack = self._stack_dims(self.ds[var])
-        if stack:
-            dim = stack[0]
-            if dim in self.ds.variables and self.ds[dim].ndim == 1:
-                coord = self.ds[dim]
-                value = coord.values[level]
-                units = coord.attrs.get("units", "")
-                numeric = np.issubdtype(coord.dtype, np.number)
-                shown = f"{value:g}" if numeric else str(value)
-                parts.append(f"{dim} {shown} {units}".strip())
-            else:
-                parts.append(f"{dim} {level}")
+        level_text = self._level_text(var, level)
+        if level_text:
+            parts.append(level_text)
         return " · ".join(parts)
+
+    def _level_text(self, var: str, level: int) -> str:
+        """`pressure_level 500 hPa`, or "" for a variable with no level axis."""
+        stack = self._stack_dims(self.ds[var])
+        if not stack:
+            return ""
+        dim = stack[0]
+        if dim in self.ds.variables and self.ds[dim].ndim == 1:
+            coord = self.ds[dim]
+            value = coord.values[level]
+            units = coord.attrs.get("units", "")
+            numeric = np.issubdtype(coord.dtype, np.number)
+            shown = f"{value:g}" if numeric else str(value)
+            return f"{dim} {shown} {units}".strip()
+        return f"{dim} {level}"
 
     def _even(self, da) -> bool:
         """Whether both map axes of `da` are evenly spaced, as imshow assumes."""
@@ -913,37 +1384,44 @@ class GenericViewer:
         return (0.5 * (extent[0] + extent[1]), 0.5 * (extent[2] + extent[3]))
 
     def _render(self, var, time, level, kind, extent, figsize, dpi,
-                cmap=None, vmin=None, vmax=None, lon=None, lat=None, layers=None) -> bytes:
+                cmap=None, vmin=None, vmax=None, lon=None, lat=None, hov=None,
+                meta=None, layers=None) -> bytes:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
         fig = plt.figure(figsize=figsize, dpi=dpi, layout="constrained")
         try:
-            self._draw(fig, var, time, level, kind, extent, cmap, vmin, vmax, lon, lat,
-                       layers)
+            ax = self._draw(fig, var, time, level, kind, extent, cmap, vmin, vmax,
+                            lon, lat, hov, layers)
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=dpi)
+            if meta is not None and kind == "hovmoller":
+                meta.update(self._hov_axis(fig, ax))
             return buf.getvalue()
         finally:
             plt.close(fig)
 
     def plot(self, var, time, level, kind, extent, width=900, height=560,
-             cmap=None, vmin=None, vmax=None, lon=None, lat=None, layers=None) -> bytes:
+             cmap=None, vmin=None, vmax=None, lon=None, lat=None, hov=None,
+             meta=None, layers=None) -> bytes:
         """The live plot pane: `kind` drawn at the browser's pixel size.
 
-        `layers` is the composite's stack (JSON text or a dict) when `kind` is
-        "layers"; see `gmpas.layers`.
+        `hov` holds a Hovmöller's band, longitudes, steps, method and time
+        direction; `meta`, a dict, receives where its steps landed in the image
+        so the page can mark the current one without asking again. `layers` is
+        the composite's stack (JSON text or a dict) when `kind` is "layers";
+        see `gmpas.layers`.
         """
         width, height = int(np.clip(width, 200, 4000)), int(np.clip(height, 150, 3000))
         return self._render(var, time, level, kind, extent,
                             (width / 100, height / 100), 100, cmap, vmin, vmax, lon, lat,
-                            layers)
+                            hov, meta, layers)
 
     # -- export ------------------------------------------------------------
 
     def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
-               kind="map", lon=None, lat=None, layers=None) -> bytes:
+               kind="map", lon=None, lat=None, hov=None, layers=None) -> bytes:
         """A publication-shaped figure of what is on screen.
 
         Sized by the same `Style` presets as the MPAS path. The fast map
@@ -956,10 +1434,10 @@ class GenericViewer:
         if var not in self._spatial_vars() and kind == "map":
             kind = "auto"
         return self._render(var, time, level, kind, extent, st.figsize, st.dpi,
-                            cmap, vmin, vmax, lon, lat, layers)
+                            cmap, vmin, vmax, lon, lat, hov, None, layers)
 
     def gif(self, var, level, extent, cmap, vmin, vmax, nx=None, ny=None, fps=8,
-            kind="map", lon=None, lat=None, layers=None) -> bytes:
+            kind="map", lon=None, lat=None, hov=None, layers=None) -> bytes:
         """Every timestep as one animated GIF, drawn the way the screen is.
 
         The fast map re-containers its own palette frames, as `Viewer.gif`
@@ -975,7 +1453,7 @@ class GenericViewer:
             raise ValueError(f"{kind!r} is not a plot of {var!r}; one of {self.kinds(var)}")
         if n < 2:
             raise ValueError("a GIF steps through time, and there is only one step")
-        if not spatial or kind in ("series", "hist"):
+        if not spatial or kind in ("series", "hist", "hovmoller"):
             raise ValueError(
                 f"a GIF steps through time, and a {KIND_LABELS.get(kind, kind)} of "
                 f"{var!r} is not drawn per step -- export a figure instead"
@@ -1020,7 +1498,7 @@ class GenericViewer:
                 fig = plt.figure(figsize=st.figsize, dpi=80, layout="constrained")
                 try:
                     ax = self._draw(fig, var, step, level, kind, extent, cmap,
-                                    vmin, vmax, lon, lat, layers)
+                                    vmin, vmax, lon, lat, hov, layers)
                     if kind == "profile":
                         pad = 0.02 * (hi - lo or 1.0)
                         ax.set_xlim(lo - pad, hi + pad)
@@ -1038,5 +1516,18 @@ class GenericViewer:
                        disposal=2, **transparency)
         return buf.getvalue()
 
-    def netcdf(self, *a, **k):
-        raise NotImplementedError("netCDF export isn't implemented yet for --generic")
+    def netcdf(self, var, time, level, extent, nx=None, ny=None, kind=None,
+               lon=None, lat=None, hov=None, layers=None) -> bytes:
+        """The numbers behind a Hovmöller, as netCDF. Other kinds: not yet."""
+        if kind != "hovmoller":
+            raise NotImplementedError(
+                "netCDF export for --generic is implemented for the Hovmöller only")
+        da = self._hov_result(var, level, hov, extent)
+        ds = da.to_dataset()
+        ds.attrs.update(source=", ".join(f.name for f in self.files[:20]) +
+                        (" ..." if len(self.files) > 20 else ""),
+                        history="gmpas --generic Hovmoller export")
+        # writing netCDF4 bytes is HDF5 too, and a Hovmöller job may be reading
+        # on another thread: the same process-wide lock every read takes
+        with self._lock:
+            return bytes(ds.to_netcdf())

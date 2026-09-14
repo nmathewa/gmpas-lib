@@ -20,6 +20,7 @@ import getpass
 import functools
 import io
 import json
+import math
 import os
 import re
 import socket
@@ -522,8 +523,8 @@ class PageHandler(BaseHTTPRequestHandler):
     def log_message(self, *a):              # keep the console quiet
         pass
 
-    def _send(self, body: bytes, ctype: str):
-        self.send_response(200)
+    def _send(self, body: bytes, ctype: str, status: int = 200):
+        self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -545,7 +546,73 @@ def _plot_extras(q: dict) -> dict:
     for key in ("lon", "lat"):
         if q.get(key):
             out[key] = float(q[key])
+    if q.get("hlat0") or q.get("hlat1"):
+        out["hov"] = _hov_params(q)
     return out
+
+
+def _hov_params(q: dict) -> dict:
+    """A Hovmöller's band, longitudes, steps and drawing, checked as they arrive.
+
+    Query names are prefixed `h` because `lon`/`lat` already carry the probe
+    point and `style` the export size.
+    """
+    def number(key, cast=float):
+        try:
+            value = cast(q[key])
+        except (KeyError, ValueError):
+            raise ValueError(f"Hovmöller parameter {key}={q.get(key)!r} is not a number") \
+                from None
+        if cast is float and not math.isfinite(value):
+            raise ValueError(f"Hovmöller parameter {key} must be finite")
+        return value
+
+    hov = {"band": (number("hlat0"), number("hlat1"))}
+    if q.get("hlon0") or q.get("hlon1"):
+        hov["lons"] = (number("hlon0"), number("hlon1"))
+    if q.get("hs0") or q.get("hs1"):
+        hov["steps"] = (number("hs0", int), number("hs1", int))
+    method = q.get("hmethod") or "auto"
+    if method not in ("auto", "contourf", "pcolormesh", "contour"):
+        raise ValueError(f"Hovmöller method {method!r} is not auto, contourf, "
+                         f"pcolormesh or contour")
+    ydir = q.get("hydir") or "down"
+    if ydir not in ("down", "up"):
+        raise ValueError(f"Hovmöller time direction {ydir!r} is not down or up")
+    hov.update(method=method, ydir=ydir)
+    return hov
+
+
+def _serve_hovmoller(handler, viewer, q: dict, extent) -> None:
+    """202 with progress while the job reads; then the image, with the row of
+    every step so the page can mark the current one itself.
+
+    A function taking the handler, not a method on it: the dashboard mounts a
+    page by calling its `do_GET` with the router's own `self`, so only what
+    PageHandler defines exists there.
+    """
+    extras = _plot_extras(q)
+    var, level = q["var"], int(q.get("level", 0))
+    state = viewer.hovmoller_progress(var, level, extras.get("hov"), extent)
+    if state["state"] == "running":
+        return handler._send(json.dumps(state).encode(), "application/json", 202)
+    if state["state"] == "error":
+        raise ValueError(state["error"])
+    meta: dict = {}
+    png = viewer.plot(
+        var, int(q.get("time", 0)), level, "hovmoller", extent,
+        int(q.get("w", 900)), int(q.get("h", 560)), q.get("cmap") or None,
+        float(q["vmin"]) if q.get("vmin") else None,
+        float(q["vmax"]) if q.get("vmax") else None,
+        hov=extras.get("hov"), meta=meta)
+    handler.send_response(200)
+    handler.send_header("Content-Type", "image/png")
+    handler.send_header("X-Hov-Y", ",".join(str(v) for v in meta.get("y", [])))
+    handler.send_header("X-Hov-Box", ",".join(str(v) for v in meta.get("box", [])))
+    handler.send_header("Content-Length", str(len(png)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(png)
 
 
 def _handler(viewer: Viewer, html: str = ""):
@@ -589,6 +656,9 @@ def _handler(viewer: Viewer, html: str = ""):
                     return self.wfile.write(png)
                 if url.path == "/api/plot" and hasattr(viewer, "plot"):
                     extent = [float(v) for v in q["extent"].split(",")]
+                    hov_viewer = hasattr(viewer, "hovmoller_progress")
+                    if q.get("kind") == "hovmoller" and hov_viewer:
+                        return _serve_hovmoller(self, viewer, q, extent)
                     return self._send(viewer.plot(
                         q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
                         q.get("kind", "auto"), extent,
@@ -631,7 +701,8 @@ def _handler(viewer: Viewer, html: str = ""):
                         body, ctype, name = (
                             viewer.netcdf(var, step, lvl, extent,
                                           int(q["nx"]) if q.get("nx") else None,
-                                          int(q["ny"]) if q.get("ny") else None),
+                                          int(q["ny"]) if q.get("ny") else None,
+                                          **_plot_extras(q)),
                             "application/x-netcdf", f"{stem}.nc")
                     else:
                         return self.send_error(404)
@@ -1062,6 +1133,11 @@ body.layering #cmapsec,body.layering #rangesec{display:none}
 #lyEdit .f input[type=color]{width:26px;padding:0;flex:none}
 #lyJsonBox{width:100%;box-sizing:border-box;height:180px;font:11px monospace;margin-top:6px}
 #lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
+#hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
+         display:none;box-shadow:0 1px 0 #fffc}
+/* number inputs carry a wide intrinsic size; two to a row must share 220px */
+#hovbox .row>input,#hovbox .row>select{min-width:0;width:0;flex:1}
+#hovbox .kv{flex-wrap:wrap;gap:2px 8px}
 #latax{position:relative;width:52px}
 #lonax{position:relative;height:18px}
 #corner{width:52px;height:18px}
@@ -1136,7 +1212,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <span id="animstate"></span>
   </div>
   <div id="stage">
-    <img id="plotimg" alt="">
+    <img id="plotimg" alt=""><div id="hovmark"></div>
     <div id="frame">
       <div id="latax"></div>
       <div id="wrap">
@@ -1174,6 +1250,32 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <div class="row" id="lyJsonRow" style="display:none;margin-top:4px">
       <button id="lyJsonApply" style="flex:1">apply JSON</button></div>
     <div class="hint" id="lyhint"></div>
+  </div>
+
+  <div class="sec" id="hovbox" style="display:none"><label>Hovm\u00f6ller</label>
+    <div class="kv"><span>latitude band (averaged)</span></div>
+    <div class="row"><input type="number" id="hlat0" step="any" placeholder="lat min">
+      <input type="number" id="hlat1" step="any" placeholder="lat max"></div>
+    <div class="kv" style="margin-top:6px"><span>longitudes</span></div>
+    <div class="row"><input type="number" id="hlon0" step="any" placeholder="lon min">
+      <input type="number" id="hlon1" step="any" placeholder="lon max"></div>
+    <div class="kv" style="margin-top:6px"><span>steps</span><b id="hstep"></b></div>
+    <div class="row"><input type="number" id="hs0" min="0" step="1">
+      <input type="number" id="hs1" min="0" step="1"></div>
+    <div class="row" style="margin-top:6px">
+      <select id="hmethod" title="how it is drawn">
+        <option value="auto">auto</option><option value="contourf">filled contour</option>
+        <option value="pcolormesh">pcolormesh</option>
+        <option value="contour">contour lines</option>
+      </select>
+      <select id="hydir" title="which way time runs">
+        <option value="down">time \u2193</option><option value="up">time \u2191</option>
+      </select></div>
+    <div class="row" style="margin-top:6px">
+      <button id="hovgo" style="flex:1">compute</button>
+      <button id="hovview">use view</button></div>
+    <div class="hint" id="hovhint">cos(latitude)-weighted mean over the band; the grid's own
+      columns, no interpolation</div>
   </div>
 
   <div class="sec" id="cmapsec"><label>colormap</label><select id="cmap"></select></div>
@@ -1346,6 +1448,7 @@ function setMode(){
   if(layering) lyOpen();
   ["#zoom","#home","#anim","#grid"].forEach(id=>{ $(id).disabled=p; });
   if(p) stopPlayback();
+  hovMode(p && $("#kind").value==="hovmoller");
 }
 let probePt=null;       // last clicked map point: where series and profiles are taken
 // A derived expression ("a - b", "hypot(a,b)", "diff(a)") isn't in
@@ -1523,6 +1626,7 @@ async function draw(){
 }
 let plotSayTimer=null;
 async function drawPlot(){
+  if($("#kind").value==="hovmoller") return drawHov();
   if(drawCtrl) drawCtrl.abort();
   const ctrl = drawCtrl = new AbortController();
   try{
@@ -1757,6 +1861,125 @@ $("#lyJsonApply").onclick=()=>{
     $("#lyhint").textContent="";
   }catch(e){ $("#lyhint").textContent="JSON: "+e.message; }
 };
+// ------------------------------------------------------------- Hovmöller
+// Nothing is read until "compute": a year of hourly files is minutes of I/O,
+// and switching the plot menu must not start that. The server answers 202
+// with progress while its job reads; the page polls, and a poll never
+// outlives the mode, variable or band it was for. The finished image comes
+// with the row of every step, so the time slider moves a marker locally.
+let hovWant=null, hovPoll=null, hovAxis=null;
+function hovParams(){
+  const v=id=>$(id).value;
+  return {hlat0:v("#hlat0"), hlat1:v("#hlat1"), hlon0:v("#hlon0"), hlon1:v("#hlon1"),
+          hs0:v("#hs0"), hs1:v("#hs1"), hmethod:v("#hmethod"), hydir:v("#hydir")};
+}
+// What the server computes -- method and time direction only change the drawing
+function hovKey(){
+  const h=hovParams();
+  return JSON.stringify([cur&&cur.name, $("#level").value,
+                         h.hlat0, h.hlat1, h.hlon0, h.hlon1, h.hs0, h.hs1]);
+}
+function hovFromView(){
+  const b=boxOf(view);
+  $("#hlat0").value=Math.max(-90, b[2]).toFixed(2);
+  $("#hlat1").value=Math.min(90, b[3]).toFixed(2);
+  $("#hlon0").value=b[0].toFixed(2); $("#hlon1").value=b[1].toFixed(2);
+  $("#hs0").value=0; $("#hs1").value=Math.max(0, M.steps-1);
+  hovEstimate();
+}
+function hovEstimate(){
+  const n=id=>parseFloat($(id).value);
+  const dlon=(M.home[1]-M.home[0])/Math.max(1, M.nx-1);
+  const dlat=(M.home[3]-M.home[2])/Math.max(1, M.ny-1);
+  const cols=Math.max(1, Math.round((n("#hlon1")-n("#hlon0"))/dlon)+1);
+  const rows=Math.max(1, Math.round((n("#hlat1")-n("#hlat0"))/dlat)+1);
+  const steps=Math.max(0, n("#hs1")-n("#hs0")+1);
+  const mb=steps*rows*cols*8/1048576;
+  $("#hstep").textContent = `${M.labels[n("#hs0")]??""} \u2192 ${M.labels[n("#hs1")]??""}`;
+  if(!isFinite(mb)) return;
+  $("#hovhint").textContent=`${steps} steps \u00d7 ~${cols} longitudes \u00b7 reads ~`+
+    (mb>=1024 ? `${(mb/1024).toFixed(1)} GB` : `${mb.toFixed(0)} MB`)+
+    (hovWant===hovKey() ? "" : " \u00b7 press compute");
+}
+function hovMode(on){
+  $("#hovbox").style.display = on ? "" : "none";
+  if(!on){ clearTimeout(hovPoll); $("#hovmark").style.display="none"; return; }
+  if(!$("#hlat0").value) hovFromView();
+  hovEstimate();
+}
+function hovMark(){
+  const m=$("#hovmark"), img=$("#plotimg");
+  if(!hovAxis || !plotMode() || $("#kind").value!=="hovmoller" || !img.naturalWidth){
+    m.style.display="none"; return; }
+  const i=(+$("#time").value) - hovAxis.s0;
+  if(i<0 || i>=hovAxis.y.length){ m.style.display="none"; return; }
+  const ir=img.getBoundingClientRect(), sr=$("#stage").getBoundingClientRect();
+  const sx=ir.width/hovAxis.box[2], sy=ir.height/hovAxis.box[3];
+  m.style.display="block";
+  m.style.left=(ir.left-sr.left+hovAxis.box[0]*sx)+"px";
+  m.style.width=((hovAxis.box[1]-hovAxis.box[0])*sx)+"px";
+  m.style.top=(ir.top-sr.top+hovAxis.y[i]*sy)+"px";
+}
+async function drawHov(){
+  clearTimeout(hovPoll);
+  if(hovWant!==hovKey()){
+    $("#hovmark").style.display="none";
+    say("set the band and steps, then press compute"); hovEstimate(); return;
+  }
+  if(drawCtrl) drawCtrl.abort();
+  const ctrl = drawCtrl = new AbortController(), key=hovWant;
+  try{
+    const st=$("#stage");
+    const p=new URLSearchParams({var:cur.name, time:$("#time").value,
+      level:$("#level").value, kind:"hovmoller", extent:boxOf(view).join(","),
+      cmap:$("#cmap").value, w:Math.max(300, st.clientWidth-24),
+      h:Math.max(220, st.clientHeight-24), ...hovParams()});
+    if($("#vmin").value) p.set("vmin",$("#vmin").value);
+    if($("#vmax").value) p.set("vmax",$("#vmax").value);
+    const t0=performance.now();
+    const r=await fetch("api/plot?"+p, {signal: ctrl.signal});
+    if(r.status===202){                 // fetch calls 202 ok: check it first
+      const [done, total]=(await r.json()).progress;
+      clearTimeout(plotSayTimer);
+      say(`Hovm\u00f6ller: reading ${done} / ${total} steps\u2026`);
+      $("#hovhint").textContent=`reading ${done} / ${total} steps\u2026`;
+      if(!ctrl.signal.aborted)
+        hovPoll=setTimeout(()=>{
+          if(plotMode() && $("#kind").value==="hovmoller" && hovWant===key) draw(); }, 700);
+      return;
+    }
+    if(!r.ok){
+      const err=(await r.json()).error;
+      clearTimeout(plotSayTimer); say(err); $("#hovhint").textContent=err;
+      hovWant=null; return;
+    }
+    const nums=h=>(r.headers.get(h)||"").split(",").filter(Boolean).map(Number);
+    hovAxis={y:nums("X-Hov-Y"), box:nums("X-Hov-Box"), s0:+$("#hs0").value};
+    const url=URL.createObjectURL(await r.blob());
+    const img=$("#plotimg"), old=img.src;
+    img.onload=()=>{ if(old.startsWith("blob:")) URL.revokeObjectURL(old); hovMark(); };
+    img.src=url;
+    hovEstimate();
+    say(`${cur.label} \u00b7 Hovm\u00f6ller \u00b7 ${Math.round(performance.now()-t0)} ms`);
+    clearTimeout(plotSayTimer);
+    plotSayTimer=setTimeout(()=>{ if(plotMode()) say(""); }, 2500);
+  }catch(e){
+    if(e.name==="AbortError") return;
+    say("Hovm\u00f6ller failed: "+e);
+  }finally{
+    if(drawCtrl===ctrl) drawCtrl=null;
+  }
+}
+$("#hovgo").onclick=()=>{ hovWant=hovKey(); hovAxis=null; draw(); };
+$("#hovview").onclick=()=>{ hovFromView(); if(plotMode()) draw(); };
+["#hlat0","#hlat1","#hlon0","#hlon1","#hs0","#hs1"].forEach(id=>
+  $(id).addEventListener("input", ()=>{
+    hovEstimate();
+    if(hovWant!==hovKey()) $("#hovmark").style.display="none";
+  }));
+["#hmethod","#hydir"].forEach(id=>$(id).addEventListener("change", ()=>{
+  if(plotMode() && $("#kind").value==="hovmoller" && hovWant===hovKey()) draw(); }));
+addEventListener("resize", ()=>hovMark());
 let plotResize=null;
 addEventListener("resize", ()=>{
   if(!plotMode()) return;
@@ -2017,6 +2240,8 @@ async function exportAs(kind, label){
     if($("#kind").value==="layers") p.set("layers", JSON.stringify(LY));
     const pt=probePt||{lon:view.clon, lat:view.clat};
     p.set("lon", pt.lon); p.set("lat", pt.lat);
+    if($("#kind").value==="hovmoller")
+      Object.entries(hovParams()).forEach(([k,v])=>p.set(k,v));
   }
   // GIF must have one range for the whole run, or every frame rescales
   if(kind==="gif" && !$("#vmin").value && lastRange && !plotMode()){
@@ -2052,6 +2277,8 @@ function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); clear
   redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
+  // a Hovmöller already holds every step: moving time only moves its marker
+  if(plotMode() && $("#kind").value==="hovmoller"){ hovMark(); return; }
   if(plotMode()){ clearTimeout(redrawTimer); redrawTimer=setTimeout(draw, 120); return; }
   if(playingKey) return;                         // scrubbing during playback
   const entry=anims.get(animKeyOf(animParams()));
