@@ -560,7 +560,10 @@ def _view(args) -> int:
 
 
 def _generic_view(args) -> int:
-    """`gmpas view --generic`: one plain lat/lon-grid file, no mesh.
+    """`gmpas view --generic`: plain lat/lon-grid files, no mesh.
+
+    Takes files, globs and directories like `gmpas view`, as one time axis;
+    the steps are counted in the background so a long run starts at once.
 
     Bypasses `_dashboard`/`dashboard.build` entirely -- those assemble the
     MPAS run/mesh/hfun sources `GenericViewer` has no equivalent of. Reuses
@@ -572,20 +575,18 @@ def _generic_view(args) -> int:
     from .generic import GenericViewer
     from .viewer import PAGE, _handler
 
-    if len(args.path) != 1:
-        raise ValueError(
-            f"--generic takes exactly one file, got {len(args.path)}: "
-            f"{args.path}"
-        )
-    gv = GenericViewer(args.path[0])
+    gv = GenericViewer(args.path, background_scan=True)
+    n_files = len(gv.files)
+    counted = ("steps counted in the background" if gv.scanning
+               else f"{gv.steps} step{'s' if gv.steps != 1 else ''}")
     source = Source("run", "data",
-                    f"{gv.path.name} · {gv.nx}x{gv.ny} grid · "
-                    f"{gv.steps} step{'s' if gv.steps != 1 else ''}",
+                    f"{gv.title} · {gv.nx}x{gv.ny} grid · {n_files} "
+                    f"file{'s' if n_files != 1 else ''} · {counted}",
                     _handler(gv, PAGE))
     serve([source], port=DEFAULT_PORT if args.port is None else args.port,
           host=args.host, open_browser=args.browser,
           strict_port=args.port is not None,          # see the note in _dashboard
-          banner=f"gmpas view --generic · {gv.path.name}")
+          banner=f"gmpas view --generic · {gv.title}")
     return 0
 
 
@@ -827,18 +828,19 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("--hfun", help="also serve the JIGSAW hfun.py behind this "
                                   "mesh, as a third page on the same port")
     v.add_argument("--generic", action="store_true",
-                   help="treat PATH as a plain, self-describing netCDF file "
-                        "on its own regular lat/lon grid, not MPAS output -- "
-                        "no mesh, no KD-tree, so it's much faster, but only "
-                        "works for a real regular lat/lon grid (a curvilinear "
-                        "or unstructured file needs a mesh instead). Frames "
-                        "are served at the file's own native resolution, not "
-                        "resampled, so --width/--height are ignored too (the "
-                        "browser box is sized off the grid's own shape, to "
-                        "stay undistorted without resampling); so are "
-                        "-m/--mesh, --hfun and --cache-dir. Export "
-                        "(figure/GIF/netCDF) isn't implemented for this mode "
-                        "yet.")
+                   help="treat PATH as plain, self-describing netCDF on a "
+                        "regular lat/lon grid, not MPAS output -- ERA5, "
+                        "reanalysis, anything CF. Files, globs and directories "
+                        "become one time axis, as with MPAS output; every file "
+                        "must share the first one's grid. No mesh and no "
+                        "KD-tree, so it is much faster, but a curvilinear or "
+                        "unstructured file needs a mesh instead. Beside the "
+                        "map it draws what xarray's DataArray.plot would -- "
+                        "filled contours, lines, a time series or profile at a "
+                        "clicked point -- and exports figures and GIFs of "
+                        "them. --width/--height, -m/--mesh, --hfun and "
+                        "--cache-dir are ignored; netCDF export is not "
+                        "implemented for this mode yet.")
     v.add_argument("-p", "--port", type=int, default=None,
                    help=f"port (default {DEFAULT_PORT}; the default wanders "
                         f"if busy, an explicit one fails instead)")

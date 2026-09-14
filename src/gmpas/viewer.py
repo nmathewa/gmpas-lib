@@ -531,6 +531,21 @@ class PageHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def _plot_extras(q: dict) -> dict:
+    """The plot kind and probe point, passed on only when the page sent them.
+
+    Only the --generic page sends them, and only `GenericViewer` accepts them;
+    the MPAS page never does, so `Viewer.figure`/`gif` keep their signatures.
+    """
+    out: dict = {}
+    if q.get("kind"):
+        out["kind"] = q["kind"]
+    for key in ("lon", "lat"):
+        if q.get(key):
+            out[key] = float(q[key])
+    return out
+
+
 def _handler(viewer: Viewer, html: str = ""):
     """Routes for one run. `html` overrides the page, which is how the
     dashboard splices its source switcher in without forking `PAGE`."""
@@ -570,6 +585,17 @@ def _handler(viewer: Viewer, html: str = ""):
                     self.send_header("Content-Length", str(len(png)))
                     self.end_headers()
                     return self.wfile.write(png)
+                if url.path == "/api/plot" and hasattr(viewer, "plot"):
+                    extent = [float(v) for v in q["extent"].split(",")]
+                    return self._send(viewer.plot(
+                        q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
+                        q.get("kind", "auto"), extent,
+                        int(q.get("w", 900)), int(q.get("h", 560)),
+                        q.get("cmap") or None,
+                        float(q["vmin"]) if q.get("vmin") else None,
+                        float(q["vmax"]) if q.get("vmax") else None,
+                        **{k: v for k, v in _plot_extras(q).items() if k != "kind"}),
+                        "image/png")
                 if url.path == "/api/overlay":
                     extent = [float(v) for v in q["extent"].split(",")]
                     return self._send(viewer.overlay(
@@ -589,7 +615,7 @@ def _handler(viewer: Viewer, html: str = ""):
                         body, ctype, name = (
                             viewer.figure(var, step, lvl, extent,
                                           q.get("cmap", "viridis"), vmin, vmax,
-                                          q.get("style", "paper")),
+                                          q.get("style", "paper"), **_plot_extras(q)),
                             "image/png", f"{stem}.png")
                     elif kind == "gif":
                         body, ctype, name = (
@@ -597,7 +623,7 @@ def _handler(viewer: Viewer, html: str = ""):
                                        vmin, vmax,
                                        int(q["nx"]) if q.get("nx") else None,
                                        int(q["ny"]) if q.get("ny") else None,
-                                       int(q.get("fps", 8))),
+                                       int(q.get("fps", 8)), **_plot_extras(q)),
                             "image/gif", f"{var}_animation.gif")
                     elif kind == "netcdf":
                         body, ctype, name = (
@@ -1009,6 +1035,8 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;
        padding:12px;min-height:0;overflow:hidden}
 #frame{display:grid;grid-template-columns:auto auto;grid-template-rows:auto auto}
+#plotimg{display:none;max-width:100%;max-height:100%;background:#fff;border-radius:4px}
+#stage.plotting #msg{top:auto;bottom:14px}   /* keep off the figure's own title */
 #latax{position:relative;width:52px}
 #lonax{position:relative;height:18px}
 #corner{width:52px;height:18px}
@@ -1073,6 +1101,8 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
   <div id="top">
     <span>time <b id="tlab">–</b></span><input type="range" id="time" min="0" max="0" style="width:150px">
     <span><span id="lname">level</span> <b id="llab">0</b></span><input type="range" id="level" min="0" max="0" style="width:110px"><span id="lpin" class="pin"></span>
+    <span id="kindbox" style="display:none">plot
+      <select id="kind" style="width:auto"></select></span>
     <span>zoom</span><input type="range" id="zoom" min="0" max="800" value="0" style="width:110px">
     <label style="white-space:nowrap"><input type="checkbox" id="grid" checked
       style="vertical-align:-1px"> grid</label>
@@ -1081,6 +1111,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <span id="animstate"></span>
   </div>
   <div id="stage">
+    <img id="plotimg" alt="">
     <div id="frame">
       <div id="latax"></div>
       <div id="wrap">
@@ -1229,8 +1260,41 @@ function pick(name){
   $("#lname").textContent = cur.dim || "level";
   $("#lpin").textContent = (cur.pinned||[]).length
     ? `${cur.pinned.join(", ")} at 0` : "";
-  overlay(); draw();
+  fillKinds();
+  if(!plotMode()) overlay();
+  draw();
 }
+// --generic only: each variable says which plots it has (GenericViewer.kinds),
+// and the MPAS page, whose variables carry no `kinds`, never shows the menu.
+// The kind survives a variable switch when the new variable has it too, so
+// stepping through fields as filled contours stays filled contours.
+function fillKinds(){
+  const box=$("#kindbox"), sel=$("#kind");
+  if(!cur || !cur.kinds){ box.style.display="none"; setMode(); return; }
+  const keep=sel.value;
+  sel.innerHTML="";
+  cur.kinds.forEach(k=>{ const o=document.createElement("option"); o.value=k;
+    o.textContent=(M.kind_labels||{})[k]||k; sel.append(o); });
+  sel.value = cur.kinds.includes(keep) ? keep : cur.kinds[0];
+  box.style.display="";
+  setMode();
+}
+function plotMode(){
+  return !!(cur && cur.kinds && $("#kind").value && $("#kind").value!=="map");
+}
+// A plot is a whole matplotlib figure -- its own axes, labels and colorbar --
+// so the map's furniture (coastline overlay, graticule, colour ramp, pan and
+// zoom) steps aside rather than being drawn over or beside it.
+function setMode(){
+  const p=plotMode();
+  $("#frame").style.display = p ? "none" : "";
+  $("#plotimg").style.display = p ? "block" : "none";
+  $("#bar").style.visibility = p ? "hidden" : "";
+  $("#stage").classList.toggle("plotting", p);
+  ["#zoom","#home","#anim","#grid"].forEach(id=>{ $(id).disabled=p; });
+  if(p) stopPlayback();
+}
+let probePt=null;       // last clicked map point: where series and profiles are taken
 // A derived expression ("a - b", "hypot(a,b)", "diff(a)") isn't in
 // M.variables -- it's evaluated server-side against real fields, see
 // Viewer._derived -- so `cur` is built by hand rather than looked up.
@@ -1244,6 +1308,7 @@ function pickDerived(expr){
   $("#time").max=M.steps-1; $("#tlab").textContent=M.labels[$("#time").value|0];
   $("#level").max=0; $("#level").value=0; $("#llab").textContent=0;
   $("#lname").textContent="level"; $("#lpin").textContent="";
+  fillKinds();
   overlay(); draw();
 }
 $("#deriveBtn").onclick = ()=>pickDerived($("#deriveExpr").value.trim());
@@ -1367,6 +1432,7 @@ function colorbar(lo,hi){
 
 async function draw(){
   if(!cur) return;
+  if(plotMode()) return drawPlot();
   // Selecting something new mid-render used to queue behind the render
   // already in flight, so switching variable/time/level while a frame was
   // loading made the new selection wait on work nobody wants anymore.
@@ -1402,6 +1468,49 @@ async function draw(){
     if(drawCtrl===ctrl) drawCtrl=null;  // don't clobber a newer request's state
   }
 }
+let plotSayTimer=null;
+async function drawPlot(){
+  if(drawCtrl) drawCtrl.abort();
+  const ctrl = drawCtrl = new AbortController();
+  try{
+    const st=$("#stage"), pt=probePt||{lon:view.clon, lat:view.clat};
+    const p=new URLSearchParams({var:cur.name, time:$("#time").value,
+      level:$("#level").value, kind:$("#kind").value, extent:boxOf(view).join(","),
+      cmap:$("#cmap").value, lon:pt.lon, lat:pt.lat,
+      w:Math.max(300, st.clientWidth-24), h:Math.max(220, st.clientHeight-24)});
+    if($("#vmin").value) p.set("vmin",$("#vmin").value);
+    if($("#vmax").value) p.set("vmax",$("#vmax").value);
+    const t0=performance.now();
+    const r=await fetch("api/plot?"+p, {signal: ctrl.signal});
+    if(!r.ok){ say((await r.json()).error); return; }
+    const url=URL.createObjectURL(await r.blob());
+    const img=$("#plotimg"), old=img.src;
+    img.onload=()=>{ if(old.startsWith("blob:")) URL.revokeObjectURL(old); };
+    img.src=url;
+    const at = ["series","profile"].includes($("#kind").value)
+      ? ` \u00b7 at ${(+pt.lat).toFixed(2)}\u00b0, ${(+pt.lon).toFixed(2)}\u00b0` : "";
+    say(`${cur.label} \u00b7 ${$("#kind").selectedOptions[0].textContent}${at} \u00b7 `+
+        `${Math.round(performance.now()-t0)} ms`);
+    // the figure carries its own title and colorbar; don't sit on top of them
+    clearTimeout(plotSayTimer);
+    plotSayTimer=setTimeout(()=>{ if(plotMode()) say(""); }, 2500);
+  }catch(e){
+    if(e.name==="AbortError") return;
+    say("plot failed: "+e);
+  }finally{
+    if(drawCtrl===ctrl) drawCtrl=null;
+  }
+}
+$("#kind").onchange = ()=>{
+  setMode();
+  if(!plotMode()){ layout(); overlay(); scalebar(); graticule(); }
+  draw();
+};
+let plotResize=null;
+addEventListener("resize", ()=>{
+  if(!plotMode()) return;
+  clearTimeout(plotResize); plotResize=setTimeout(draw, 250);
+});
 // Named, independently-loading animations, one entry per (variable, level,
 // extent, cmap, colour range) combination -- keyed the same way the old
 // single animCache was. Loading and playing are deliberately decoupled:
@@ -1652,8 +1761,13 @@ async function exportAs(kind, label){
     nx:Math.round(M.nx*OUTSET), ny:Math.round(M.ny*OUTSET)});
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
+  if(cur.kinds){                       // --generic: export what is on screen
+    p.set("kind", $("#kind").value);
+    const pt=probePt||{lon:view.clon, lat:view.clat};
+    p.set("lon", pt.lon); p.set("lat", pt.lat);
+  }
   // GIF must have one range for the whole run, or every frame rescales
-  if(kind==="gif" && !$("#vmin").value && lastRange){
+  if(kind==="gif" && !$("#vmin").value && lastRange && !plotMode()){
     p.set("vmin",lastRange[0]); p.set("vmax",lastRange[1]);
   }
   const t0=performance.now();
@@ -1686,6 +1800,7 @@ function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); clear
   redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
+  if(plotMode()){ clearTimeout(redrawTimer); redrawTimer=setTimeout(draw, 120); return; }
   if(playingKey) return;                         // scrubbing during playback
   const entry=anims.get(animKeyOf(animParams()));
   if(entry && entry.urls[e.target.value]){ $("#data").src=entry.urls[e.target.value]; return; }
@@ -1737,6 +1852,7 @@ $("#wrap").onpointerup = async ev=>{
   const r=$("#wrap").getBoundingClientRect(), b=boxOf(view);
   const lon=b[0]+((ev.clientX-r.left)/r.width)*(b[1]-b[0]);
   const lat=b[3]-((ev.clientY-r.top)/r.height)*(b[3]-b[2]);
+  probePt={lon, lat};
   const q=new URLSearchParams({lon,lat,var:cur.name,
     time:$("#time").value,level:$("#level").value});
   const d=await (await fetch("api/probe?"+q)).json();
