@@ -256,9 +256,13 @@ class Viewer:
                 # nCells too. Carrying a Time dimension is what separates a
                 # model field from mesh furniture.
                 "static": "Time" not in da.dims,
-                "levels": max((int(da.sizes[d]) for d in da.dims
-                               if d.startswith("nVert") or d.startswith("nIso")
-                               or d.startswith("nSoil")), default=1),
+                # The slider drives one axis. A field with several -- ozone
+                # by level and by month -- gets the first, and `_pins` holds
+                # the rest at 0, so the browser shows a defined slice rather
+                # than refusing the field. `dim` lets the UI say which.
+                "levels": self._level_span(da),
+                "dim": (_data.level_dims(da) or [""])[0],
+                "pinned": _data.level_dims(da)[1:],
             })
         out.sort(key=lambda v: (v["static"], v["name"]))
         first = self.series.files[0].name
@@ -294,6 +298,23 @@ class Viewer:
         key = (*(round(float(v), 6) for v in extent), nx, ny)
         return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
 
+    @staticmethod
+    def _level_span(da) -> int:
+        axes = _data.level_dims(da)
+        return int(da.sizes[axes[0]]) if axes else 1
+
+    def _pins(self, var: str) -> dict[str, int]:
+        """Hold every stacking axis but the first at 0.
+
+        `select` refuses to guess when a field has two of them, which is right
+        for a script but wrong for a browser: the viewer lists whatever is on
+        nCells and has one slider, so it has to name a defined slice or drop
+        the field entirely. Pinning is the visible choice -- `describe` sends
+        the pinned names on so the UI can show what is being held.
+        """
+        da = self.series.dataarray(var, 0)
+        return {d: 0 for d in _data.level_dims(da)[1:]}
+
     def values(self, var: str, time: int, level: int) -> np.ndarray:
         """`time` indexes the whole series, across files, not one file.
 
@@ -305,7 +326,8 @@ class Viewer:
         (cached) reads, nothing more.
         """
         if var in self.plottable_cell_vars():
-            return self.series.values(var, step=time, level=level)
+            return self.series.values(var, step=time, level=level,
+                                      sel=self._pins(var))
         return self._derived(var, time, level)
 
     def _derived(self, expr: str, time: int, level: int) -> np.ndarray:
@@ -317,21 +339,22 @@ class Viewer:
         `Series.values()` directly, which raises its own clear KeyError for
         an unknown one -- nothing here runs an arbitrary expression.
         """
+        def read(name: str, step: int | None = None) -> np.ndarray:
+            return self.series.values(name, level=level, sel=self._pins(name),
+                                      step=time if step is None else step)
+
         if m := _DIFF_EXPR.match(expr):
             (name,) = m.groups()
-            cur = self.series.values(name, step=time, level=level)
+            cur = read(name)
             if time == 0:
                 return np.full_like(cur, np.nan)   # no previous step to diff against
-            prev = self.series.values(name, step=time - 1, level=level)
-            return cur - prev
+            return cur - read(name, time - 1)
         if m := _HYPOT_EXPR.match(expr):
             a, b = m.groups()
-            return np.hypot(self.series.values(a, step=time, level=level),
-                            self.series.values(b, step=time, level=level))
+            return np.hypot(read(a), read(b))
         if m := _BINARY_EXPR.match(expr):
             a, op, b = m.groups()
-            return _BINARY_OPS[op](self.series.values(a, step=time, level=level),
-                                   self.series.values(b, step=time, level=level))
+            return _BINARY_OPS[op](read(a), read(b))
         raise KeyError(
             f"{expr!r} is not a known variable, and not a recognised derived "
             f"expression (a + b, a - b, a * b, a / b, hypot(a, b), or diff(a))"
@@ -1026,6 +1049,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
          border-bottom:1px solid var(--line)}
 .animrow:last-child{border-bottom:none}
 .animrow.on{color:var(--accent)}
+.pin{color:var(--dim);font-size:11px}
 .animrow-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
 .animrow-status{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums}
 .animrow-play,.animrow-clear{background:none;border:none;padding:2px 4px;
@@ -1048,7 +1072,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
 <div id="main">
   <div id="top">
     <span>time <b id="tlab">–</b></span><input type="range" id="time" min="0" max="0" style="width:150px">
-    <span>level <b id="llab">0</b></span><input type="range" id="level" min="0" max="0" style="width:110px">
+    <span><span id="lname">level</span> <b id="llab">0</b></span><input type="range" id="level" min="0" max="0" style="width:110px"><span id="lpin" class="pin"></span>
     <span>zoom</span><input type="range" id="zoom" min="0" max="800" value="0" style="width:110px">
     <label style="white-space:nowrap"><input type="checkbox" id="grid" checked
       style="vertical-align:-1px"> grid</label>
@@ -1199,6 +1223,12 @@ function pick(name){
   [...$("#vars").children].forEach(d=>d.classList.toggle("on",d.textContent===name));
   $("#time").max=M.steps-1; $("#tlab").textContent=M.labels[$("#time").value|0];
   $("#level").max=cur.levels-1; $("#level").value=0; $("#llab").textContent=0;
+  // Say which axis the one slider drives. A field with more than one -- ozone
+  // by level and by month -- has the rest held at 0 server-side (Viewer._pins),
+  // and silently showing January as "level" is how you misread a plot.
+  $("#lname").textContent = cur.dim || "level";
+  $("#lpin").textContent = (cur.pinned||[]).length
+    ? `${cur.pinned.join(", ")} at 0` : "";
   overlay(); draw();
 }
 // A derived expression ("a - b", "hypot(a,b)", "diff(a)") isn't in
@@ -1213,6 +1243,7 @@ function pickDerived(expr){
   [...$("#vars").children].forEach(d=>d.classList.remove("on"));
   $("#time").max=M.steps-1; $("#tlab").textContent=M.labels[$("#time").value|0];
   $("#level").max=0; $("#level").value=0; $("#llab").textContent=0;
+  $("#lname").textContent="level"; $("#lpin").textContent="";
   overlay(); draw();
 }
 $("#deriveBtn").onclick = ()=>pickDerived($("#deriveExpr").value.trim());

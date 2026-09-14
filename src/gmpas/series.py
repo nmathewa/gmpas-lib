@@ -396,10 +396,11 @@ class Series:
                 raise KeyError(f"{var!r} not in {path.name}")
             return ds[var]
 
-    def values(self, var: str, step: int = 0, level: int = 0) -> np.ndarray:
+    def values(self, var: str, step: int = 0, level: int = 0,
+               sel: dict[str, int] | None = None) -> np.ndarray:
         """One field at one step in the series, as a flat per-element array.
 
-        Re-rendering the same (var, step, level) -- a colormap or range
+        Re-rendering the same (var, step, level, sel) -- a colormap or range
         change, scrubbing back to a step already visited -- is common and
         was paying a full disk read every time, serialized behind every
         other read in the process (see the lock's own note above). Cache
@@ -418,7 +419,10 @@ class Series:
         returned array is a plain, fully detached numpy array, so nothing
         else needs to hold the lock once this returns.
         """
-        key = (var, step, level)
+        # sel joins the key: the same (var, step, level) at two different
+        # months is two different fields, and a key that ignored it would
+        # serve the first one for both.
+        key = (var, step, level, tuple(sorted((sel or {}).items())))
         with self._lock:
             cached = self._values.get(key)
             if cached is not None:
@@ -428,7 +432,7 @@ class Series:
             ds = self._dataset(path)
             if var not in ds:
                 raise KeyError(f"{var!r} not in {path.name}")
-            arr = select(ds[var], time=local, level=level)
+            arr = select(ds[var], time=local, level=level, sel=sel)
             self._remember(key, arr)
             return arr
 

@@ -100,7 +100,8 @@ class MpasAccessor:
 
     # -- plotting --------------------------------------------------------
 
-    def plot(self, variable: str, time: int = 0, level: int = 0, **kwargs):
+    def plot(self, variable: str, time: int = 0, level: int = 0,
+             sel: dict[str, int] | None = None, **kwargs):
         """Plot a variable on the native mesh, dispatching on where it lives.
 
         Cell fields fill the Voronoi polygons; edge fields are drawn on the cell
@@ -112,7 +113,7 @@ class MpasAccessor:
             )
         da = self._ds[variable]
         dim = _data.spatial_dim(da)
-        values = _data.select(da, time=time, level=level)
+        values = _data.select(da, time=time, level=level, sel=sel)
         kwargs.setdefault("label", _data.field_label(da))
         kwargs.setdefault("title", variable)
 
@@ -126,11 +127,11 @@ class MpasAccessor:
         )
 
     def quiver(self, u: str, v: str, time: int = 0, level: int = 0,
-               background: str = "", **kwargs):
+               background: str = "", sel: dict[str, int] | None = None, **kwargs):
         """Quiver cell-centred vector components, optionally over a filled field."""
-        uu = _data.select(self._ds[u], time=time, level=level)
-        vv = _data.select(self._ds[v], time=time, level=level)
-        bg = _data.select(self._ds[background], time=time, level=level) \
+        uu = _data.select(self._ds[u], time=time, level=level, sel=sel)
+        vv = _data.select(self._ds[v], time=time, level=level, sel=sel)
+        bg = _data.select(self._ds[background], time=time, level=level, sel=sel) \
             if background else None
         return _plot.vectors(self.mesh, uu, vv, background=bg, **kwargs)
 
