@@ -35,7 +35,8 @@ gmpas = "gmpas.cli:main"
 [project.optional-dependencies]
 # Rendering is optional so geometry, rasterizing and remap weights stay usable
 # in a headless pipeline that never draws anything.
-plot = ["matplotlib>=3.7", "cartopy>=0.22", "pillow>=9.0"]
+plot = ["matplotlib>=3.7", "cartopy>=0.22", "pillow>=9.0",
+        "cmocean>=4.0"]      # cmo.* palettes in --generic (MIT)
 # Conservative remapping needs ESMF_RegridWeightGen on PATH and optionally
 # ncremap. Both are executables, not Python packages, so pip cannot install
 # them, and neither is brought in by environment.yml either -- load your
