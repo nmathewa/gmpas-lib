@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from . import data as _data
+from . import layers as _layers
 from . import netcdf, timing
 from .cache import BuildCache, view_budget
 from .raster import target_grid
@@ -184,6 +185,7 @@ KIND_LABELS = {
     "series": "line: time series at point",
     "hovmoller": "Hovmöller (time × lon)",
     "profile": "line: profile at point",
+    "layers": "layers (composite)",
 }
 _GRID_KINDS = ("pcolormesh", "contourf", "contour", "imshow")
 
@@ -311,6 +313,20 @@ def _nearest_along(coords: np.ndarray, targets: np.ndarray, cyclic: bool):
     half_lo, half_hi = (coords[1] - coords[0]) / 2, (coords[-1] - coords[-2]) / 2
     inside = (targets >= coords[0] - half_lo) & (targets <= coords[-1] + half_hi)
     return near, inside
+
+
+def _padded(coords: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Indices of `coords` inside [lo, hi], widened by one cell on each side.
+
+    `coords` in file order, ascending or not. A box between two cells takes
+    the cells around its centre.
+    """
+    inside = np.nonzero((coords >= lo) & (coords <= hi))[0]
+    if inside.size == 0:
+        inside = np.array([int(np.argmin(np.abs(coords - 0.5 * (lo + hi))))])
+    first = max(int(inside.min()) - 1, 0)
+    last = min(int(inside.max()) + 1, coords.size - 1)
+    return np.arange(first, last + 1)
 
 
 class GenericViewer:
@@ -605,6 +621,7 @@ class GenericViewer:
                 out.append("hovmoller")
             if self._stack_dims(da):
                 out.append("profile")
+            out.append("layers")
             return out
         nd = da.ndim
         if nd == 0:
@@ -650,6 +667,7 @@ class GenericViewer:
             "cmaps": CMAPS,
             "ramps": {name: ramp(name) for name in CMAPS},
             "kind_labels": KIND_LABELS,
+            "layer_schema": _layers.schema(),
             "variables": variables,
         }
 
@@ -1081,15 +1099,20 @@ class GenericViewer:
         """One step on the map, cut to `extent` in file order, coordinates kept
         -- so xarray labels the axes and titles the scalar coordinates itself."""
         lon_min, lon_max, lat_min, lat_max = extent
-        lat_idx = np.nonzero((self._lat_file >= lat_min) & (self._lat_file <= lat_max))[0]
+        # One cell beyond each edge of the box, so a fill reaches the frame
+        # instead of stopping at the last centre inside it -- and so a view
+        # zoomed into a coarse grid still holds the 2x2 a contour needs, rather
+        # than one cell or none.
+        lat_idx = _padded(self._lat_file, lat_min, lat_max)
         if lon_max - lon_min >= 360.0 or not self.cyclic:
-            lon_ok = (self._lon_file >= lon_min) & (self._lon_file <= lon_max)
+            lon_idx = _padded(self._lon_file, lon_min, lon_max)
         else:                                            # a box across the seam
             lo = np.mod(lon_min - self.lon[0], 360.0) + self.lon[0]
             hi = lo + (lon_max - lon_min)
             wrapped = np.where(self._lon_file < lo, self._lon_file + 360.0, self._lon_file)
-            lon_ok = (wrapped >= lo) & (wrapped <= hi)
-        lon_idx = np.nonzero(lon_ok)[0]
+            lon_idx = np.nonzero((wrapped >= lo) & (wrapped <= hi))[0]
+            if lon_idx.size < 2:
+                lon_idx = _padded(wrapped, lo, hi)
         if not (lat_idx.size and lon_idx.size):
             raise ValueError("the view box holds no grid cells; zoom out or reset the view")
         with self._lock:
@@ -1110,12 +1133,15 @@ class GenericViewer:
             return da.load()
 
     def _draw(self, fig, var, time, level, kind, extent, cmap, vmin, vmax, lon, lat,
-              hov=None):
+              hov=None, layers=None):
         """Put one plot on `fig`. Shared by the live plot, figures and GIF frames."""
         import matplotlib.pyplot as plt  # noqa: F401  (backend already chosen)
 
         if kind not in self.kinds(var):
             raise ValueError(f"{kind!r} is not a plot of {var!r}; one of {self.kinds(var)}")
+        if kind == "layers":
+            stack = self.layer_stack(layers, var)
+            return _layers.draw(self, fig, stack, time, level, extent)
         if kind == "hovmoller":
             return self._draw_hovmoller(fig, var, time, level, extent, cmap, vmin, vmax,
                                         hov)
@@ -1341,12 +1367,25 @@ class GenericViewer:
                 return False
         return True
 
+    def layer_stack(self, stack, var: str) -> _layers.Stack:
+        """A checked layer stack -- or, given none, the field over coastlines."""
+        if isinstance(stack, _layers.Stack):
+            return stack
+        if stack is None or stack == "":
+            stack = _layers.default_stack(var)
+        spatial = self._spatial_vars()
+        counts = {}
+        for name in spatial:
+            dims = self._stack_dims(self.ds[name])
+            counts[name] = int(self.ds[name].sizes[dims[0]]) if dims else 1
+        return _layers.clean(stack, spatial, counts)
+
     def _centre(self, extent) -> tuple[float, float]:
         return (0.5 * (extent[0] + extent[1]), 0.5 * (extent[2] + extent[3]))
 
     def _render(self, var, time, level, kind, extent, figsize, dpi,
                 cmap=None, vmin=None, vmax=None, lon=None, lat=None, hov=None,
-                meta=None) -> bytes:
+                meta=None, layers=None) -> bytes:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -1354,7 +1393,7 @@ class GenericViewer:
         fig = plt.figure(figsize=figsize, dpi=dpi, layout="constrained")
         try:
             ax = self._draw(fig, var, time, level, kind, extent, cmap, vmin, vmax,
-                            lon, lat, hov)
+                            lon, lat, hov, layers)
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=dpi)
             if meta is not None and kind == "hovmoller":
@@ -1365,22 +1404,24 @@ class GenericViewer:
 
     def plot(self, var, time, level, kind, extent, width=900, height=560,
              cmap=None, vmin=None, vmax=None, lon=None, lat=None, hov=None,
-             meta=None) -> bytes:
+             meta=None, layers=None) -> bytes:
         """The live plot pane: `kind` drawn at the browser's pixel size.
 
         `hov` holds a Hovmöller's band, longitudes, steps, method and time
         direction; `meta`, a dict, receives where its steps landed in the image
-        so the page can mark the current one without asking again.
+        so the page can mark the current one without asking again. `layers` is
+        the composite's stack (JSON text or a dict) when `kind` is "layers";
+        see `gmpas.layers`.
         """
         width, height = int(np.clip(width, 200, 4000)), int(np.clip(height, 150, 3000))
         return self._render(var, time, level, kind, extent,
                             (width / 100, height / 100), 100, cmap, vmin, vmax, lon, lat,
-                            hov, meta)
+                            hov, meta, layers)
 
     # -- export ------------------------------------------------------------
 
     def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
-               kind="map", lon=None, lat=None, hov=None) -> bytes:
+               kind="map", lon=None, lat=None, hov=None, layers=None) -> bytes:
         """A publication-shaped figure of what is on screen.
 
         Sized by the same `Style` presets as the MPAS path. The fast map
@@ -1393,10 +1434,10 @@ class GenericViewer:
         if var not in self._spatial_vars() and kind == "map":
             kind = "auto"
         return self._render(var, time, level, kind, extent, st.figsize, st.dpi,
-                            cmap, vmin, vmax, lon, lat, hov)
+                            cmap, vmin, vmax, lon, lat, hov, None, layers)
 
     def gif(self, var, level, extent, cmap, vmin, vmax, nx=None, ny=None, fps=8,
-            kind="map", lon=None, lat=None, hov=None) -> bytes:
+            kind="map", lon=None, lat=None, hov=None, layers=None) -> bytes:
         """Every timestep as one animated GIF, drawn the way the screen is.
 
         The fast map re-containers its own palette frames, as `Viewer.gif`
@@ -1440,6 +1481,9 @@ class GenericViewer:
                 prof = [self._profile_at(var, s, *pt) for s in range(n)]
                 lo = min(float(np.nanmin(p.values)) for p in prof)
                 hi = max(float(np.nanmax(p.values)) for p in prof)
+            elif kind == "layers":
+                layers = _layers.freeze_ranges(self, self.layer_stack(layers, var),
+                                               level, extent)
             elif vmin is None or vmax is None:
                 vmin, vmax = self._range(np.asarray(
                     self._cropped(var, 0, level, extent).values, float), vmin, vmax)
@@ -1454,7 +1498,7 @@ class GenericViewer:
                 fig = plt.figure(figsize=st.figsize, dpi=80, layout="constrained")
                 try:
                     ax = self._draw(fig, var, step, level, kind, extent, cmap,
-                                    vmin, vmax, lon, lat)
+                                    vmin, vmax, lon, lat, hov, layers)
                     if kind == "profile":
                         pad = 0.02 * (hi - lo or 1.0)
                         ax.set_xlim(lo - pad, hi + pad)
@@ -1473,7 +1517,7 @@ class GenericViewer:
         return buf.getvalue()
 
     def netcdf(self, var, time, level, extent, nx=None, ny=None, kind=None,
-               lon=None, lat=None, hov=None) -> bytes:
+               lon=None, lat=None, hov=None, layers=None) -> bytes:
         """The numbers behind a Hovmöller, as netCDF. Other kinds: not yet."""
         if kind != "hovmoller":
             raise NotImplementedError(

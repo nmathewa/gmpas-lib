@@ -541,6 +541,8 @@ def _plot_extras(q: dict) -> dict:
     out: dict = {}
     if q.get("kind"):
         out["kind"] = q["kind"]
+    if q.get("layers"):
+        out["layers"] = q["layers"]            # JSON text; gmpas.layers checks it
     for key in ("lon", "lat"):
         if q.get(key):
             out[key] = float(q[key])
@@ -1108,6 +1110,29 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #frame{display:grid;grid-template-columns:auto auto;grid-template-rows:auto auto}
 #plotimg{display:none;max-width:100%;max-height:100%;background:#fff;border-radius:4px}
 #stage.plotting #msg{top:auto;bottom:14px}   /* keep off the figure's own title */
+/* --generic layers: a stack editor in a wider right panel */
+body.layering #right{width:330px}
+body.layering #cmapsec,body.layering #rangesec{display:none}
+#lyList{margin-top:8px;border:1px solid var(--line);border-radius:4px}
+.lyrow{display:flex;align-items:center;gap:5px;padding:5px 6px;
+       border-bottom:1px solid var(--line);font-size:12px;cursor:pointer;user-select:none}
+.lyrow:last-child{border-bottom:none}
+.lyrow.sel{background:color-mix(in srgb,var(--accent) 22%,transparent)}
+.lyrow.off .lyname{opacity:.45;text-decoration:line-through}
+.lyrow.drop{box-shadow:inset 0 2px 0 var(--accent)}
+.lyrow input[type=checkbox]{width:auto;margin:0}
+.lyname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lyrow button{padding:1px 5px;font-size:11px;min-width:0}
+.lygroup{color:var(--dim);font-size:10px;text-transform:uppercase}
+#lyEdit{margin-top:10px}
+#lyEdit .f,#lyFigForm .f{display:grid;grid-template-columns:108px 1fr;gap:4px 8px;
+       align-items:center;margin-bottom:4px;font-size:11px;color:var(--dim)}
+#lyEdit .f input,#lyEdit .f select,#lyFigForm .f input,#lyFigForm .f select{
+       width:100%;box-sizing:border-box;font-size:11px;padding:2px 4px}
+#lyEdit .f .pair{display:flex;gap:4px}
+#lyEdit .f input[type=color]{width:26px;padding:0;flex:none}
+#lyJsonBox{width:100%;box-sizing:border-box;height:180px;font:11px monospace;margin-top:6px}
+#lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
 #hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
          display:none;box-shadow:0 1px 0 #fffc}
 /* number inputs carry a wide intrinsic size; two to a row must share 220px */
@@ -1209,6 +1234,24 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
 <div id="right">
   <h1>options</h1>
 
+  <div class="sec" id="layersec" style="display:none"><label>layers</label>
+    <div class="row"><select id="lyAddKind" style="flex:1"></select>
+      <button id="lyAdd">add</button></div>
+    <div id="lyList"></div>
+    <div class="hint">top of the list draws on top &middot;
+      drag or \u25b2\u25bc to reorder</div>
+    <div id="lyEdit"></div>
+    <details id="lyFig"><summary>figure: projection, title, colorbars</summary>
+      <div id="lyFigForm" style="margin-top:6px"></div></details>
+    <div class="row" style="margin-top:8px">
+      <button id="lyJson" style="flex:1">edit as JSON</button>
+      <button id="lyReset">reset</button></div>
+    <textarea id="lyJsonBox" style="display:none" spellcheck="false"></textarea>
+    <div class="row" id="lyJsonRow" style="display:none;margin-top:4px">
+      <button id="lyJsonApply" style="flex:1">apply JSON</button></div>
+    <div class="hint" id="lyhint"></div>
+  </div>
+
   <div class="sec" id="hovbox" style="display:none"><label>Hovm\u00f6ller</label>
     <div class="kv"><span>latitude band (averaged)</span></div>
     <div class="row"><input type="number" id="hlat0" step="any" placeholder="lat min">
@@ -1235,9 +1278,9 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
       columns, no interpolation</div>
   </div>
 
-  <div class="sec"><label>colormap</label><select id="cmap"></select></div>
+  <div class="sec" id="cmapsec"><label>colormap</label><select id="cmap"></select></div>
 
-  <div class="sec"><label>colour range</label>
+  <div class="sec" id="rangesec"><label>colour range</label>
     <div class="row">
       <input type="text" id="vmin" placeholder="auto"><input type="text" id="vmax" placeholder="auto">
     </div>
@@ -1326,6 +1369,12 @@ async function boot(){
   M = await (await fetch("api/meta")).json();
   $("#title").textContent = M.file;
   M.cmaps.forEach(c=>{const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
+  if(M.layer_schema){                  // --generic: colormap suggestions for layer forms
+    const dl=document.createElement("datalist"); dl.id="lyCmaps";
+    M.cmaps.forEach(c=>{ const o=document.createElement("option"); o.value=c;
+      dl.append(o); });
+    document.body.append(dl);
+  }
   home = fit(M.home); view = {...home}; rendered = null;
   layout();
   subtitle(); fillVars();
@@ -1393,6 +1442,10 @@ function setMode(){
   $("#plotimg").style.display = p ? "block" : "none";
   $("#bar").style.visibility = p ? "hidden" : "";
   $("#stage").classList.toggle("plotting", p);
+  const layering = p && $("#kind").value==="layers";
+  document.body.classList.toggle("layering", layering);
+  $("#layersec").style.display = layering ? "" : "none";
+  if(layering) lyOpen();
   ["#zoom","#home","#anim","#grid"].forEach(id=>{ $(id).disabled=p; });
   if(p) stopPlayback();
   hovMode(p && $("#kind").value==="hovmoller");
@@ -1584,9 +1637,16 @@ async function drawPlot(){
       w:Math.max(300, st.clientWidth-24), h:Math.max(220, st.clientHeight-24)});
     if($("#vmin").value) p.set("vmin",$("#vmin").value);
     if($("#vmax").value) p.set("vmax",$("#vmax").value);
+    if($("#kind").value==="layers") p.set("layers", JSON.stringify(LY));
     const t0=performance.now();
     const r=await fetch("api/plot?"+p, {signal: ctrl.signal});
-    if(!r.ok){ say((await r.json()).error); return; }
+    if(!r.ok){
+      const err=(await r.json()).error;
+      clearTimeout(plotSayTimer); say(err);          // an error stays until fixed
+      if($("#kind").value==="layers") $("#lyhint").textContent=err;
+      return;
+    }
+    if($("#kind").value==="layers") $("#lyhint").textContent="";
     const url=URL.createObjectURL(await r.blob());
     const img=$("#plotimg"), old=img.src;
     img.onload=()=>{ if(old.startsWith("blob:")) URL.revokeObjectURL(old); };
@@ -1609,6 +1669,197 @@ $("#kind").onchange = ()=>{
   setMode();
   if(!plotMode()){ layout(); overlay(); scalebar(); graticule(); }
   draw();
+};
+// ---------------------------------------------------------------- layers
+// The stack lives here, in the page, and goes to the server with each draw;
+// gmpas/layers.py validates and draws it. `options` holds only what the user
+// set -- everything else is the schema's default, shown as a placeholder --
+// so a stack stays short and survives new defaults. Saved per file in
+// localStorage, and editable as JSON to copy a composite between files.
+let LY=null, lySel=0, lyTimer=null, lyDragFrom=null;
+function lyS(){ return M.layer_schema; }
+function lyKey(){ return "gmpas.layers."+M.file; }
+function lySpatial(){ return M.variables.filter(v=>v.spatial).map(v=>v.name); }
+function lyGuess(names, re, fallback){ return names.find(n=>re.test(n)) || fallback; }
+function lyNew(kind){
+  const spec=lyS().kinds[kind], names=lySpatial();
+  const L={kind, visible:true, opacity:1, level:"follow", options:{}};
+  if(spec.needs.includes("var")) L.var = (cur && cur.spatial) ? cur.name : names[0];
+  if(spec.needs.includes("u")){
+    L.u = lyGuess(names, /^(u|u10|u100|uwnd|ua|uas|u_?wind|.*_u)$/i, names[0]);
+    L.v = lyGuess(names, /^(v|v10|v100|vwnd|va|vas|v_?wind|.*_v)$/i, names[1]||names[0]);
+  }
+  return L;
+}
+function lyDefault(){
+  return {figure:{}, layers:[lyNew("contourf"), lyNew("coastlines"), lyNew("gridlines")]};
+}
+function lyOpen(){
+  if(!LY){
+    try{ LY=JSON.parse(localStorage.getItem(lyKey())||"null"); }catch(e){ LY=null; }
+    if(!LY || !Array.isArray(LY.layers)) LY=lyDefault();
+    lySel=Math.max(0, LY.layers.length-1);
+    const sel=$("#lyAddKind"); sel.innerHTML="";
+    for(const group of ["field","vector","feature"]){
+      const og=document.createElement("optgroup"); og.label=group+"s";
+      Object.entries(lyS().kinds).filter(([,s])=>s.group===group).forEach(([k,s])=>{
+        const o=document.createElement("option"); o.value=k; o.textContent=s.label;
+          og.append(o); });
+      sel.append(og);
+    }
+  }
+  lyRender();
+}
+function lyChanged(now){
+  try{ localStorage.setItem(lyKey(), JSON.stringify(LY)); }catch(e){}
+  clearTimeout(lyTimer); lyTimer=setTimeout(draw, now?0:350);
+}
+function lyTitle(L){
+  const s=lyS().kinds[L.kind];
+  const what = L.var ? `: ${L.var}` : L.u ? `: ${L.u} / ${L.v}` : "";
+  const lvl = (s.needs.length && L.level!=="follow" && L.level!=null) ? ` @${L.level}` : "";
+  return s.label+what+lvl;
+}
+function lyRender(){
+  const list=$("#lyList"); list.innerHTML="";
+  // shown top-first, like a layers panel: the last layer drawn is the first row
+  for(let i=LY.layers.length-1; i>=0; i--){
+    const L=LY.layers[i], row=document.createElement("div");
+    row.className="lyrow"+(i===lySel?" sel":"")+(L.visible===false?" off":"");
+    row.draggable=true; row.dataset.i=i;
+    const vis=document.createElement("input"); vis.type="checkbox";
+      vis.checked=L.visible!==false;
+    vis.title="show"; vis.onclick=e=>{ e.stopPropagation(); L.visible=vis.checked;
+      lyRender(); lyChanged(true); };
+    const name=document.createElement("span"); name.className="lyname";
+      name.textContent=lyTitle(L);
+    const grp=document.createElement("span"); grp.className="lygroup";
+      grp.textContent=lyS().kinds[L.kind].group;
+    const btn=(t, tip, fn)=>{ const b=document.createElement("button"); b.textContent=t;
+      b.title=tip;
+      b.onclick=e=>{ e.stopPropagation(); fn(); }; return b; };
+    row.append(vis, name, grp,
+      btn("▲", "up (draw later)", ()=>lyMove(i, i+1)),
+      btn("▼", "down (draw earlier)", ()=>lyMove(i, i-1)),
+      btn("⧉", "duplicate", ()=>{ LY.layers.splice(i+1, 0, JSON.parse(JSON.stringify(L)));
+                                     lySel=i+1; lyRender(); lyChanged(true); }),
+      btn("✕", "delete", ()=>{ LY.layers.splice(i, 1);
+        lySel=Math.min(lySel, LY.layers.length-1);
+                                  lyRender(); lyChanged(true); }));
+    row.onclick=()=>{ lySel=i; lyRender(); };
+    row.ondragstart=e=>{ lyDragFrom=i; e.dataTransfer.effectAllowed="move"; };
+    row.ondragover=e=>{ e.preventDefault(); row.classList.add("drop"); };
+    row.ondragleave=()=>row.classList.remove("drop");
+    row.ondrop=e=>{ e.preventDefault(); row.classList.remove("drop");
+      if(lyDragFrom!==null && lyDragFrom!==i) lyMove(lyDragFrom, i); lyDragFrom=null; };
+    list.append(row);
+  }
+  if(!LY.layers.length)
+    list.innerHTML='<div class="hint" style="padding:6px">no layers: add one above</div>';
+  lyEditor(); lyFigure();
+}
+function lyMove(from, to){
+  if(to<0 || to>=LY.layers.length) return;
+  const [L]=LY.layers.splice(from, 1); LY.layers.splice(to, 0, L);
+  lySel=to; lyRender(); lyChanged(true);
+}
+// One form row per schema option. Empty means "the default", which is shown
+// as the placeholder, so clearing a field is how an option is reset.
+function lyField(host, label, spec, value, set){
+  const f=document.createElement("div"); f.className="f";
+  const lab=document.createElement("span"); lab.textContent=label;
+    if(spec.help) lab.title=spec.help;
+  let input;
+  const dflt = spec.default==null ? "" : String(spec.default);
+  if(spec.type==="choice" || spec.type==="bool"){
+    input=document.createElement("select");
+    const opts = spec.type==="bool" ? ["true","false"] : spec.choices;
+    const d=document.createElement("option"); d.value="";
+      d.textContent=`default (${dflt||"auto"})`; input.append(d);
+    opts.forEach(c=>{ const o=document.createElement("option"); o.value=c;
+      o.textContent=c; input.append(o); });
+    input.value = value==null ? "" : String(value);
+    input.onchange=()=>set(input.value==="" ? null
+      : spec.type==="bool" ? input.value==="true" : input.value);
+  }else if(spec.type==="cmap"){
+    input=document.createElement("input"); input.setAttribute("list","lyCmaps");
+    input.placeholder=dflt||"none"; input.value=value??"";
+    input.onchange=()=>set(input.value.trim()||null);
+  }else if(spec.type==="color"){
+    input=document.createElement("div"); input.className="pair";
+    const text=document.createElement("input"); text.placeholder=dflt; text.value=value??"";
+    const pick=document.createElement("input"); pick.type="color";
+    pick.value=/^#[0-9a-f]{6}$/i.test(text.value||dflt) ? (text.value||dflt) : "#000000";
+    pick.oninput=()=>{ text.value=pick.value; set(pick.value); };
+    text.onchange=()=>set(text.value.trim()||null);
+    input.append(text, pick);
+  }else{
+    input=document.createElement("input");
+    if(spec.type==="float"||spec.type==="int"){ input.type="number";
+      input.step=spec.type==="int"?"1":"any"; }
+    input.placeholder=dflt||"auto"; input.value=value??"";
+    input.onchange=()=>{ const t=input.value.trim();
+      set(t==="" ? null : (spec.type==="float"||spec.type==="int") ? Number(t) : t); };
+  }
+  if(spec.help && input.title!==undefined) input.title=spec.help;
+  f.append(lab, input); host.append(f);
+}
+function lyEditor(){
+  const host=$("#lyEdit"); host.innerHTML="";
+  const L=LY.layers[lySel]; if(!L) return;
+  const spec=lyS().kinds[L.kind], names=lySpatial();
+  const head=document.createElement("div"); head.className="kv";
+  head.innerHTML=`<span>editing</span><b></b>`;
+    head.querySelector("b").textContent=spec.label;
+  host.append(head);
+  const pick=(key)=>lyField(host, key,
+    {type:"choice", choices:names, default:L[key]}, L[key],
+                             v=>{ if(v){ L[key]=v; lyRender(); lyChanged(); } });
+  spec.needs.forEach(pick);
+  if(spec.needs.length){
+    const row=M.variables.find(v=>v.name===(L.var||L.u)) || {levels:1, dim:""};
+    const choices=["follow"]; for(let k=0;k<row.levels;k++) choices.push(String(k));
+    lyField(host, row.dim ? `level (${row.dim})` : "level",
+            {type:"choice", choices, default:"follow",
+             help:"follow the level slider, or pin this layer to one level"},
+            L.level==null||L.level==="follow" ? null : String(L.level),
+            v=>{ L.level = (v===null||v==="follow") ? "follow" : Number(v); lyRender();
+              lyChanged(); });
+  }
+  const op=document.createElement("div"); op.className="f";
+  op.innerHTML=`<span>opacity</span><input type="range" min="0" max="1" step="0.05">`;
+  const range=op.querySelector("input"); range.value=L.opacity??1;
+  range.oninput=()=>{ L.opacity=Number(range.value); lyChanged(); };
+  host.append(op);
+  Object.entries(spec.options).forEach(([k, o])=>lyField(host, k, o, L.options[k],
+    v=>{ if(v===null) delete L.options[k]; else L.options[k]=v; lyChanged(); }));
+}
+function lyFigure(){
+  const host=$("#lyFigForm"); host.innerHTML="";
+  LY.figure = LY.figure || {};
+  Object.entries(lyS().figure).forEach(([k, o])=>lyField(
+    host, k.replace("_"," "), o, LY.figure[k],
+    v=>{ if(v===null) delete LY.figure[k]; else LY.figure[k]=v; lyChanged(); }));
+}
+$("#lyAdd").onclick=()=>{
+  LY.layers.push(lyNew($("#lyAddKind").value)); lySel=LY.layers.length-1;
+  lyRender(); lyChanged(true);
+};
+$("#lyReset").onclick=()=>{ LY=lyDefault(); lySel=LY.layers.length-1; lyRender();
+  lyChanged(true); };
+$("#lyJson").onclick=()=>{
+  const box=$("#lyJsonBox"), open=box.style.display==="none";
+  box.style.display=open?"":"none"; $("#lyJsonRow").style.display=open?"":"none";
+  if(open) box.value=JSON.stringify(LY, null, 1);
+};
+$("#lyJsonApply").onclick=()=>{
+  try{
+    const next=JSON.parse($("#lyJsonBox").value);
+    if(!next || !Array.isArray(next.layers))
+      throw new Error('needs {"figure": {...}, "layers": [...]}');
+    LY=next; lySel=Math.max(0, LY.layers.length-1); lyRender(); lyChanged(true);
+    $("#lyhint").textContent="";
+  }catch(e){ $("#lyhint").textContent="JSON: "+e.message; }
 };
 // ------------------------------------------------------------- Hovmöller
 // Nothing is read until "compute": a year of hourly files is minutes of I/O,
@@ -1986,6 +2237,7 @@ async function exportAs(kind, label){
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
   if(cur.kinds){                       // --generic: export what is on screen
     p.set("kind", $("#kind").value);
+    if($("#kind").value==="layers") p.set("layers", JSON.stringify(LY));
     const pt=probePt||{lon:view.clon, lat:view.clat};
     p.set("lon", pt.lon); p.set("lat", pt.lat);
     if($("#kind").value==="hovmoller")
