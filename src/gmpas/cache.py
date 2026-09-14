@@ -73,6 +73,14 @@ class BuildCache:
     def nbytes(self) -> int:
         return self._bytes
 
+    def peek(self, key):
+        """`cache[key]` if it is there, else None -- never builds, never waits."""
+        with self._lock:
+            if key in self._items:
+                self._items.move_to_end(key)
+                return self._items[key]
+        return None
+
     def get(self, key, build):
         """Return `cache[key]`, calling `build()` at most once per key.
 
