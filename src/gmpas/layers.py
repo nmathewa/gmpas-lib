@@ -76,6 +76,32 @@ _RASTER_COLOUR = {
 }
 
 _LINESTYLES = ["solid", "dashed", "dashdot", "dotted"]
+
+# Levels at a fixed step from a reference value -- MSLP every 4 hPa from 1000,
+# heights every 60 m -- which is how a weather map is specified and how Metview
+# (contour_interval, contour_reference_level) and GrADS (set cint) say it. The
+# alternative already here, a count, moves every line as soon as the field's
+# range moves, so two frames of a GIF are not drawn at the same values.
+_CONTOUR_INTERVAL = {
+    "interval": {"type": "float", "default": None, "min": 0.0,
+                 "help": "levels every this much, instead of a count"},
+    "reference": {"type": "float", "default": 0.0,
+                  "help": "interval counts from this value, e.g. 1000 hPa"},
+    "min_level": {"type": "float", "default": None, "help": "lowest interval level"},
+    "max_level": {"type": "float", "default": None, "help": "highest interval level"},
+}
+
+# Every Nth line drawn heavier, and labels thinned to match: dense contour sets
+# are read by their emphasised lines (Metview contour_highlight*).
+_CONTOUR_HIGHLIGHT = {
+    "highlight_every": {"type": "int", "default": 0, "min": 0, "max": MAX_LEVELS,
+                        "help": "emphasise every Nth level; 0 is off"},
+    "highlight_color": {"type": "color", "default": None,
+                        "help": "colour of the emphasised lines"},
+    "highlight_linewidth": {"type": "float", "default": 2.0, "min": 0.0},
+    "label_every": {"type": "int", "default": 1, "min": 1, "max": MAX_LEVELS,
+                    "help": "label only every Nth level"},
+}
 _RESOLUTIONS = ["110m", "50m", "10m"]
 
 LAYER_KINDS: dict[str, dict] = {
@@ -85,6 +111,7 @@ LAYER_KINDS: dict[str, dict] = {
         "options": {**_COLOUR_SCALE,
                     "levels": {"type": "levels", "default": None,
                                "help": "a count (10) or the values (0, 5, 10)"},
+                    **_CONTOUR_INTERVAL,
                     "hatches": {"type": "hatches", "default": None,
                                 "help": "one pattern per band, from "
                                         "/ \\ | - + x o O . *"}},
@@ -92,6 +119,7 @@ LAYER_KINDS: dict[str, dict] = {
     "contour": {
         "label": "contour lines", "group": "field", "needs": ["var"],
         "options": {"levels": {"type": "levels", "default": None},
+                    **_CONTOUR_INTERVAL,
                     "colors": {"type": "colors", "default": "black",
                                "help": "one colour, or one per level; ignored with a cmap"},
                     "cmap": {"type": "cmap", "default": None},
@@ -105,6 +133,7 @@ LAYER_KINDS: dict[str, dict] = {
                     "labels": {"type": "bool", "default": True},
                     "label_fontsize": {"type": "float", "default": 8.0, "min": 1.0},
                     "label_fmt": {"type": "fmt", "default": "%g"},
+                    **_CONTOUR_HIGHLIGHT,
                     "colorbar": {"type": "bool", "default": False}},
     },
     "pcolormesh": {
@@ -438,6 +467,8 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
         if clean_layer["opacity"] is None:
             clean_layer["opacity"] = 1.0
         _check_colour_options(clean_layer["options"], where)
+        if kind in ("contour", "contourf"):
+            _check_contour_options(clean_layer["options"], where)
         for need in spec["needs"]:
             name = layer.get(need)
             if name not in spatial_vars:
@@ -459,6 +490,104 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
             clean_layer["name"] = layer["name"][:MAX_TEXT]
         out["layers"].append(clean_layer)
     return out
+
+
+def _check_contour_options(opts: dict, where: str) -> None:
+    """Refuse contour levels that contradict each other, by name."""
+    if opts.get("interval") is not None:
+        if opts.get("levels") is not None:
+            raise ValueError(f"{where}interval and levels cannot be combined: interval "
+                             f"generates the levels, levels gives them outright")
+        if opts["interval"] <= 0:
+            raise ValueError(f"{where}interval={opts['interval']:g} must be above zero")
+    low, high = opts.get("min_level"), opts.get("max_level")
+    if low is not None and high is not None and high <= low:
+        raise ValueError(f"{where}max_level={high:g} must be above min_level={low:g}")
+    if opts.get("interval") is None:
+        for name in ("min_level", "max_level"):
+            if opts.get(name) is not None:
+                raise ValueError(f"{where}{name} applies to interval levels; "
+                                 f"set interval too")
+
+
+def interval_levels(lo: float, hi: float, interval: float, reference: float = 0.0,
+                    min_level=None, max_level=None, where: str = "") -> list[float]:
+    """Levels at `reference + k*interval` covering `lo..hi`, inclusive of both.
+
+    The reference is a level itself whenever it falls in range, so 1000 hPa
+    every 4 gives ..., 996, 1000, 1004, ... wherever the field happens to sit;
+    that is what makes the same line mean the same value in every frame.
+    """
+    if min_level is not None:
+        lo = max(lo, float(min_level))
+    if max_level is not None:
+        hi = min(hi, float(max_level))
+    if hi < lo:
+        raise ValueError(f"{where}min_level..max_level leaves nothing to draw between "
+                         f"{lo:g} and {hi:g}")
+    first = math.ceil((lo - reference) / interval - 1e-9)
+    last = math.floor((hi - reference) / interval + 1e-9)
+    count = last - first + 1
+    if count < 1:
+        raise ValueError(f"{where}interval={interval:g} from reference={reference:g} "
+                         f"puts no level between {lo:g} and {hi:g}")
+    if count > MAX_LEVELS:
+        raise ValueError(f"{where}interval={interval:g} would draw {count} levels "
+                         f"between {lo:g} and {hi:g}; the limit is {MAX_LEVELS}. "
+                         f"Use a larger interval, or min_level and max_level")
+    return [reference + k * interval for k in range(first, last + 1)]
+
+
+def _highlighted(levels, opts: dict) -> list[bool]:
+    """Which levels are emphasised: every Nth, counted from the reference when
+    an interval set them, so the emphasised lines keep their values as the
+    field's range moves."""
+    every = int(opts.get("highlight_every") or 0)
+    if every < 1:
+        return [False] * len(levels)
+    interval, reference = opts.get("interval"), opts.get("reference") or 0.0
+    if interval:
+        steps = [round((float(v) - reference) / interval) for v in levels]
+    else:
+        steps = list(range(len(levels)))
+    return [step % every == 0 for step in steps]
+
+
+def _levels_of(values, opts: dict):
+    """What to pass as `levels`: the interval's own values, or whatever the
+    layer already asked for (a list, a count, or None for matplotlib's pick)."""
+    if not opts.get("interval"):
+        return opts.get("levels")
+    lo, hi = _auto_range(values, opts)
+    return interval_levels(lo, hi, opts["interval"], opts.get("reference") or 0.0,
+                           opts.get("min_level"), opts.get("max_level"))
+
+
+def _emphasise(artist, opts: dict, coloured: bool) -> list[bool]:
+    """Draw every Nth contour heavier (and in its own colour). Returns which
+    levels were emphasised, so the labels can follow the same lines."""
+    heavy = _highlighted(list(artist.levels), opts)
+    if not any(heavy):
+        return heavy
+    widths = [opts["highlight_linewidth"] if on else opts["linewidths"] for on in heavy]
+    artist.set_linewidth(widths)
+    if opts.get("highlight_color") and not coloured:
+        base = artist.get_edgecolor()
+        colours = [opts["highlight_color"] if on else base[i % len(base)]
+                   for i, on in enumerate(heavy)]
+        artist.set_edgecolor(colours)
+    return heavy
+
+
+def _labelled(artist, opts: dict, heavy: list[bool]) -> list[float]:
+    """Which levels carry a label: every Nth, starting at an emphasised line
+    when there is one, so a heavy line is the one that reads its value."""
+    levels = list(artist.levels)
+    every = int(opts.get("label_every") or 1)
+    if every <= 1:
+        return levels
+    start = heavy.index(True) if any(heavy) else 0
+    return levels[start::every]
 
 
 def _check_colour_options(opts: dict, where: str) -> None:
@@ -717,7 +846,8 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
             common = dict(ax=ax, x=viewer.lon_name, y=viewer.lat_name, transform=data_crs,
                           add_colorbar=False, add_labels=False, alpha=alpha, zorder=z)
             if kind == "contour":
-                kw = dict(levels=opts["levels"], linewidths=opts["linewidths"],
+                levels = _levels_of(shifted.values, opts)
+                kw = dict(levels=levels, linewidths=opts["linewidths"],
                           linestyles=opts["linestyles"],
                           negative_linestyles=opts["negative_linestyles"])
                 # vmin/vmax pick the levels even for single-colour lines, so a
@@ -730,8 +860,13 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                 else:
                     kw["colors"] = opts["colors"]
                 artist = shifted.plot.contour(**common, **kw)
+                # after drawing, not before: a count (or no levels at all)
+                # leaves matplotlib to choose them, and which line is the Nth
+                # can only be answered once they exist
+                heavy = _emphasise(artist, opts, "cmap" in kw)
                 if opts["labels"]:
-                    ax.clabel(artist, fmt=opts["label_fmt"],
+                    ax.clabel(artist, levels=_labelled(artist, opts, heavy),
+                              fmt=opts["label_fmt"],
                               fontsize=opts["label_fontsize"], inline=True)
                 if opts["colorbar"] and "cmap" in kw:
                     colorbars.append({"artist": artist, "extend": "neither",
@@ -757,7 +892,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                     if opts["center"] is None:
                         kw.pop("center")
                 if kind == "contourf":
-                    kw["levels"] = opts["levels"]
+                    kw["levels"] = _levels_of(shifted.values, opts)
                     if opts["hatches"]:
                         kw["hatches"] = opts["hatches"]
                 elif kind == "pcolormesh":
