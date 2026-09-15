@@ -89,6 +89,21 @@ def test_figures_and_gifs_take_the_colour_options(regional):
     assert Image.open(io.BytesIO(gif)).n_frames == 2
 
 
+def test_a_figure_gif_keeps_its_colour_options_frame_by_frame(regional, monkeypatch):
+    """The figure path carries hov, layers and colour; none may take another's
+    place, and a dropped colour would silently draw the plain viridis scale."""
+    from gmpas import palettes
+
+    seen = []
+    scale = palettes.scale
+    monkeypatch.setattr(palettes, "scale", lambda opts, lo, hi: (
+        seen.append(opts), scale(opts, lo, hi))[1])
+    regional.gif("t", 0, (-20, 40, 30, 60), "grads.rainbow", 245.0, 280.0, kind="contourf",
+                 colour={"bands": 5, "reverse": True})
+    assert len(seen) == 2                                    # one per step
+    assert all(o["cmap"] == "grads.rainbow" and o["reverse"] for o in seen)
+
+
 def _serve(viewer):
     srv = bind(_handler(viewer, PAGE), 0)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
