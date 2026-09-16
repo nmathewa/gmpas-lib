@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from . import colour as _colour
+from . import jobs as _jobs
 from . import data as _data
 from . import timing
 from .cache import BuildCache
@@ -47,6 +48,11 @@ from .series import Series
 #: matplotlib group of that list, and as the set the prep pages draw from.
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo",
          "RdBu_r", "coolwarm", "BrBG", "Blues", "Spectral_r"]
+
+#: How many steps a point series will read. One open per step on a run that
+#: writes a file per step, so this is a guard against a click starting a read
+#: that would outlast the person who clicked.
+MAX_SERIES_STEPS = 20000
 
 #: Deprecated: view caches are bounded by bytes now, not by entry count -- see
 #: `cache.view_budget` and GMPAS_VIEW_CACHE_MB. A count only bounds memory
@@ -253,6 +259,8 @@ class Viewer:
         # though ThreadingHTTPServer already gives each request its own.
         self._views = BuildCache()
         self._overlays = BuildCache()
+        # point series: read on a background thread, polled through 202
+        self._jobs = _jobs.Jobs(name="gmpas-series")
 
     # -- variables -------------------------------------------------------
 
@@ -537,12 +545,59 @@ class Viewer:
         buf.write(ds.to_netcdf())
         return buf.getvalue()
 
+    def close(self) -> None:
+        """Stop any series job, then let go of the files.
+
+        A job left reading past its viewer keeps entering HDF5 while whatever
+        runs next may be writing a file without the lock -- the same reason
+        `GenericViewer.close` stops its own.
+        """
+        self._jobs.stop()
+        self.series.close()
+
     def probe(self, lon, lat, var, time, level):
         cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
         value = float(self.values(var, time, level)[cell])
         return {"cell": cell, "value": value,
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
                 "lat": round(float(self.mesh.lat_cell[cell]), 4)}
+
+    def series_at_point(self, lon, lat, var, level=0, blocking=False) -> dict:
+        """The clicked cell's value at every step: state, or the series itself.
+
+        Never blocks unless asked to: a run is one file per step, so this is
+        one open per step however small each read is, and the page polls
+        through HTTP 202 rather than holding a request open for it.
+        """
+        if var not in self.plottable_cell_vars():
+            raise ValueError(
+                f"{var!r} is a derived expression -- a time series of it would "
+                f"have to read every cell of every step to combine the fields. "
+                f"Take the series of the underlying variable(s) instead."
+            )
+        if len(self.series) > MAX_SERIES_STEPS:
+            raise ValueError(
+                f"{len(self.series):,} steps is past the {MAX_SERIES_STEPS:,} a "
+                f"point series will read; open a shorter run."
+            )
+        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        key = (var, cell, int(level), tuple(sorted(self._pins(var).items())))
+
+        def work(progress, cancel):
+            return self.series.at_cell(var, cell, int(level), self._pins(var),
+                                       progress=progress, cancel=cancel)
+
+        total = len(self.series)
+        found = (self._jobs.result(key, total, work) if blocking
+                 else self._jobs.peek(key))
+        if found is None:
+            return {"state": "running", **self._jobs.progress(key, total, work)}
+        return {"state": "done", "cell": cell,
+                "lon": round(float(self.mesh.lon_cell[cell]), 4),
+                "lat": round(float(self.mesh.lat_cell[cell]), 4),
+                "label": _data.field_label(self.series.dataarray(var, 0)),
+                "labels": list(self.series.labels),
+                "values": [None if not np.isfinite(v) else float(v) for v in found]}
 
 
 # ----------------------------------------------------------------- serving

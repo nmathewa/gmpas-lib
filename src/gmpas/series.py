@@ -21,6 +21,7 @@ import os
 import re
 import sys
 import threading
+import time as _time
 from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +30,7 @@ import numpy as np
 import xarray as xr
 
 from . import netcdf, timing
-from .data import find_mesh_beside, plottable, select
+from .data import SPATIAL_DIMS, find_mesh_beside, plottable, select
 from .mesh import MpasMesh, has_mesh
 from .paths import resolve_path
 
@@ -435,6 +436,87 @@ class Series:
             arr = select(ds[var], time=local, level=level, sel=sel)
             self._remember(key, arr)
             return arr
+
+    def at_cell(self, var: str, cell: int, level: int = 0,
+                sel: dict[str, int] | None = None,
+                progress=None, cancel=None) -> np.ndarray:
+        """One mesh element's value at every step: the series behind a probe.
+
+        The only read here that does not materialise a whole field, and it
+        exists because the obvious way round is ruinous. `values()` reads the
+        entire nCells vector for a step -- 328 MB on a 41M-cell mesh -- so
+        asking it for one cell at three thousand steps moves a terabyte to
+        collect three thousand numbers, and evicts the whole values cache
+        doing it. netCDF reads a hyperslab instead: `v[step, cell]` touches
+        one chunk, costs the same whatever the mesh, and the array that grows
+        here is the answer itself, 8 bytes a step.
+
+        netCDF4 directly rather than xarray, for the reason `_scan` gives: the
+        decoding xarray does is most of the per-file cost and none of it is
+        needed for one number. Nothing read here enters the values cache --
+        there is nothing worth keeping, and it would only evict what the map
+        is using.
+
+        One open per FILE, not per step, so a file holding many steps is read
+        once. The lock is taken and released per file, and the thread yields
+        between files, so frames keep being served while a long run is read.
+
+        `progress(done, total)` is called per file and `cancel` is checked
+        there, which is where nothing is held.
+        """
+        import netCDF4
+
+        from .jobs import Cancelled
+
+        steps = self.steps
+        order: OrderedDict[Path, list] = OrderedDict()
+        for index, (path, local) in enumerate(steps):
+            order.setdefault(path, []).append((index, local))
+
+        out = np.full(len(steps), np.nan, dtype=np.float64)
+        pins = dict(sel or {})
+        for done, (path, wanted) in enumerate(order.items()):
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
+            with self._lock, netCDF4.Dataset(path) as nc:
+                if var not in nc.variables:
+                    raise KeyError(f"{var!r} not in {path.name}")
+                v = nc.variables[var]
+                picks = self._cell_index(v, cell, level, pins)
+                for index, local in wanted:
+                    take = tuple(local if d == "Time" else picks[d] for d in v.dimensions)
+                    out[index] = float(np.asarray(v[take]).reshape(-1)[0])
+            if progress is not None:
+                progress(done + 1, len(order))
+            _time.sleep(0)                       # let a frame request in
+        return out
+
+    @staticmethod
+    def _cell_index(v, cell: int, level: int, pins: dict) -> dict:
+        """Which index each of a variable's dimensions takes for one cell.
+
+        The mesh dimension takes `cell`; a stacking axis takes `level`, or
+        whatever `sel` pins it to. Named by dimension rather than by position
+        because a diagnostic writes its levels wherever it likes -- the
+        `nIsoLevels` convention this package already follows elsewhere.
+        """
+        picks = {}
+        stack = [d for d in v.dimensions if d != "Time" and d not in SPATIAL_DIMS]
+        for dim in v.dimensions:
+            if dim == "Time":
+                continue
+            if dim in SPATIAL_DIMS:
+                size = v.shape[v.dimensions.index(dim)]
+                if not 0 <= cell < size:
+                    raise IndexError(f"cell {cell} is outside {dim}={size}")
+                picks[dim] = cell
+            elif dim in pins:
+                picks[dim] = pins[dim]
+            else:
+                # the slider drives the first stacking axis; the rest sit at 0,
+                # which is what `Viewer._pins` shows the page
+                picks[dim] = level if dim == stack[0] else 0
+        return picks
 
     def _remember(self, key: tuple, arr: np.ndarray) -> None:
         """Cache `arr`, evicting oldest entries to stay inside the budget.
