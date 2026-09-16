@@ -19,6 +19,12 @@ hundred with the mesh.
 - `GMPAS_VIEW_CACHE_MB` — pixel-to-cell indices and coastline overlays held per
   viewer. Defaults to 256. An entry costs `nx * ny * 9` bytes, so it scales with
   the browser window rather than with the mesh.
+- `GMPAS_SERIES_WORKERS` — how many files a point series opens at once.
+  Defaults to 8, or the core count if that is smaller; `1` reads serially.
+  Worth raising on a compute node with a parallel filesystem, where the cost is
+  the round trip to the metadata server rather than any CPU: simulating 5 ms
+  per open, 1000 files took 5.2 s serially, 0.7 s with 8 workers and 0.3 s with
+  16. Worth leaving alone on a shared login node.
 
 ## Seeing where the time goes
 

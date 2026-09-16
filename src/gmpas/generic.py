@@ -32,9 +32,9 @@ import numpy as np
 
 from . import colour as _colour
 from . import data as _data
+from . import jobs as _jobs
 from . import layers as _layers
 from . import netcdf, palettes, timing
-from .cache import BuildCache, view_budget
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
 from .viewer import _overlay, _png
@@ -255,8 +255,9 @@ HOV_CONTOUR_CELLS = 1_000_000
 HOV_RENDER_CELLS = 3_000_000
 
 
-class HovmollerCancelled(Exception):
-    """A Hovmöller job was superseded by a request for a different one."""
+#: kept as a name: `hovmoller` raises it when a job is superseded, and it is
+#: what `jobs.Jobs` catches to end a cancelled read quietly
+HovmollerCancelled = _jobs.Cancelled
 
 
 def _hov_columns(lon_file: np.ndarray, cyclic: bool, lon0: float, lon1: float):
@@ -435,10 +436,7 @@ class GenericViewer:
         self.series = self
         palettes.register()           # cmo.*, ferret.*, grads.* for this viewer's picker
         # Hovmöller results and the jobs reading them; see hovmoller_progress
-        self._hov_cache = BuildCache(budget=view_budget())
-        self._hov_jobs: dict = {}
-        self._hov_errors: dict = {}
-        self._hov_lock = threading.Lock()
+        self._hov_jobs = _jobs.Jobs(name="gmpas-hovmoller")
 
         if background_scan and len(self.files) > 1:
             self.scanning = True
@@ -601,12 +599,7 @@ class GenericViewer:
         server shutting down, a test finishing -- it keeps entering HDF5 while
         whatever runs next may be writing a file without the lock.
         """
-        with self._hov_lock:
-            jobs = list(self._hov_jobs.values())
-        for job in jobs:
-            job["cancel"].set()
-        for job in jobs:
-            job["finished"].wait(timeout)
+        self._hov_jobs.stop(timeout)
 
     def close(self) -> None:
         self.stop_jobs()
@@ -831,6 +824,38 @@ class GenericViewer:
                 "lat": round(float(self.lat[i]), 4),
                 "value": value}
 
+    def series_at_point(self, lon, lat, var, level=0, blocking=False) -> dict:
+        """The clicked grid point's value at every step, as the page wants it.
+
+        The same shape the MPAS viewer answers with, through the same runner:
+        a count while it reads, the numbers when it is done.
+        """
+        if var not in self._spatial_vars():
+            raise ValueError(f"{var!r} is not a map variable, so it has no "
+                             f"series at a point")
+        i, j = self._point(lon, lat)              # raises off-grid, with the point
+        key = ("series", var, i, j, int(level))
+
+        def work(progress, cancel, publish=None):
+            return self._series_at(var, lon, lat, int(level),
+                                   progress=progress, cancel=cancel)
+
+        total = len(self.files)
+        found = (self._hov_jobs.result(key, total, work) if blocking
+                 else self._hov_jobs.peek(key))
+        if found is None:
+            return {"state": "running", **self._hov_jobs.progress(key, total, work)}
+        values = np.asarray(found.values, dtype=float)
+        axis = found.coords[found.dims[0]].values
+        return {"state": "done", "cell": i * self.lon.size + j,
+                "lon": round(float(self.lon[j]), 4),
+                "lat": round(float(self.lat[i]), 4),
+                "label": _data.field_label(self.ds[var]),
+                "labels": [str(np.datetime_as_string(t, unit="m"))
+                           if np.issubdtype(np.asarray(t).dtype, np.datetime64)
+                           else str(t) for t in axis],
+                "values": [None if not np.isfinite(v) else float(v) for v in values]}
+
     # -- Hovmöller: time x longitude, averaged over a latitude band ---------
 
     def _hov_spec(self, var: str, level: int, band, lons=None, steps=None) -> dict:
@@ -867,11 +892,11 @@ class GenericViewer:
         snapshot = tuple(self._steps[a:b + 1])     # a plain list slice: atomic
 
         estimate = len(snapshot) * x.size * 8
-        if estimate > self._hov_cache.budget:
+        if estimate > self._hov_jobs.cache.budget:
             raise ValueError(
                 f"{len(snapshot)} steps x {x.size} longitudes is "
                 f"~{estimate / 2**20:.0f} MB, over the "
-                f"{self._hov_cache.budget // 2**20} MB "
+                f"{self._hov_jobs.cache.budget // 2**20} MB "
                 f"a result may take; narrow the step or longitude range "
                 f"(GMPAS_VIEW_CACHE_MB raises the limit)"
             )
@@ -1009,13 +1034,8 @@ class GenericViewer:
         error. Never blocks; the page polls this through HTTP 202."""
         spec = self._hov_spec(var, level, *self._hov_args(hov, extent))
         key = spec["key"]
-        with self._hov_lock:
-            if self._hov_cache.peek(key) is not None:
-                return {"state": "done", "progress": [len(spec["steps"])] * 2}
-            if key in self._hov_errors:
-                return {"state": "error", "error": self._hov_errors[key]}
-            job = self._hov_start(key, var, level, hov, extent)
-            return {"state": "running", "progress": [job["done"], job["total"]]}
+        return self._hov_jobs.progress(key, len(spec["steps"]),
+                                       self._hov_work(var, level, hov, extent))
 
     def _hov_args(self, hov: dict | None, extent):
         hov = hov or {}
@@ -1023,74 +1043,21 @@ class GenericViewer:
         lons = hov.get("lons") or (extent[0], extent[1])
         return band, lons, hov.get("steps")
 
-    def _hov_start(self, key, var, level, hov, extent) -> dict:
-        """The job for `key`, started if needed. Caller holds `_hov_lock`.
-
-        One job runs at a time: a request for a different Hovmöller cancels the
-        running one at its next chunk, unless an export is waiting on it --
-        typing a new band otherwise leaves the old read holding the lock.
-        """
-        job = self._hov_jobs.get(key)
-        if job is not None and not job["finished"].is_set():
-            return job
-        for other in self._hov_jobs.values():
-            if not other["finished"].is_set() and other["waiters"] == 0:
-                other["cancel"].set()
-        job = {"done": 0, "total": 0, "waiters": 0, "result": None, "error": None,
-               "cancel": threading.Event(), "finished": threading.Event()}
+    def _hov_work(self, var, level, hov, extent):
+        """The read itself, as the runner wants it: progress in, result out."""
         band, lons, steps = self._hov_args(hov, extent)
-        job["total"] = len(self._hov_spec(var, level, band, lons, steps)["steps"])
 
-        def progress(done, total):
-            job["done"], job["total"] = done, total
-
-        def run():
-            try:
-                result = self.hovmoller(var, level, band, lons, steps,
-                                        progress=progress, cancel=job["cancel"])
-                job["result"] = result
-                self._hov_cache.get(key, lambda: result)
-            except HovmollerCancelled:
-                pass
-            except Exception as exc:                        # remembered, not retried
-                with self._hov_lock:
-                    self._hov_errors[key] = f"{type(exc).__name__}: {exc}"
-                    while len(self._hov_errors) > 16:
-                        self._hov_errors.pop(next(iter(self._hov_errors)))
-            finally:
-                job["finished"].set()
-                with self._hov_lock:
-                    for k in [k for k, j in self._hov_jobs.items()
-                              if j["finished"].is_set() and j is not job]:
-                        self._hov_jobs.pop(k)
-
-        self._hov_jobs[key] = job
-        threading.Thread(target=run, daemon=True, name="gmpas-hovmoller").start()
-        return job
+        def work(progress, cancel, publish=None):
+            return self.hovmoller(var, level, band, lons, steps,
+                                  progress=progress, cancel=cancel)
+        return work
 
     def _hov_result(self, var: str, level: int, hov: dict | None, extent):
         """The Hovmöller, waiting for its job if one is reading it. For figures
         and exports, which must return the finished thing."""
         spec = self._hov_spec(var, level, *self._hov_args(hov, extent))
-        key = spec["key"]
-        while True:
-            with self._hov_lock:
-                cached = self._hov_cache.peek(key)
-                if cached is not None:
-                    return cached
-                if key in self._hov_errors:
-                    raise ValueError(self._hov_errors[key])
-                job = self._hov_start(key, var, level, hov, extent)
-                job["waiters"] += 1
-            job["finished"].wait()
-            with self._hov_lock:
-                job["waiters"] -= 1
-            if job["result"] is not None:
-                return job["result"]
-            if not job["cancel"].is_set():
-                with self._hov_lock:
-                    if key in self._hov_errors:
-                        raise ValueError(self._hov_errors[key])
+        return self._hov_jobs.result(spec["key"], len(spec["steps"]),
+                                     self._hov_work(var, level, hov, extent))
 
     # -- plots, the way xarray.DataArray.plot draws them -----------------
 
@@ -1099,18 +1066,26 @@ class GenericViewer:
         fj = (self.lon.size - 1 - j) if self._lon_flip else j
         return {self.lat_dim: fi, self.lon_dim: fj}
 
-    def _series_at(self, var: str, lon: float, lat: float, level: int = 0):
+    def _series_at(self, var: str, lon: float, lat: float, level: int = 0,
+                   progress=None, cancel=None):
         """`var` at one point, through every step of every file, as a DataArray.
 
         One read per file rather than per step, each under the lock only for
         that file, so a long series does not freeze the rest of the viewer.
+        The read is a hyperslab at one grid point, so what grows here is the
+        answer and nothing else.
+
+        `progress(done, total)` is called per file and `cancel` is checked
+        there, so this can run under `jobs.Jobs` for a long run.
         """
         import xarray as xr
 
         i, j = self._point(lon, lat)
         where = self._file_index(i, j)
         values, times = [], []
-        for path in self.files:
+        for done, path in enumerate(self.files):
+            if cancel is not None and cancel.is_set():
+                raise _jobs.Cancelled()
             with self._lock:
                 ds = self._dataset(path, check=path != self.files[0])
                 if var not in ds:
@@ -1119,6 +1094,9 @@ class GenericViewer:
                 values.append(np.atleast_1d(np.asarray(da.values, dtype=np.float64)))
                 if self.time_name in da.dims and self.time_name in ds.variables:
                     times.append(np.atleast_1d(ds[self.time_name].values))
+            if progress is not None:
+                progress(done + 1, len(self.files))
+            _time.sleep(0)                       # let a frame request in
         y = np.concatenate(values)
         dated = len(times) == len(self.files) and all(
             np.issubdtype(t.dtype, np.datetime64) for t in times)

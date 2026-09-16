@@ -34,6 +34,15 @@ and missing values their own colours — with the colorbar drawn from exactly th
 colours the image was drawn with. All of it applies to `view` and
 `view --generic` alike, and to the figures and GIFs they export. A frame with
 no option set is encoded the way it always was.
+
+**Click the map** and a panel opens with that location: the cell, its centre,
+and the value at the step on screen. Press *time series* and it reads that one
+point through every file and draws it, with the current step marked — hover for
+a value, *copy* for the numbers as CSV. On a run of thousands of files the read
+takes a while, so it reports progress and stops if you close the panel. It
+reads one point rather than one field per step, which is what makes it possible
+on a mesh of tens of millions of cells.
+
 `scrip` and `target` prepare the two grid files a conservative remapper needs
 — see [Conservative remapping](./remapping.md).
 

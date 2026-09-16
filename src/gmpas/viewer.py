@@ -34,12 +34,13 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from . import colour as _colour
+from . import jobs as _jobs
 from . import data as _data
 from . import timing
 from .cache import BuildCache
 from .mesh import MpasMesh
 from .raster import target_grid
-from .series import Series
+from .series import PARALLEL_MIN_FILES, Series, series_pool, series_workers
 
 #: the matplotlib colormaps offered in the picker, chosen to cover the usual
 #: field kinds. Both viewers now offer the cmocean, Ferret and GrADS palettes
@@ -47,6 +48,11 @@ from .series import Series
 #: matplotlib group of that list, and as the set the prep pages draw from.
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo",
          "RdBu_r", "coolwarm", "BrBG", "Blues", "Spectral_r"]
+
+#: How many steps a point series will read. One open per step on a run that
+#: writes a file per step, so this is a guard against a click starting a read
+#: that would outlast the person who clicked.
+MAX_SERIES_STEPS = 20000
 
 #: Deprecated: view caches are bounded by bytes now, not by entry count -- see
 #: `cache.view_budget` and GMPAS_VIEW_CACHE_MB. A count only bounds memory
@@ -253,6 +259,8 @@ class Viewer:
         # though ThreadingHTTPServer already gives each request its own.
         self._views = BuildCache()
         self._overlays = BuildCache()
+        # point series: read on a background thread, polled through 202
+        self._jobs = _jobs.Jobs(name="gmpas-series")
 
     # -- variables -------------------------------------------------------
 
@@ -537,12 +545,68 @@ class Viewer:
         buf.write(ds.to_netcdf())
         return buf.getvalue()
 
+    def close(self) -> None:
+        """Stop any series job, then let go of the files.
+
+        A job left reading past its viewer keeps entering HDF5 while whatever
+        runs next may be writing a file without the lock -- the same reason
+        `GenericViewer.close` stops its own.
+        """
+        self._jobs.stop()
+        self.series.close()
+
     def probe(self, lon, lat, var, time, level):
         cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
         value = float(self.values(var, time, level)[cell])
         return {"cell": cell, "value": value,
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
                 "lat": round(float(self.mesh.lat_cell[cell]), 4)}
+
+    def series_at_point(self, lon, lat, var, level=0, blocking=False) -> dict:
+        """The clicked cell's value at every step: state, or the series itself.
+
+        Never blocks unless asked to: a run is one file per step, so this is
+        one open per step however small each read is, and the page polls
+        through HTTP 202 rather than holding a request open for it.
+        """
+        if var not in self.plottable_cell_vars():
+            raise ValueError(
+                f"{var!r} is a derived expression -- a time series of it would "
+                f"have to read every cell of every step to combine the fields. "
+                f"Take the series of the underlying variable(s) instead."
+            )
+        if len(self.series) > MAX_SERIES_STEPS:
+            raise ValueError(
+                f"{len(self.series):,} steps is past the {MAX_SERIES_STEPS:,} a "
+                f"point series will read; open a shorter run."
+            )
+        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        key = (var, cell, int(level), tuple(sorted(self._pins(var).items())))
+
+        def work(progress, cancel, publish=None):
+            return _point_series(self.series, var, cell, int(level),
+                                 self._pins(var), progress, cancel, publish)
+
+        total = len(self.series)
+        found = (self._jobs.result(key, total, work) if blocking
+                 else self._jobs.peek(key))
+        if found is None:
+            state = {"state": "running", **self._jobs.progress(key, total, work)}
+            partial = state.pop("partial", None)
+            if partial is not None:
+                state.update(preview=True, **self._series_body(cell, var, partial))
+            return state
+        return {"state": "done", **self._series_body(cell, var, found)}
+
+    def _series_body(self, cell: int, var: str, values) -> dict:
+        """The series as the page wants it. Unread steps -- a preview's gaps --
+        come through as null, which the chart draws as a break in the line."""
+        return {"cell": cell,
+                "lon": round(float(self.mesh.lon_cell[cell]), 4),
+                "lat": round(float(self.mesh.lat_cell[cell]), 4),
+                "label": _data.field_label(self.series.dataarray(var, 0)),
+                "labels": list(self.series.labels),
+                "values": [None if not np.isfinite(v) else float(v) for v in values]}
 
 
 # ----------------------------------------------------------------- serving
@@ -633,6 +697,54 @@ def _hov_params(q: dict) -> dict:
         raise ValueError(f"Hovmöller time direction {ydir!r} is not down or up")
     hov.update(method=method, ydir=ydir)
     return hov
+
+
+#: How many steps a preview reads. ncview strides for the same reason: the
+#: shape of a series is legible from a hundred points, and a hundred opens is
+#: seconds where three thousand is a minute.
+PREVIEW_STEPS = 100
+
+
+def _point_series(series, var, cell, level, pins, progress, cancel, publish):
+    """A point's series, drawn coarse first and then in full.
+
+    Two passes over one pool of reader processes: a strided preview so the
+    panel has something within a second or so, then every step. Starting the
+    workers costs about 100 ms, paid once here rather than once per pass.
+    """
+    import numpy as np
+
+    total = len(series.steps)
+    workers = series_workers()
+    parallel = workers > 1 and total >= PARALLEL_MIN_FILES
+    pool = series_pool(workers) if parallel else None
+    try:
+        if parallel and total > PREVIEW_STEPS * 2:
+            stride = np.unique(np.linspace(0, total - 1, PREVIEW_STEPS).astype(int))
+            coarse = series.at_cell(var, cell, level, pins, steps=stride,
+                                    cancel=cancel, pool=pool)
+            if publish is not None:
+                publish(coarse)
+        return series.at_cell(var, cell, level, pins, progress=progress,
+                              cancel=cancel, pool=pool)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _serve_series(handler, viewer, q: dict) -> None:
+    """One point's series: 202 with a count while it reads, then the numbers.
+
+    A function taking the handler rather than a method on it, for the reason
+    `_serve_hovmoller` is one: the dashboard mounts a page by calling its
+    `do_GET` with the router's own `self`, so only what PageHandler defines
+    exists there.
+    """
+    state = viewer.series_at_point(float(q["lon"]), float(q["lat"]), q["var"],
+                                   int(q.get("level", 0)))
+    body = json.dumps(state).encode()
+    status = 202 if state["state"] == "running" else 200
+    return handler._send(body, "application/json", status)
 
 
 def _serve_hovmoller(handler, viewer, q: dict, extent) -> None:
@@ -784,6 +896,8 @@ def _handler(viewer: Viewer, html: str = ""):
                     out = viewer.probe(float(q["lon"]), float(q["lat"]), q["var"],
                                        int(q.get("time", 0)), int(q.get("level", 0)))
                     return self._send(json.dumps(out).encode(), "application/json")
+                if url.path == "/api/series" and hasattr(viewer, "series_at_point"):
+                    return _serve_series(self, viewer, q)
             except Exception as exc:                      # surface, don't hang
                 body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
                 self.send_response(500)
@@ -1225,6 +1339,30 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #scalebar{height:5px;border:1px solid #fff;border-top:none;box-shadow:0 0 3px #000;
           margin-top:2px}
 #scaletext{display:block;font-variant-numeric:tabular-nums}
+/* the point panel: ncview's popup, kept inside the page */
+#point{position:absolute;display:none;z-index:6;width:330px;background:var(--panel);
+       border:1px solid var(--line);border-radius:6px;box-shadow:0 6px 24px #0008;
+       font-size:12px;color:var(--fg)}
+#pthead{display:flex;align-items:center;gap:6px;padding:5px 8px;cursor:move;
+        border-bottom:1px solid var(--line);user-select:none}
+#pttitle{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim)}
+#ptclose{background:none;border:none;color:var(--dim);cursor:pointer;padding:0 4px;
+         font-size:14px;line-height:1}
+#ptclose:hover{color:var(--fg)}
+#ptbody{padding:8px}
+#ptnow{font-variant-numeric:tabular-nums;margin-bottom:6px}
+#ptnow b{color:var(--fg);font-size:14px}
+#ptchart{width:100%;height:150px;display:none}
+#ptchart .ax{stroke:var(--line);stroke-width:1}
+#ptchart .ln{fill:none;stroke:var(--accent);stroke-width:1.5}
+#ptchart .now{stroke:#fff;stroke-width:1;opacity:.5;stroke-dasharray:3 3}
+#ptchart .hit{stroke:none;fill:transparent}
+#ptchart .pt{fill:var(--accent);stroke:none}
+#ptchart text{fill:var(--dim);font-size:9px}
+#ptfoot{display:flex;gap:6px;align-items:center;margin-top:6px}
+#ptfoot .hint{flex:1;margin:0}
+#ptmark{position:absolute;pointer-events:none;display:none;z-index:4}
+#ptmark i{position:absolute;background:#fff;box-shadow:0 0 2px #000}
 #msg{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:#000a;
      padding:4px 10px;border-radius:4px;color:var(--dim);opacity:0;transition:opacity .2s;
      pointer-events:none}
@@ -1290,10 +1428,25 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
       <div id="wrap">
         <img id="data"><img id="over">
         <div id="grat"></div>
+        <div id="ptmark"><i></i><i></i></div>
         <div id="scale"><span id="scaletext"></span><div id="scalebar"></div></div>
       </div>
       <div id="corner"></div>
       <div id="lonax"></div>
+    </div>
+    <div id="point">
+      <div id="pthead"><span id="pttitle"></span>
+        <button id="ptclose" title="close">\u00d7</button></div>
+      <div id="ptbody">
+        <div id="ptnow"></div>
+        <div class="row"><button id="ptgo" style="flex:1">time series</button></div>
+        <svg id="ptchart" preserveAspectRatio="none"></svg>
+        <div id="ptfoot">
+          <div class="hint" id="pthint">the value here, through the run</div>
+          <button id="ptlog" title="log scale">log</button>
+          <button id="ptcsv" title="copy the numbers">copy</button>
+        </div>
+      </div>
     </div>
     <div id="msg"></div>
   </div>
@@ -1559,6 +1712,8 @@ function setMode(){
   show("#cmapsec", c.colour); show("#rangesec", c.colour);
   if(M.colour_options) show("#coloursec", c.options);
   show("#animsec", c.frames); show("#probesec", c.probe);
+  // the point panel marks a place on the map; a figure has no place to mark
+  ptShown(!p && c.probe);
   hovMode(p && $("#kind").value==="hovmoller");
   renderAnimList();
   exportModes();
@@ -1847,7 +2002,7 @@ async function drawPlot(){
 }
 $("#kind").onchange = ()=>{
   setMode();
-  if(!plotMode()){ layout(); overlay(); scalebar(); graticule(); }
+  if(!plotMode()){ layout(); overlay(); scalebar(); graticule(); ptMark(); }
   draw();
 };
 // ---------------------------------------------------------------- layers
@@ -2466,6 +2621,7 @@ function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); clear
   redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
+  if(PT && PT.series) ptChart();       // the series is in hand: just move the mark
   // a Hovmöller already holds every step: moving time only moves its marker
   if(plotMode() && $("#kind").value==="hovmoller"){ hovMark(); return; }
   if(plotMode()){ clearTimeout(redrawTimer); redrawTimer=setTimeout(draw, 120); return; }
@@ -2473,7 +2629,8 @@ $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
   const entry=anims.get(animKeyOf(animParams()));
   if(entry && entry.urls[e.target.value]){ $("#data").src=entry.urls[e.target.value]; return; }
   draw(); };
-$("#level").oninput = e=>{ $("#llab").textContent=e.target.value; stopPlayback(); draw(); };
+$("#level").oninput = e=>{ $("#llab").textContent=e.target.value; stopPlayback();
+  ptStale(); draw(); };
 $("#cmap").onchange = ()=>{ stopPlayback(); draw(); };
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
@@ -2509,7 +2666,7 @@ $("#wrap").onpointermove = ev=>{
   const dy=(ev.clientY-drag.y)/r.height*(b[3]-b[2]);
   if(Math.abs(ev.clientX-drag.x)+Math.abs(ev.clientY-drag.y)>3) drag.moved=true;
   view.clon=drag.clon-dx; view.clat=drag.clat+dy;
-  clamp(); preview(); scalebar(); graticule();
+  clamp(); preview(); scalebar(); graticule(); ptMark();
   if(!covers(rendered, boxOf(view))) schedule(90);   // ran past the margin
 };
 $("#wrap").onpointerup = async ev=>{
@@ -2526,9 +2683,219 @@ $("#wrap").onpointerup = async ev=>{
   const d=await (await fetch("api/probe?"+q)).json();
   $("#probe2").innerHTML=`cell ${d.cell}<br>${d.lat}\u00b0, ${d.lon}\u00b0<br>`+
                          `<b>${d.value.toPrecision(6)}</b>`;
+  ptOpen(lon, lat, d);
 };
-$("#grid").onchange = graticule;
-addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); });
+$("#grid").onchange = ()=>{ graticule(); ptMark(); };
+addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); ptMark(); });
+// ------------------------------------------------------------ point panel
+// ncview's gesture: click the map, and this location's numbers are one button
+// away. The value is instant -- the step is already in hand -- but the series
+// is one read per file, so it is asked for, not assumed, and the server
+// answers 202 with a count while it reads.
+let PT=null;                 // {lon, lat, cell, key, series, log}
+let ptPoll=null, ptDrag=null;
+
+function ptKey(){ return JSON.stringify([cur&&cur.name, $("#level").value,
+                                         PT&&PT.lon, PT&&PT.lat]); }
+function ptOpen(lon, lat, d){
+  if(!caps().probe) return;
+  const box=$("#point");
+  const first=box.style.display!=="block";
+  PT={lon, lat, cell:d.cell, series:null, log:PT?PT.log:false, key:null};
+  box.style.display="block";
+  if(first){                 // sits top-left of the stage until dragged
+    box.style.left="14px"; box.style.top="14px";
+  }
+  $("#pttitle").textContent=`${d.lat}\u00b0, ${d.lon}\u00b0`+
+                            (d.cell>=0 ? ` \u00b7 cell ${d.cell}` : "");
+  const value=(d.value===null||d.value===undefined||!isFinite(d.value))
+    ? "no data" : (+d.value).toPrecision(6);
+  $("#ptnow").innerHTML=`${cur.label}<br><b>${value}</b>`;
+  $("#ptchart").style.display="none";
+  $("#pthint").textContent="the value here, through the run";
+  $("#ptgo").disabled=false;
+  clearTimeout(ptPoll);
+  ptMark();
+}
+function ptClose(){
+  clearTimeout(ptPoll); PT=null;
+  $("#point").style.display="none"; $("#ptmark").style.display="none";
+}
+// the clicked point, marked on the map: a cross, redrawn wherever the view goes
+function ptMark(){
+  const m=$("#ptmark");
+  if(!PT || plotMode() || !$("#wrap").clientWidth){ m.style.display="none"; return; }
+  const b=boxOf(view), w=$("#wrap").clientWidth, h=$("#wrap").clientHeight;
+  let lon=PT.lon;
+  while(lon<b[0]-180) lon+=360;              // the same point, one turn along
+  while(lon>b[1]+180) lon-=360;
+  const x=(lon-b[0])/(b[1]-b[0])*w, y=(b[3]-PT.lat)/(b[3]-b[2])*h;
+  if(x<0||y<0||x>w||y>h){ m.style.display="none"; return; }
+  m.style.display="block"; m.style.left="0"; m.style.top="0";
+  const arms=m.querySelectorAll("i");
+  arms[0].style.cssText=`left:${x-6}px;top:${y}px;width:13px;height:1px`;
+  arms[1].style.cssText=`left:${x}px;top:${y-6}px;width:1px;height:13px`;
+}
+async function ptSeries(){
+  if(!PT || !cur) return;
+  const key=ptKey();
+  PT.key=key;
+  $("#ptgo").disabled=true;
+  const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
+                               level:$("#level").value});
+  try{
+    const r=await fetch("api/series?"+q);
+    if(r.status===202){                      // fetch calls 202 ok: check first
+      const body=await r.json();
+      const [done,total]=body.progress;
+      // a preview arrives long before the full read: draw it rather than
+      // making the user watch a counter
+      if(body.values){
+        PT.series=body; ptChart();
+        const n=body.values.filter(v=>v!==null).length;
+        $("#pthint").textContent=`preview: ${n} of ${total} steps\u2026`;
+      }else{
+        $("#pthint").textContent=`reading ${done} / ${total}\u2026`;
+      }
+      // quick while there is nothing to look at, slower once there is
+      ptPoll=setTimeout(()=>{ if(PT && ptKey()===key) ptSeries(); },
+                        body.values ? 500 : 150);
+      return;
+    }
+    if(!r.ok){
+      $("#pthint").textContent=(await r.json()).error;
+      $("#ptgo").disabled=false; return;
+    }
+    const body=await r.json();
+    if(!PT || ptKey()!==key) return;         // moved on while it read
+    PT.series=body;
+    $("#pthint").textContent=ptSummary(body);
+    $("#ptgo").disabled=false;
+    ptChart();
+  }catch(e){
+    $("#pthint").textContent="series failed: "+e;
+    $("#ptgo").disabled=false;
+  }
+}
+function ptSummary(body){
+  const v=body.values.filter(x=>x!==null);
+  if(!v.length) return "no data at this point";
+  const mean=v.reduce((a,b)=>a+b,0)/v.length;
+  const f=x=>Math.abs(x)>=1e4||(x!==0&&Math.abs(x)<1e-3)
+    ? x.toExponential(2) : x.toPrecision(4);
+  return `${v.length} steps \u00b7 min ${f(Math.min(...v))} \u00b7 `+
+         `mean ${f(mean)} \u00b7 max ${f(Math.max(...v))}`;
+}
+// A small SVG rather than a plotted PNG: it redraws on hover and on the time
+// slider without asking the server for anything.
+function ptChart(){
+  const svg=$("#ptchart"), body=PT&&PT.series;
+  if(!body){ svg.style.display="none"; return; }
+  const W=314, H=150, L=38, R=6, T=8, B=18;
+  const vals=body.values;
+  const finite=vals.filter(x=>x!==null);
+  if(!finite.length){ svg.style.display="none"; return; }
+  let lo=Math.min(...finite), hi=Math.max(...finite);
+  // a log axis needs positive values; say so rather than quietly drawing linear
+  const logOK=PT.log && lo>0;
+  if(PT.log && !logOK) $("#pthint").textContent=
+    "log needs values above zero \u2014 drawn linear";
+  const tr=x=>logOK ? Math.log10(x) : x;
+  let tlo=tr(lo), thi=tr(hi);
+  if(thi-tlo < 1e-12){ tlo-=0.5; thi+=0.5; }
+  const x=i=>L+(vals.length<2 ? 0 : i/(vals.length-1)*(W-L-R));
+  const y=v=>T+(1-(tr(v)-tlo)/(thi-tlo))*(H-T-B);
+  const f=n=>Math.abs(n)>=1e4||(n!==0&&Math.abs(n)<1e-3)
+    ? n.toExponential(1) : (+n.toPrecision(4)).toString();
+  // A gap means two different things. In a finished series a null is missing
+  // data and the line must break at it. In a preview the nulls are merely
+  // steps not read yet, and breaking at them draws a hundred isolated
+  // move-commands -- which renders as an empty box. So a preview joins its
+  // samples up and marks them, and says in the hint that it is coarse.
+  const coarse=!!body.preview;
+  let d="", pen=false, dots="";
+  vals.forEach((v,i)=>{
+    if(v===null){ if(!coarse) pen=false; return; }
+    d+=(pen?"L":"M")+x(i).toFixed(1)+" "+y(v).toFixed(1)+" "; pen=true;
+    if(coarse) dots+=`<circle class="pt" cx="${x(i).toFixed(1)}" `+
+                     `cy="${y(v).toFixed(1)}" r="1.4"/>`;
+  });
+  const step=+$("#time").value;
+  const nowX=(step>=0 && step<vals.length) ? x(step) : null;
+  const ticks=[hi, lo].map((v,k)=>
+    `<text x="${L-4}" y="${(k?H-B:T+8).toFixed(0)}" text-anchor="end">${f(v)}</text>`);
+  const ends=[body.labels[0]||"", body.labels[vals.length-1]||""];
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML=
+    `<line class="ax" x1="${L}" y1="${T}" x2="${L}" y2="${H-B}"/>`+
+    `<line class="ax" x1="${L}" y1="${H-B}" x2="${W-R}" y2="${H-B}"/>`+
+    ticks.join("")+
+    `<text x="${L}" y="${H-6}">${ends[0].slice(0,16)}</text>`+
+    `<text x="${W-R}" y="${H-6}" text-anchor="end">${ends[1].slice(0,16)}</text>`+
+    (nowX!==null ? `<line class="now" x1="${nowX.toFixed(1)}" y1="${T}" `+
+                   `x2="${nowX.toFixed(1)}" y2="${H-B}"/>` : "")+
+    `<path class="ln" d="${d.trim()}"/>`+dots+
+    `<rect class="hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}"/>`;
+  svg.style.display="block";
+  svg.querySelector(".hit").onmousemove=ev=>{
+    const r=svg.getBoundingClientRect();
+    const frac=(ev.clientX-r.left)/r.width*W;
+    const i=Math.round((frac-L)/(W-L-R)*(vals.length-1));
+    if(i<0||i>=vals.length) return;
+    const v=vals[i];
+    $("#pthint").textContent=`${body.labels[i]} \u00b7 `+
+                             (v===null ? "no data" : f(v));
+  };
+  svg.querySelector(".hit").onmouseleave=()=>{
+    $("#pthint").textContent=ptSummary(body); };
+}
+// the panel belongs to the map; a plot has no point to mark
+function ptShown(on){
+  if(!PT) return;
+  $("#point").style.display = on ? "block" : "none";
+  if(on) ptMark(); else $("#ptmark").style.display="none";
+}
+// the point still stands, the numbers no longer do
+function ptStale(){
+  clearTimeout(ptPoll);
+  if(!PT) return;
+  PT.series=null;
+  $("#ptchart").style.display="none";
+  $("#ptgo").disabled=false;
+  $("#pthint").textContent="level changed \u2014 read it again";
+}
+$("#ptgo").onclick=ptSeries;
+$("#ptclose").onclick=ptClose;
+$("#ptlog").onclick=()=>{ if(!PT) return; PT.log=!PT.log;
+  $("#ptlog").classList.toggle("on", PT.log); ptChart(); };
+$("#ptcsv").onclick=async ()=>{
+  if(!PT || !PT.series) return;
+  const body=PT.series;
+  const head=`# ${cur.label} at ${body.lat}, ${body.lon}\\ntime,value\\n`;
+  const rows=body.labels.map((t,i)=>`${t},${body.values[i]===null?"":body.values[i]}`);
+  try{ await navigator.clipboard.writeText(head+rows.join("\\n")+"\\n");
+       $("#pthint").textContent=`${rows.length} rows copied`; }
+  catch(e){ $("#pthint").textContent="clipboard refused: "+e; }
+};
+// dragged by its title bar, with the pointer capture the map drag uses
+$("#pthead").onpointerdown=ev=>{
+  if(ev.target.closest("#ptclose")) return;   // the close button is not a handle
+  const box=$("#point"), r=box.getBoundingClientRect();
+  const st=$("#stage").getBoundingClientRect();
+  ptDrag={dx:ev.clientX-r.left, dy:ev.clientY-r.top, st};
+  $("#pthead").setPointerCapture(ev.pointerId);
+};
+$("#pthead").onpointermove=ev=>{
+  if(!ptDrag) return;
+  const box=$("#point"), st=ptDrag.st;
+  const x=Math.max(0, Math.min(st.width-box.offsetWidth,
+                               ev.clientX-st.left-ptDrag.dx));
+  const y=Math.max(0, Math.min(st.height-box.offsetHeight,
+                               ev.clientY-st.top-ptDrag.dy));
+  box.style.left=x+"px"; box.style.top=y+"px";
+};
+$("#pthead").onpointerup=()=>{ ptDrag=null; };
+
 boot();
 </script></body></html>
 """
