@@ -88,6 +88,61 @@ def test_a_curvilinear_grid_is_refused_by_name(tmp_path):
         _open(tmp_path, ds)
 
 
+def test_a_strong_2d_coordinate_beats_a_weak_1d_one(tmp_path):
+    """NEMO's shape: correct 2D nav_lat/nav_lon beside bare index axes that
+    carry nothing but `axis: Y`/`axis: X`.
+
+    This asserts the *extent*, not the message. Filtering to 1D candidates
+    before ranking drew this global grid as an 11-degree box off West Africa
+    -- a silently wrong map, which is worse than any refusal.
+    """
+    ds = xr.Dataset({
+        "thetao": (("y", "x"), np.zeros((20, 40))),
+        "nav_lat": (("y", "x"), np.repeat(LAT[:, None], 40, 1),
+                    {"standard_name": "latitude", "units": "degrees_north"}),
+        "nav_lon": (("y", "x"), np.repeat(LON[None, :], 20, 0),
+                    {"standard_name": "longitude", "units": "degrees_east"}),
+    }, coords={"y": ("y", np.arange(20.0), {"axis": "Y"}),
+               "x": ("x", np.arange(40.0), {"axis": "X"})})
+    with pytest.raises(ValueError, match="'nav_lat'.*curvilinear"):
+        _open(tmp_path, ds)
+
+
+def test_a_rotated_pole_without_standard_name_is_not_drawn_as_degrees(tmp_path):
+    """CORDEX with an incomplete attribute set: `rlat` has `axis: Y` and
+    `units: degrees` but no `standard_name`, so `_NOT_GEOGRAPHIC` cannot veto
+    it -- while the real 2D lat/lon sit beside it, correctly attributed.
+
+    Central Europe came out over the Gulf of Guinea, about 45 degrees of
+    latitude wrong. Asserting on numbers because that is what was wrong.
+    """
+    rlat = np.linspace(-11.0, 11.0, 20)          # rotated coordinates
+    rlon = np.linspace(-14.0, 14.0, 40)
+    true_lat = np.repeat(np.linspace(32.6, 57.4, 20)[:, None], 40, 1)
+    true_lon = np.repeat(np.linspace(-4.55, 24.55, 40)[None, :], 20, 0)
+    ds = xr.Dataset({
+        "tas": (("rlat", "rlon"), np.zeros((20, 40))),
+        "lat": (("rlat", "rlon"), true_lat,
+                {"standard_name": "latitude", "units": "degrees_north"}),
+        "lon": (("rlat", "rlon"), true_lon,
+                {"standard_name": "longitude", "units": "degrees_east"}),
+    }, coords={"rlat": ("rlat", rlat, {"units": "degrees", "axis": "Y"}),
+               "rlon": ("rlon", rlon, {"units": "degrees", "axis": "X"})})
+    with pytest.raises(ValueError) as caught:
+        gv = _open(tmp_path, ds)
+        raise AssertionError(
+            f"drew a map at {gv.home}; the file covers 32.6..57.4 N")
+    assert "curvilinear" in str(caught.value)
+
+
+def test_a_refusal_names_the_file_it_read(tmp_path):
+    """One of three thousand files is files[0]; the message has to say which."""
+    ds = xr.Dataset({"v": (("a", "b"), np.zeros((4, 5)))},
+                    coords={"a": np.arange(4.0), "b": np.arange(5.0)})
+    with pytest.raises(ValueError, match="odd_run.nc"):
+        _open(tmp_path, ds, name="odd_run.nc")
+
+
 def test_points_sharing_one_dimension_are_not_a_grid(tmp_path):
     ds = xr.Dataset({"v": (("n",), np.zeros(10))},
                     coords={"lat": ("n", np.linspace(-9, 9, 10)),

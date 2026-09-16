@@ -100,48 +100,61 @@ def _evidence(var, name: str, axis: str) -> int:
     return score
 
 
-def _find_axis(ds, axis: str) -> tuple[str, str]:
+def _find_axis(ds, axis: str, where: str = "") -> tuple[str, str]:
     """(coordinate variable, the dimension it indexes) for "lat" or "lon".
 
     The two usually share a name -- `lat(lat)` -- but need not: `nav_lat(y)`
     is a 1D latitude over a dimension called `y`, and slicing has to use `y`.
+
+    **Rank first, then look at dimensionality.** The strongest claim in the
+    file wins even when it is 2D, because a 2D winner means the grid really
+    is curvilinear and the right answer is the refusal below. Filtering to 1D
+    candidates *first* is how a file with a properly attributed `nav_lat`
+    (score 13) alongside a bare index axis `y` carrying `axis: Y` (score 2)
+    used to be drawn on the index axis: the refusal written for exactly that
+    file never fired, and a global NEMO grid came out as an 11-degree box.
     """
     scored = sorted(((_evidence(v, str(n), axis), str(n)) for n, v in ds.variables.items()),
                     reverse=True)
     best = [(sc, n) for sc, n in scored if sc > 0]
     if not best:
         raise ValueError(
-            f"no {axis} coordinate found. --generic looks for CF "
+            f"no {axis} coordinate found{where}. --generic looks for CF "
             f"standard_name/units/axis attributes, or a name like "
             f"{sorted(_LAT_NAMES if axis == 'lat' else _LON_NAMES)}. A projected "
             f"or unstructured file needs a real mesh instead (drop --generic)."
         )
-    one_d = [n for _, n in best if ds[n].ndim == 1]
+    top = best[0][0]
+    leaders = [n for sc, n in best if sc == top]
+    one_d = [n for n in leaders if ds[n].ndim == 1]
     if not one_d:
-        n = best[0][1]
+        n = leaders[0]
+        weaker = [f"{m!r}" for sc, m in best if sc < top and ds[m].ndim == 1]
+        instead = (f" The 1D {' and '.join(weaker)} scored lower, so "
+                   f"{'it is' if len(weaker) == 1 else 'they are'} an index axis "
+                   f"rather than a coordinate." if weaker else "")
         raise ValueError(
-            f"{n!r} is the {axis} coordinate but has dims {ds[n].dims}: this is a "
-            f"curvilinear grid (2D lat/lon, e.g. WRF's XLAT/XLONG). --generic "
-            f"needs a regular grid, where {axis} is 1D; regrid it first, or drop "
-            f"--generic."
+            f"{n!r} is the {axis} coordinate{where} but has dims {ds[n].dims}: this "
+            f"is a curvilinear grid (2D lat/lon, e.g. WRF's XLAT/XLONG).{instead} "
+            f"--generic needs a regular grid, where {axis} is 1D; regrid it first, "
+            f"or drop --generic."
         )
     # among equally strong 1D candidates, prefer a true dimension coordinate
-    top = max(_evidence(ds[n], n, axis) for n in one_d)
-    ties = [n for n in one_d if _evidence(ds[n], n, axis) == top]
-    name = next((n for n in ties if ds[n].dims == (n,)), ties[0])
+    name = next((n for n in one_d if ds[n].dims == (n,)), one_d[0])
     dim = str(ds[name].dims[0])
 
     values = np.asarray(ds[name].values, dtype=np.float64)
     step = np.diff(values)
     if values.size > 1 and not (np.all(step > 0) or np.all(step < 0)):
         raise ValueError(
-            f"{name!r} is not monotonic, so it cannot be sliced as a regular "
+            f"{name!r} is not monotonic{where}, so it cannot be sliced as a regular "
             f"grid axis. --generic needs a sorted 1D {axis}."
         )
     if axis == "lat" and np.nanmax(np.abs(values)) > 90.001:
         raise ValueError(
-            f"{name!r} looks like latitude but runs to {np.nanmax(np.abs(values)):g}; "
-            f"degrees cannot exceed 90. Is it a projected coordinate in metres?"
+            f"{name!r} looks like latitude{where} but runs to "
+            f"{np.nanmax(np.abs(values)):g}; degrees cannot exceed 90. Is it a "
+            f"projected coordinate in metres?"
         )
     return name, dim
 
@@ -397,14 +410,17 @@ class GenericViewer:
             self.ds = self._open_first()
         self.path = self.files[0]
 
-        self.lat_name, self.lat_dim = _find_axis(self.ds, "lat")
-        self.lon_name, self.lon_dim = _find_axis(self.ds, "lon")
+        # Pointed at a glob of three thousand files, a message about "the lat
+        # coordinate" leaves the user no way to tell which one was files[0].
+        where = f" in {self.path.name}"
+        self.lat_name, self.lat_dim = _find_axis(self.ds, "lat", where)
+        self.lon_name, self.lon_dim = _find_axis(self.ds, "lon", where)
         if self.lat_dim == self.lon_dim:
             raise ValueError(
                 f"{self.lat_name!r} and {self.lon_name!r} share the dimension "
-                f"{self.lat_dim!r}: that is a list of points (a station file or an "
-                f"unstructured mesh), not a grid. --generic needs lat and lon on "
-                f"separate axes."
+                f"{self.lat_dim!r}{where}: that is a list of points (a station file "
+                f"or an unstructured mesh), not a grid. --generic needs lat and lon "
+                f"on separate axes."
             )
         dims = {str(d) for da in self.ds.data_vars.values() for d in da.dims}
         dims -= {self.lat_dim, self.lon_dim}
