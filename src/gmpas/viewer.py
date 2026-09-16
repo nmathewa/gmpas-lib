@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from . import colour as _colour
 from . import data as _data
 from . import timing
 from .cache import BuildCache
@@ -108,6 +109,16 @@ class ViewIndex:
         """One field, sampled onto this view. A gather, nothing more."""
         img = np.asarray(values, dtype=np.float64)[self.idx].reshape(self.ny, self.nx)
         return np.where(self.blank, np.nan, img)
+
+    def frame_masked(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The frame, and which pixels are on the mesh at all.
+
+        `frame` folds both kinds of emptiness into NaN, which is all the plain
+        encoder needs. Giving missing values a colour needs them apart: a cell
+        that holds NaN is missing data and takes that colour, a pixel with no
+        cell under it is off the mesh and stays transparent.
+        """
+        return self.frame(values), ~self.blank
 
 
 def _png(img: np.ndarray, cmap: str, vmin: float, vmax: float,
@@ -362,8 +373,18 @@ class Viewer:
         )
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
-              nx=None, ny=None, compress=1):
-        img = self.view(extent, nx, ny).frame(self.values(var, time, level))
+              nx=None, ny=None, compress=1, colour=None, meta=None):
+        """A map frame. Without `colour` options this is what it always was,
+        byte for byte; with them the indexed encoder draws it and `meta` comes
+        back holding the bar the page should draw beside it."""
+        view = self.view(extent, nx, ny)
+        values = self.values(var, time, level)
+        # the plain path does not need the mask, so it does not build one
+        on_grid = None
+        if _colour.clean(colour):
+            img, on_grid = view.frame_masked(values)
+        else:
+            img = view.frame(values)
 
         if vmin is not None and vmax is not None:
             lo, hi = vmin, vmax        # animation fixes the range: measure nothing
@@ -382,7 +403,9 @@ class Viewer:
                 float(np.percentile(finite, 98)) if finite.size else 1.0)
         if hi <= lo:
             hi = lo + 1.0
-        return _png(img, cmap, lo, hi, compress), lo, hi
+        outside = None if on_grid is None else ~on_grid
+        return _colour.frame_png(img, cmap, lo, hi, compress, colour,
+                                 outside=outside, meta=meta), lo, hi
 
     # -- export ----------------------------------------------------------
 
@@ -422,7 +445,7 @@ class Viewer:
         plt.close(fig)
         return buf.getvalue()
 
-    def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8):
+    def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8, colour=None):
         """Every timestep as one animated GIF.
 
         Frames are already palette images, which is exactly what GIF wants, so
@@ -433,7 +456,7 @@ class Viewer:
         frames = []
         for step in range(len(self.series)):
             png, _, _ = self.frame(var, step, level, extent, cmap,
-                                   vmin, vmax, nx, ny, compress=1)
+                                   vmin, vmax, nx, ny, compress=1, colour=colour)
             frames.append(Image.open(io.BytesIO(png)).convert("P"))
 
         buf = io.BytesIO()
@@ -442,7 +465,7 @@ class Viewer:
                        disposal=2, transparency=255)
         return buf.getvalue()
 
-    def netcdf(self, var, time, level, extent, nx, ny):
+    def netcdf(self, var, time, level, extent, nx, ny, colour=None):
         """The current view sampled onto a regular lat-lon grid, as netCDF.
 
         NEAREST-CELL SAMPLING, not a conservative remap: every point takes the
