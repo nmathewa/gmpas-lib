@@ -411,3 +411,117 @@ def test_the_page_is_given_the_preview_to_draw(long_run, monkeypatch):
         threading.Event().wait(0.01)
     assert long_run.series_at_point(10.0, 0.0, "theta", 0, blocking=True)["state"] \
         == "done"
+
+
+# ------------------------------------- what the I/O review found, pinned down
+
+
+def _run_with(tmp_path, name, steps_per_file, files, fill=False, attrs=None):
+    from conftest import write_mesh
+
+    folder = tmp_path / name
+    folder.mkdir()
+    base = tmp_path / f"{name}.nc"
+    write_mesh(base, [(0.0, 0.0), (10.0, 0.0), (5.0, 8.0)])
+    mesh = xr.open_dataset(base)
+    cells = mesh.sizes["nCells"]
+    for k in range(files):
+        ds = mesh.copy(deep=True)
+        block = np.array([[100 * k + 10 * t + c for c in range(cells)]
+                          for t in range(steps_per_file)], "f8")
+        if fill:
+            block[:, 1] = -9999.0
+        ds["theta"] = (("Time", "nCells"), block, attrs or {})
+        ds["theta3d"] = (("Time", "nCells", "nVertLevels"),
+                         np.repeat(block[:, :, None], 4, axis=2))
+        ds.to_netcdf(folder / f"history.2012-{k // 28 + 1:02d}-"
+                              f"{k % 28 + 1:02d}_00.00.00.nc")
+    mesh.close()
+    return folder
+
+
+def test_a_masked_cell_reads_as_missing_not_as_zero(tmp_path):
+    """netCDF4 masks a fill value and numpy hands back the 0.0 underneath it.
+    Zero is a plausible anomaly, flux or wind component, so it would be
+    believed -- and the map, the probe and the chart would disagree about the
+    same cell."""
+    folder = _run_with(tmp_path, "masked", 1, 4, fill=True,
+                       attrs={"_FillValue": -9999.0})
+    v = Viewer(folder, nx=20, ny=15)
+    try:
+        series = v.series.at_cell("theta", 1, 0)
+        assert np.isnan(series).all(), series
+        assert np.isnan(v.values("theta", 0, 0)[1])          # what the map says
+        assert _wait(v, 10.0, 0.0, "theta", 0)["values"] == [None] * 4
+    finally:
+        v.close()
+
+
+def test_the_series_waits_for_the_real_time_axis(tmp_path):
+    """Until the background scan finishes, step i means (file i, step 0). A
+    series read against that axis has the wrong length and the wrong values,
+    and it would be cached."""
+    folder = _run_with(tmp_path, "multi", 2, 40)
+    v = Viewer(folder, nx=20, ny=15)
+    try:
+        assert len(v.series) == 41                # provisional: one per file
+        got = v.series_at_point(10.0, 0.0, "theta", 0, blocking=True)
+        assert len(v.series) == 80                # the scan landed first
+        assert len(got["values"]) == len(got["labels"]) == 80
+        assert got["values"] == [float(v.values("theta", s, 0)[1])
+                                 for s in range(80)]
+    finally:
+        v.close()
+
+
+def test_one_unreadable_file_costs_its_own_steps_only(tmp_path):
+    """The map draws every other step of such a run; the series used to throw
+    the whole answer away for one bad file."""
+    folder = _run_with(tmp_path, "broken", 1, 6)
+    bad = sorted(folder.glob("history*.nc"))[3]
+    bad.write_bytes(b"")
+    v = Viewer(folder, nx=20, ny=15)
+    try:
+        problems = []
+        series = v.series.at_cell("theta", 1, 0, problems=problems, workers=1)
+        assert np.isnan(series[3])                       # that file's step
+        assert np.isfinite(np.delete(series, 3)).all()   # and only that one
+        assert problems and bad.name in problems[0]
+    finally:
+        v.close()
+
+
+def test_an_index_out_of_range_says_which_and_where(tmp_path):
+    folder = _run_with(tmp_path, "bounds", 1, 3)
+    v = Viewer(folder, nx=20, ny=15)
+    try:
+        with pytest.raises(IndexError, match="cell 99 is outside nCells=3"):
+            v.series.at_cell("theta", 99, 0)
+        with pytest.raises(KeyError, match="not a dimension"):
+            v.series.at_cell("theta", 1, 0, sel={"nMonths": 1})
+    finally:
+        v.close()
+
+
+def test_a_failed_read_is_not_served_as_success(tmp_path):
+    """The route used to answer 200 with an error body, and the page turned
+    that into a TypeError instead of showing what the server knew."""
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    folder = _run_with(tmp_path, "route", 1, 3)
+    v = Viewer(folder, nx=20, ny=15)
+    srv, base = _serve(v)
+    q = urllib.parse.urlencode({"lon": 10.0, "lat": 0.0, "var": "theta3d",
+                                "level": 99})       # only 4 levels exist
+    try:
+        with pytest.raises(urllib.error.HTTPError) as err:
+            for _ in range(50):
+                urllib.request.urlopen(f"{base}/api/series?{q}")
+                threading.Event().wait(0.02)
+        assert "nVertLevels" in json.loads(err.value.read())["error"]
+    finally:
+        srv.shutdown()
+        v.close()

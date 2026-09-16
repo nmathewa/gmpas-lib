@@ -26,6 +26,7 @@ import re
 import socket
 import sys
 import threading
+import time as _time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -601,11 +602,18 @@ class Viewer:
     def _series_body(self, cell: int, var: str, values) -> dict:
         """The series as the page wants it. Unread steps -- a preview's gaps --
         come through as null, which the chart draws as a break in the line."""
+        labels = list(self.series.labels)
+        values = list(values)
+        if len(values) != len(labels):
+            # the axis grew under us; say nothing rather than plot a value
+            # against the wrong time
+            raise ValueError("the time axis changed while the series was read; "
+                             "ask again")
         return {"cell": cell,
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
                 "lat": round(float(self.mesh.lat_cell[cell]), 4),
                 "label": _data.field_label(self.series.dataarray(var, 0)),
-                "labels": list(self.series.labels),
+                "labels": labels,
                 "values": [None if not np.isfinite(v) else float(v) for v in values]}
 
 
@@ -714,6 +722,17 @@ def _point_series(series, var, cell, level, pins, progress, cancel, publish):
     """
     import numpy as np
 
+    # The time axis is provisional until the background scan has counted every
+    # file: until then step i means (file i, step 0), which for multi-step
+    # files is a different moment than it will be in a minute. A series read
+    # against that axis is wrong in both its values and its length, and the
+    # answer would be cached. So wait; it is seconds at worst, and the map
+    # keeps drawing throughout.
+    while series.scanning:
+        if cancel is not None and cancel.is_set():
+            raise _jobs.Cancelled()
+        _time.sleep(0.05)
+
     total = len(series.steps)
     workers = series_workers()
     parallel = workers > 1 and total >= PARALLEL_MIN_FILES
@@ -742,6 +761,8 @@ def _serve_series(handler, viewer, q: dict) -> None:
     """
     state = viewer.series_at_point(float(q["lon"]), float(q["lat"]), q["var"],
                                    int(q.get("level", 0)))
+    if state["state"] == "error":                 # a 200 would be a lie, and
+        raise ValueError(state["error"])          # the page shows the message
     body = json.dumps(state).encode()
     status = 202 if state["state"] == "running" else 200
     return handler._send(body, "application/json", status)
@@ -2767,6 +2788,10 @@ async function ptSeries(){
       $("#ptgo").disabled=false; return;
     }
     const body=await r.json();
+    if(body.state==="error" || !body.values){    // belt and braces: say what
+      $("#pthint").textContent=body.error||"the series could not be read";
+      $("#ptgo").disabled=false; return;         // the server knew, not a
+    }                                            // TypeError from undefined
     if(!PT || ptKey()!==key) return;         // moved on while it read
     PT.series=body;
     $("#pthint").textContent=ptSummary(body);
