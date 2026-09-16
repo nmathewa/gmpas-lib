@@ -600,12 +600,20 @@ def _generic_view(args) -> int:
 
     gv = GenericViewer(args.path, background_scan=True)
     n_files = len(gv.files)
-    counted = ("steps counted in the background" if gv.scanning
-               else f"{gv.steps} step{'s' if gv.steps != 1 else ''}")
-    source = Source("run", "data",
-                    f"{gv.title} · {gv.nx}x{gv.ny} grid · {n_files} "
-                    f"file{'s' if n_files != 1 else ''} · {counted}",
-                    _handler(gv, PAGE))
+    if gv.needs_setup:
+        # Serve anyway: the page can ask which dimension is which, and that
+        # conversation is far more use than this message was on its own.
+        print(f"gmpas: {gv.setup_problem}\n"
+              f"  starting anyway -- choose the dimensions in the browser.",
+              file=sys.stderr)
+        detail = f"{gv.title} · {n_files} file{'s' if n_files != 1 else ''} · " \
+                 f"grid not worked out yet"
+    else:
+        counted = ("steps counted in the background" if gv.scanning
+                   else f"{gv.steps} step{'s' if gv.steps != 1 else ''}")
+        detail = (f"{gv.title} · {gv.nx}x{gv.ny} grid · {n_files} "
+                  f"file{'s' if n_files != 1 else ''} · {counted}")
+    source = Source("run", "data", detail, _handler(gv, PAGE))
     serve([source], port=DEFAULT_PORT if args.port is None else args.port,
           host=args.host, open_browser=args.browser,
           strict_port=args.port is not None,          # see the note in _dashboard

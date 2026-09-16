@@ -256,6 +256,30 @@ Limits: it needs real 1D `lat`/`lon` coordinates (2D curvilinear coordinates
 won't work), and export isn't implemented for this mode yet. Variables with
 no spatial dimensions are shown as a simple line plot instead of a map.
 
+#### When it can't work the file out
+
+gmpas finds the axes from CF `standard_name`, `units` and `axis` attributes,
+falling back to conventional names. When that isn't enough it **does not
+guess and draw** — the viewer still starts, and a **dimensions** panel asks
+which variable is x and y, and which dimensions are time and level. Nothing
+is drawn until you answer. Your choice is checked the same way a detected one
+is: a 2D, unsorted, or out-of-range axis is refused whoever picked it.
+
+The panel is always there, not only on failure. Two cases where the file
+loads but the reading deserves a look:
+
+- **an axis identified on weak evidence** — a `rlat`/`rlon` pair carrying only
+  `axis: Y`/`axis: X` looks exactly like a rotated or projected grid, which
+  must not be drawn as degrees;
+- **a dimension pinned at 0** — the map has one level slider, so if a field
+  has two stacking axes the second is held at index 0 and the rest of it
+  can't be reached. The panel says so and lets you swap which one the slider
+  drives.
+
+What you choose is remembered per file, in the browser, and reapplied next
+time. `gmpas plot` and the Python API don't share it: they still refuse a file
+they can't read rather than silently using a mapping made elsewhere.
+
 ---
 
 ## Getting data onto a lat-lon grid

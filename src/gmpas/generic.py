@@ -159,6 +159,97 @@ def _find_axis(ds, axis: str, where: str = "") -> tuple[str, str]:
     return name, dim
 
 
+#: Below this, nothing CF-conventional confirmed the axis. `_evidence` gives
+#: 8 for a matching `standard_name`, 4 for degree units, 4 for
+#: `_CoordinateAxisType`, 2 for `axis`, 1 for the name -- so 4 means the file
+#: stated something, and less means it was inferred.
+CONFIDENT = 4
+
+
+def _weak_axis(ds, axis: str) -> str:
+    """Why the detected `axis` is a guess rather than a reading, or "".
+
+    A bare `lat(lat)` with no attributes scores only 1, but it is not really
+    doubtful: someone called it latitude, and on the overwhelming majority of
+    files they meant it. Saying so on every such file would be a warning that
+    fires constantly and is therefore read never.
+
+    What is worth saying is when the *name means nothing to us* and the only
+    thing pointing at this variable is a CF `axis` attribute -- which, as
+    `_evidence` notes, equally marks projected metres. That is the rotated-pole
+    shape, and it is the one that has silently drawn the wrong map.
+    """
+    names = _LAT_NAMES if axis == "lat" else _LON_NAMES
+    scored = sorted(((_evidence(v, str(n), axis), str(n))
+                     for n, v in ds.variables.items()), reverse=True)
+    best = [(sc, n) for sc, n in scored if sc > 0]
+    if not best:
+        return ""                               # no axis at all: a hard failure
+    top = best[0][0]
+    leaders = [n for sc, n in best if sc == top]
+    if len(leaders) > 1:
+        return (f"{axis}: {' and '.join(repr(n) for n in leaders)} are equally "
+                f"good candidates, so the choice between them is arbitrary")
+    if top < CONFIDENT and leaders[0].lower() not in names:
+        return (f"{axis}: {leaders[0]!r} is being read as {axis} on the strength "
+                f"of a CF axis attribute alone -- no standard_name, no degree "
+                f"units, and a name this does not recognise. A rotated or "
+                f"projected axis looks exactly like this")
+    return ""
+
+
+def _named_axis(ds, name: str, axis: str, where: str = "") -> tuple[str, str]:
+    """The coordinate the user named, checked the way a detected one is.
+
+    Choosing the axis by hand skips the evidence scoring, not the arithmetic:
+    a hand-picked axis that is 2D, or not sorted, or a latitude in metres is
+    exactly as undrawable as a detected one, and the same three refusals
+    apply. Saying "I know what I am doing" cannot make a grid regular.
+    """
+    if name not in ds.variables:
+        raise ValueError(
+            f"{name!r} is not a variable{where}; the file has "
+            f"{sorted(map(str, ds.variables))[:12]}"
+        )
+    var = ds[name]
+    if var.ndim != 1:
+        raise ValueError(
+            f"{name!r} has dims {var.dims}{where}, so it cannot be the {axis} axis "
+            f"of a regular grid. --generic needs a 1D coordinate; a 2D one means "
+            f"a curvilinear grid, which has to be regridded first."
+        )
+    values = np.asarray(var.values, dtype=np.float64)
+    step = np.diff(values)
+    if values.size > 1 and not (np.all(step > 0) or np.all(step < 0)):
+        raise ValueError(
+            f"{name!r} is not monotonic{where}, so it cannot be sliced as a regular "
+            f"grid axis. --generic needs a sorted 1D {axis}."
+        )
+    if axis == "lat" and values.size and np.nanmax(np.abs(values)) > 90.001:
+        raise ValueError(
+            f"{name!r} runs to {np.nanmax(np.abs(values)):g}{where}; a latitude "
+            f"cannot exceed 90 degrees. Is it a projected coordinate in metres?"
+        )
+    return name, str(var.dims[0])
+
+
+def _pick_role(chosen, dims, where: str, role: str, detect=None):
+    """Which dimension fills a role: the user's choice, or detection.
+
+    `"none"` is a real answer and means the role is empty -- a file with no
+    time axis is a normal thing, and so is one whose third dimension the user
+    wants left alone rather than driving the slider.
+    """
+    if chosen in (None, ""):
+        return next((d for d in sorted(dims) if detect(d)), None) if detect else None
+    if chosen == "none":
+        return None
+    if chosen not in dims:
+        raise ValueError(f"{chosen!r} is not a {role} dimension{where}; this file "
+                         f"has {sorted(dims)}")
+    return chosen
+
+
 def _is_time(ds, dim: str) -> bool:
     if dim not in ds.variables:                 # a bare dimension, no coordinate
         return dim.lower() in _TIME_NAMES
@@ -397,7 +488,18 @@ class GenericViewer:
     viewer's -- there is no separate object for it to belong to.
     """
 
-    def __init__(self, paths, background_scan: bool = False):
+    def __init__(self, paths, background_scan: bool = False,
+                 strict: bool = False):
+        """Open the files; work out the grid if the file says clearly enough.
+
+        When it does not, the viewer is still constructed -- in a
+        **needs-setup** state, holding the dataset and the reason, drawing
+        nothing until `configure()` is told which dimensions are which. That
+        is deliberate: the page can then come up and ask, where before the
+        process exited on the command line and the user was left guessing at
+        a file they could not see. `strict=True` restores the old behaviour
+        for callers with nobody to ask -- `gmpas plot`, the library, tests.
+        """
         import xarray as xr  # noqa: F401  (the dependency, stated where it is used)
 
         self.files = expand(paths)
@@ -405,16 +507,137 @@ class GenericViewer:
         # process-wide and reentrant: see netcdf.LOCK. A dashboard's other
         # sources, and this viewer's own background scan, enter HDF5 too.
         self._lock = netcdf.LOCK
+        # `configure` rebuilds the grid under a live server: the background
+        # scan and any in-flight frame are reading these attributes.
+        self._setup_lock = threading.Lock()
+        self._stop_scan = threading.Event()
+        self._scan_thread: threading.Thread | None = None
 
         with self._lock:
             self.ds = self._open_first()
         self.path = self.files[0]
 
+        self.series = self
+        self.scanning = False
+        self.setup_problem: str | None = None
+        self._background_scan = background_scan
+        palettes.register()           # cmo.*, ferret.*, grads.* for this viewer's picker
+        # Hovmöller results and the jobs reading them; see hovmoller_progress
+        self._hov_jobs = _jobs.Jobs(name="gmpas-hovmoller")
+
+        try:
+            self._build_grid()
+        except ValueError as exc:
+            if strict:
+                raise
+            self._unconfigured(str(exc))
+
+    @property
+    def needs_setup(self) -> bool:
+        """Whether the grid is unknown, so nothing may be drawn yet."""
+        return self.setup_problem is not None
+
+    def _doubts(self, dims) -> list[str]:
+        """Everything about this reading that was a guess, in plain words.
+
+        Not errors -- the file loaded and the map will draw. These are the
+        places where drawing it anyway has been wrong before, so the page
+        says what it assumed instead of presenting a guess as a reading.
+        """
+        out = [d for d in (_weak_axis(self.ds, "lat"), _weak_axis(self.ds, "lon")) if d]
+        # in the order the slider will actually take them -- `_stack_dims`
+        # follows the variable's own dim order, not the alphabet, so naming
+        # the wrong one here would be its own small lie
+        spatial = self._spatial_vars()
+        stack = self._stack_dims(self.ds[spatial[0]]) if spatial else sorted(dims)
+        # A dimension with no coordinate variable is how a netCDF *record*
+        # axis looks: nobody gave it values. One with a coordinate -- `sigma`,
+        # `band` in nanometres -- was described on purpose and is a physical
+        # axis. Both are unclassified, but only the bare one has actually been
+        # mistaken for a level here, so only it is worth a remark.
+        bare = [d for d in stack
+                if d not in self._vertical and d not in self.ds.variables]
+        if self.time_name is None and bare:
+            out.append(
+                f"time: no time axis was recognised, and {bare[0]!r} has no "
+                f"coordinate values of its own -- which is what a record axis "
+                f"looks like. It is driving the level slider and this file is "
+                f"being called static. If {bare[0]!r} is time, say so")
+        if len(stack) > 1:
+            # whatever the reason, data behind a pinned axis cannot be reached
+            out.append(
+                f"level: {stack[0]!r} drives the level slider, so "
+                f"{', '.join(repr(d) for d in stack[1:])} "
+                f"{'is' if len(stack) == 2 else 'are'} pinned at 0 and the rest "
+                f"of that axis cannot be reached from the map")
+        return out
+
+    def setup(self) -> dict:
+        """What the page needs to ask which dimension is which.
+
+        Always present, so the panel can also be opened to *correct* a
+        confident reading -- the dangerous case is not the file that fails,
+        it is the one that draws a plausible wrong map.
+        """
+        dims = sorted({str(d) for da in self.ds.data_vars.values() for d in da.dims})
+        axes = sorted(str(n) for n, v in self.ds.variables.items()
+                      if v.ndim == 1 and np.issubdtype(v.dtype, np.number))
+        pick = {"type": "choice", "default": ""}
+        return {
+            "needed": bool(self.needs_setup),
+            "problem": self.setup_problem,
+            "doubts": list(getattr(self, "setup_doubts", [])),
+            "dims": dims,
+            "current": {"x": self.lon_name, "y": self.lat_name,
+                        "time": self.time_name or "none",
+                        "level": next(iter(sorted(self._vertical)), "none")},
+            "options": {
+                "y": {**pick, "choices": axes,
+                      "help": "the 1D coordinate holding latitude"},
+                "x": {**pick, "choices": axes,
+                      "help": "the 1D coordinate holding longitude"},
+                "time": {**pick, "choices": ["none", *dims],
+                         "help": "the dimension to step through in time"},
+                "level": {**pick, "choices": ["none", *dims],
+                          "help": "the dimension the level slider drives"},
+            },
+        }
+
+    def _unconfigured(self, problem: str) -> None:
+        """Hold the dataset without a grid, and remember why."""
+        self.setup_problem = problem
+        self.setup_doubts = []
+        self.lat_name = self.lon_name = self.lat_dim = self.lon_dim = ""
+        self.time_name = None
+        self._vertical = set()
+        self.lat = self.lon = np.zeros(0)
+        self._lat_file = self._lon_file = np.zeros(0)
+        self._lat_flip = self._lon_flip = False
+        self.cyclic = False
+        self.nx = self.ny = 0
+        self.home = (-180.0, 180.0, -90.0, 90.0)
+        self._counts, self._labels_of = {}, {}
+        self._steps, self.labels = [], []
+
+    def _build_grid(self, mapping: dict | None = None) -> None:
+        """Work out the grid, from the file or from what the user chose.
+
+        Everything downstream -- the raster, the time axis, the level slider
+        -- is derived here, so this is also what `configure` re-runs when a
+        mapping is corrected.
+        """
         # Pointed at a glob of three thousand files, a message about "the lat
         # coordinate" leaves the user no way to tell which one was files[0].
         where = f" in {self.path.name}"
-        self.lat_name, self.lat_dim = _find_axis(self.ds, "lat", where)
-        self.lon_name, self.lon_dim = _find_axis(self.ds, "lon", where)
+        chosen = mapping or {}
+        if chosen.get("y"):
+            self.lat_name, self.lat_dim = _named_axis(self.ds, chosen["y"], "lat", where)
+        else:
+            self.lat_name, self.lat_dim = _find_axis(self.ds, "lat", where)
+        if chosen.get("x"):
+            self.lon_name, self.lon_dim = _named_axis(self.ds, chosen["x"], "lon", where)
+        else:
+            self.lon_name, self.lon_dim = _find_axis(self.ds, "lon", where)
         if self.lat_dim == self.lon_dim:
             raise ValueError(
                 f"{self.lat_name!r} and {self.lon_name!r} share the dimension "
@@ -424,8 +647,13 @@ class GenericViewer:
             )
         dims = {str(d) for da in self.ds.data_vars.values() for d in da.dims}
         dims -= {self.lat_dim, self.lon_dim}
-        self.time_name = next((d for d in sorted(dims) if _is_time(self.ds, d)), None)
-        self._vertical = {d for d in dims if _is_vertical(self.ds, d)}
+        self.time_name = _pick_role(chosen.get("time"), dims, where, "time",
+                                    lambda d: _is_time(self.ds, d))
+        if chosen.get("level"):
+            self._vertical = {_pick_role(chosen["level"], dims, where, "level")}
+        else:
+            self._vertical = {d for d in dims if _is_vertical(self.ds, d)}
+        self._vertical -= {self.time_name}
 
         lat = np.asarray(self.ds[self.lat_name].values, dtype=np.float64)
         lon = np.asarray(self.ds[self.lon_name].values, dtype=np.float64)
@@ -451,17 +679,60 @@ class GenericViewer:
         self._counts = {self.files[0]: self._count(self.ds)}
         self._labels_of = {self.files[0]: self._labels_in(self.ds)}
         self._steps, self.labels = self._axis()
-        self.scanning = False
-        self.series = self
-        palettes.register()           # cmo.*, ferret.*, grads.* for this viewer's picker
-        # Hovmöller results and the jobs reading them; see hovmoller_progress
-        self._hov_jobs = _jobs.Jobs(name="gmpas-hovmoller")
+        self.setup_problem = None
+        self.setup_doubts = [] if chosen else self._doubts(dims)
 
-        if background_scan and len(self.files) > 1:
+        if self._background_scan and len(self.files) > 1:
             self.scanning = True
-            threading.Thread(target=self._scan, daemon=True).start()
+            self._stop_scan.clear()
+            self._scan_thread = threading.Thread(target=self._scan, daemon=True)
+            self._scan_thread.start()
         elif len(self.files) > 1:
             self._scan()
+
+    def stop_scan(self, timeout: float = 30.0) -> None:
+        """Stop the background step count and wait for it to let go.
+
+        The scan reads `lat_name`, `time_name` and the file list as it goes,
+        so anything that rebuilds those has to wait for it -- and so does
+        anything about to write netCDF beside a live viewer.
+        """
+        self._stop_scan.set()
+        thread, self._scan_thread = self._scan_thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)
+        self.scanning = False
+
+    def configure(self, mapping: dict) -> None:
+        """Adopt a dimension mapping chosen by the user, and rebuild.
+
+        Also the way a *wrong* detection is corrected, so it has to work on a
+        viewer that is already drawing: the scan is stopped, the grid rebuilt,
+        and every cached frame thrown away, because each one was sampled
+        against the axes this is replacing.
+
+        On a bad mapping the old grid is left exactly as it was -- a rejected
+        form must not leave the viewer less usable than before it was opened.
+        """
+        with self._setup_lock:
+            self.stop_scan()
+            keep = {k: getattr(self, k) for k in
+                    ("lat_name", "lon_name", "lat_dim", "lon_dim", "time_name",
+                     "_vertical", "lat", "lon", "_lat_file", "_lon_file",
+                     "_lat_flip", "_lon_flip", "cyclic", "nx", "ny", "home",
+                     "_counts", "_labels_of", "_steps", "labels",
+                     "setup_problem")}
+            try:
+                self._build_grid(mapping)
+            except Exception:
+                for k, v in keep.items():
+                    setattr(self, k, v)
+                raise
+            self._hov_jobs.stop(timeout=5.0)
+            with self._lock:                 # frames were cut against old axes
+                for ds in self._open.values():
+                    ds.close()
+                self._open.clear()
 
     # -- files and the time axis ----------------------------------------
 
@@ -564,6 +835,8 @@ class GenericViewer:
 
         counts, labels, dropped = dict(self._counts), dict(self._labels_of), []
         for path in self.files:
+            if self._stop_scan.is_set():
+                return              # reconfigured or closing: this axis is stale
             if path in counts:
                 continue
             try:
@@ -622,6 +895,7 @@ class GenericViewer:
 
     def close(self) -> None:
         self.stop_jobs()
+        self.stop_scan()
         with self._lock:
             for ds in self._open.values():
                 ds.close()
@@ -723,6 +997,7 @@ class GenericViewer:
             "kind_labels": KIND_LABELS,
             "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),
+            "setup": self.setup(),
             "variables": variables,
         }
 
