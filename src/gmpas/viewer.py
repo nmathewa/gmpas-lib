@@ -599,6 +599,12 @@ class Viewer:
             return state
         return {"state": "done", **self._series_body(cell, var, found)}
 
+    def cancel_series(self, lon, lat, var, level=0) -> bool:
+        """Stop the read for this point, if one is going."""
+        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        return self._jobs.cancel(
+            (var, cell, int(level), tuple(sorted(self._pins(var).items()))))
+
     def _series_body(self, cell: int, var: str, values) -> dict:
         """The series as the page wants it. Unread steps -- a preview's gaps --
         come through as null, which the chart draws as a break in the line."""
@@ -753,6 +759,21 @@ def _point_series(series, var, cell, level, pins, progress, cancel, publish):
 
 def _serve_series(handler, viewer, q: dict) -> None:
     """One point's series: 202 with a count while it reads, then the numbers.
+
+    `stop=1` cancels instead of asking, so a panel closed on a three-thousand
+    file run does not leave a pool of readers working for nobody.
+    """
+    if q.get("stop") and hasattr(viewer, "cancel_series"):
+        stopped = viewer.cancel_series(float(q["lon"]), float(q["lat"]),
+                                       q["var"], int(q.get("level", 0)))
+        return handler._send(json.dumps({"state": "stopped",
+                                         "was_running": stopped}).encode(),
+                             "application/json")
+    return _serve_series_state(handler, viewer, q)
+
+
+def _serve_series_state(handler, viewer, q: dict) -> None:
+    """The state of the read, as the page polls it.
 
     A function taking the handler rather than a method on it, for the reason
     `_serve_hovmoller` is one: the dashboard mounts a page by calling its
@@ -1373,6 +1394,8 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #ptbody{padding:8px}
 #ptnow{font-variant-numeric:tabular-nums;margin-bottom:6px}
 #ptnow b{color:var(--fg);font-size:14px}
+#ptnow .at{color:var(--dim);font-size:11px}
+#ptchart .ln.coarse{stroke-dasharray:4 3;opacity:.75}
 #ptchart{width:100%;height:150px;display:none}
 #ptchart .ax{stroke:var(--line);stroke-width:1}
 #ptchart .ln{fill:none;stroke:var(--accent);stroke-width:1.5}
@@ -1464,8 +1487,10 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
         <svg id="ptchart" preserveAspectRatio="none"></svg>
         <div id="ptfoot">
           <div class="hint" id="pthint">the value here, through the run</div>
+          <button id="ptstop" style="display:none" title="stop reading">stop</button>
           <button id="ptlog" title="log scale">log</button>
           <button id="ptcsv" title="copy the numbers">copy</button>
+          <button id="ptsave" title="save as CSV">save</button>
         </div>
       </div>
     </div>
@@ -1681,6 +1706,7 @@ function pick(name){
     ? `${cur.pinned.join(", ")} at 0` : "";
   fillKinds();
   if(!plotMode()) overlay();
+  ptRefresh();                 // the panel was about the variable we just left
   draw();
 }
 // --generic only: each variable says which plots it has (GenericViewer.kinds),
@@ -1764,6 +1790,7 @@ function pickDerived(expr){
   $("#level").max=0; $("#level").value=0; $("#llab").textContent=0;
   $("#lname").textContent="level"; $("#lpin").textContent="";
   fillKinds();
+  ptRefresh();
   overlay(); draw();
 }
 $("#deriveBtn").onclick = ()=>pickDerived($("#deriveExpr").value.trim());
@@ -2638,11 +2665,12 @@ $("#anim").onclick = async ()=>{
 $("#fps").oninput = ()=>{ if(playingKey) startPlaybackOf(playingKey); };
 
 let redrawTimer=null;
-function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); clearTimeout(redrawTimer);
+function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); ptMark();
+  clearTimeout(redrawTimer);
   redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
-  if(PT && PT.series) ptChart();       // the series is in hand: just move the mark
+  if(PT){ ptFollow(); if(PT.series) ptChart(); }   // the panel is about a moment
   // a Hovmöller already holds every step: moving time only moves its marker
   if(plotMode() && $("#kind").value==="hovmoller"){ hovMark(); return; }
   if(plotMode()){ clearTimeout(redrawTimer); redrawTimer=setTimeout(draw, 120); return; }
@@ -2651,7 +2679,7 @@ $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
   if(entry && entry.urls[e.target.value]){ $("#data").src=entry.urls[e.target.value]; return; }
   draw(); };
 $("#level").oninput = e=>{ $("#llab").textContent=e.target.value; stopPlayback();
-  ptStale(); draw(); };
+  ptStale("level changed"); draw(); };
 $("#cmap").onchange = ()=>{ stopPlayback(); draw(); };
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
@@ -2701,13 +2729,22 @@ $("#wrap").onpointerup = async ev=>{
   probePt={lon, lat};
   const q=new URLSearchParams({lon,lat,var:cur.name,
     time:$("#time").value,level:$("#level").value});
-  const d=await (await fetch("api/probe?"+q)).json();
+  const res=await fetch("api/probe?"+q);
+  const d=await res.json();
+  if(!res.ok || d.value===undefined){      // --generic has no derived probe
+    const why=(d && d.error) ? String(d.error).replace(/^[A-Za-z]*Error: /, "")
+                             : "no value here";
+    $("#probe2").textContent=why;
+    if(PT) $("#pthint").textContent=why;
+    return;
+  }
   $("#probe2").innerHTML=`cell ${d.cell}<br>${d.lat}\u00b0, ${d.lon}\u00b0<br>`+
                          `<b>${d.value.toPrecision(6)}</b>`;
   ptOpen(lon, lat, d);
 };
 $("#grid").onchange = ()=>{ graticule(); ptMark(); };
-addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); ptMark(); });
+addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); ptMark();
+  ptClamp(); });
 // ------------------------------------------------------------ point panel
 // ncview's gesture: click the map, and this location's numbers are one button
 // away. The value is instant -- the step is already in hand -- but the series
@@ -2718,30 +2755,104 @@ let ptPoll=null, ptDrag=null;
 
 function ptKey(){ return JSON.stringify([cur&&cur.name, $("#level").value,
                                          PT&&PT.lon, PT&&PT.lat]); }
+// The panel is about one place at one moment, and both of those change under
+// it: the time slider moves, the variable list is clicked. Every readout it
+// shows is stamped with which step it belongs to, and anything that stops
+// being true is cleared rather than left to be believed.
 function ptOpen(lon, lat, d){
   if(!caps().probe) return;
   const box=$("#point");
-  const first=box.style.display!=="block";
-  PT={lon, lat, cell:d.cell, series:null, log:PT?PT.log:false, key:null};
+  const moved=PT && PT.placed;
+  PT={lon, lat, cell:d.cell, series:null, log:PT?PT.log:false, key:null,
+      placed:moved, snapped:{lon:+d.lon, lat:+d.lat}, var:cur.name};
   box.style.display="block";
-  if(first){                 // sits top-left of the stage until dragged
-    box.style.left="14px"; box.style.top="14px";
-  }
   $("#pttitle").textContent=`${d.lat}\u00b0, ${d.lon}\u00b0`+
                             (d.cell>=0 ? ` \u00b7 cell ${d.cell}` : "");
-  const value=(d.value===null||d.value===undefined||!isFinite(d.value))
-    ? "no data" : (+d.value).toPrecision(6);
-  $("#ptnow").innerHTML=`${cur.label}<br><b>${value}</b>`;
+  ptValue(d.value);
   $("#ptchart").style.display="none";
   $("#pthint").textContent="the value here, through the run";
   $("#ptgo").disabled=false;
+  $("#ptstop").style.display="none";
   clearTimeout(ptPoll);
+  if(!moved) ptPlace(lon, lat);
+  ptClamp();
   ptMark();
 }
+// Beside the point, on whichever side has room -- never on top of the cross
+// it just drew, and never parked in a corner over the data.
+function ptPlace(lon, lat){
+  const box=$("#point"), st=$("#stage").getBoundingClientRect();
+  const wr=$("#wrap").getBoundingClientRect(), b=boxOf(view);
+  const w=box.offsetWidth||330, h=box.offsetHeight||170, pad=12;
+  let px=wr.left-st.left+(lon-b[0])/(b[1]-b[0])*wr.width;
+  let py=wr.top-st.top+(b[3]-lat)/(b[3]-b[2])*wr.height;
+  if(!isFinite(px)||!isFinite(py)){ px=pad; py=pad; }
+  let x=px+pad, y=py+pad;
+  if(x+w>st.width-pad) x=px-w-pad;            // flip to the other side
+  if(y+h>st.height-pad) y=py-h-pad;
+  box.style.left=Math.max(pad, Math.min(st.width-w-pad, x))+"px";
+  box.style.top=Math.max(pad, Math.min(st.height-h-pad, y))+"px";
+}
+// A resized window must not clip the panel away, dragged or not
+function ptClamp(){
+  const box=$("#point"); if(!PT) return;
+  const st=$("#stage").getBoundingClientRect();
+  const w=box.offsetWidth||330, h=box.offsetHeight||170;
+  const x=parseFloat(box.style.left)||0, y=parseFloat(box.style.top)||0;
+  box.style.left=Math.max(0, Math.min(st.width-w, x))+"px";
+  box.style.top=Math.max(0, Math.min(st.height-h, y))+"px";
+}
+// The headline value, always stamped with the step it came from
+function ptValue(value, step){
+  const at=(step===undefined) ? (+$("#time").value) : step;
+  const text=(value===null||value===undefined||!isFinite(value))
+    ? "no data" : (+value).toPrecision(6);
+  $("#ptnow").innerHTML=`${cur?cur.label:""}<br><b>${text}</b>`+
+    `<span class="at"> at ${(M.labels[at]||"")}</span>`;
+}
+// The slider moved: the panel's number belongs to the new step, not the old
+let ptValueTimer=null;
+function ptFollow(){
+  if(!PT || plotMode()) return;
+  const step=+$("#time").value;
+  if(PT.series && PT.series.values && !PT.series.preview){
+    ptValue(PT.series.values[step], step);      // already in hand, no request
+    return;
+  }
+  clearTimeout(ptValueTimer);
+  ptValueTimer=setTimeout(async ()=>{
+    if(!PT || !cur) return;
+    const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
+                                 time:step, level:$("#level").value});
+    try{
+      const r=await fetch("api/probe?"+q);
+      if(!r.ok) return;
+      const d=await r.json();
+      if(PT && +$("#time").value===step) ptValue(d.value, step);
+    }catch(e){ /* a stale probe is not worth a message */ }
+  }, 120);
+}
 function ptClose(){
+  ptCancel();                                // do not read for a closed panel
   clearTimeout(ptPoll); PT=null;
   $("#point").style.display="none"; $("#ptmark").style.display="none";
 }
+// Stopping matters on a shared machine: every read holds its own pool of
+// file-opening processes, and a misclick on a three-thousand file run would
+// otherwise keep them all busy for nobody.
+function ptCancel(){
+  clearTimeout(ptPoll);
+  $("#ptstop").style.display="none";
+  if(!PT || !cur) return;
+  const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
+                               level:$("#level").value, stop:1});
+  fetch("api/series?"+q).catch(()=>{});     // best effort; the panel is going
+}
+$("#ptstop").onclick=()=>{
+  ptCancel();
+  if(PT){ PT.key=null; $("#ptgo").disabled=false;
+          $("#pthint").textContent="stopped"; }
+};
 // the clicked point, marked on the map: a cross, redrawn wherever the view goes
 function ptMark(){
   const m=$("#ptmark");
@@ -2778,9 +2889,13 @@ async function ptSeries(){
       }else{
         $("#pthint").textContent=`reading ${done} / ${total}\u2026`;
       }
+      $("#ptstop").style.display="";           // it is reading: offer to stop
       // quick while there is nothing to look at, slower once there is
-      ptPoll=setTimeout(()=>{ if(PT && ptKey()===key) ptSeries(); },
-                        body.values ? 500 : 150);
+      ptPoll=setTimeout(()=>{
+        if(PT && ptKey()===key) ptSeries();
+        else if(PT){ $("#ptgo").disabled=false;   // the point or field moved
+                     $("#ptstop").style.display="none"; }
+      }, body.values ? 500 : 150);
       return;
     }
     if(!r.ok){
@@ -2796,6 +2911,7 @@ async function ptSeries(){
     PT.series=body;
     $("#pthint").textContent=ptSummary(body);
     $("#ptgo").disabled=false;
+    $("#ptstop").style.display="none";
     ptChart();
   }catch(e){
     $("#pthint").textContent="series failed: "+e;
@@ -2808,7 +2924,13 @@ function ptSummary(body){
   const mean=v.reduce((a,b)=>a+b,0)/v.length;
   const f=x=>Math.abs(x)>=1e4||(x!==0&&Math.abs(x)<1e-3)
     ? x.toExponential(2) : x.toPrecision(4);
-  return `${v.length} steps \u00b7 min ${f(Math.min(...v))} \u00b7 `+
+  // A preview's statistics are a sample's statistics. Saying "100 steps" for
+  // a run of 1500 reads as a finished answer, so it says which it is -- every
+  // time it is written, not only the first.
+  const head = body.preview
+    ? `preview: ${v.length} of ${body.values.length} steps \u00b7 sampled`
+    : `${v.length} steps`;
+  return `${head} \u00b7 min ${f(Math.min(...v))} \u00b7 `+
          `mean ${f(mean)} \u00b7 max ${f(Math.max(...v))}`;
 }
 // A small SVG rather than a plotted PNG: it redraws on hover and on the time
@@ -2816,7 +2938,8 @@ function ptSummary(body){
 function ptChart(){
   const svg=$("#ptchart"), body=PT&&PT.series;
   if(!body){ svg.style.display="none"; return; }
-  const W=314, H=150, L=38, R=6, T=8, B=18;
+  const W=314, H=150, L=52, R=6, T=8, B=18;   // L fits "0.008264", which
+                                             // clipped its leading zero at 38
   const vals=body.values;
   const finite=vals.filter(x=>x!==null);
   if(!finite.length){ svg.style.display="none"; return; }
@@ -2847,8 +2970,15 @@ function ptChart(){
   });
   const step=+$("#time").value;
   const nowX=(step>=0 && step<vals.length) ? x(step) : null;
-  const ticks=[hi, lo].map((v,k)=>
-    `<text x="${L-4}" y="${(k?H-B:T+8).toFixed(0)}" text-anchor="end">${f(v)}</text>`);
+  // three labels, not two: with only the ends there is no sense of the middle
+  const ticks=[0, 0.5, 1].map(t=>{
+    const value=logOK ? Math.pow(10, tlo+(thi-tlo)*t) : tlo+(thi-tlo)*t;
+    const yy=T+(1-t)*(H-T-B);
+    return `<text x="${L-5}" y="${(yy+3).toFixed(1)}" text-anchor="end">`+
+           `${f(value)}</text>`+
+           `<line class="ax" x1="${L}" y1="${yy.toFixed(1)}" `+
+           `x2="${L+3}" y2="${yy.toFixed(1)}"/>`;
+  });
   const ends=[body.labels[0]||"", body.labels[vals.length-1]||""];
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.innerHTML=
@@ -2859,7 +2989,7 @@ function ptChart(){
     `<text x="${W-R}" y="${H-6}" text-anchor="end">${ends[1].slice(0,16)}</text>`+
     (nowX!==null ? `<line class="now" x1="${nowX.toFixed(1)}" y1="${T}" `+
                    `x2="${nowX.toFixed(1)}" y2="${H-B}"/>` : "")+
-    `<path class="ln" d="${d.trim()}"/>`+dots+
+    `<path class="ln${coarse?" coarse":""}" d="${d.trim()}"/>`+dots+
     `<rect class="hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}"/>`;
   svg.style.display="block";
   svg.querySelector(".hit").onmousemove=ev=>{
@@ -2868,8 +2998,9 @@ function ptChart(){
     const i=Math.round((frac-L)/(W-L-R)*(vals.length-1));
     if(i<0||i>=vals.length) return;
     const v=vals[i];
+    const missing = coarse ? "not read yet" : "no data";
     $("#pthint").textContent=`${body.labels[i]} \u00b7 `+
-                             (v===null ? "no data" : f(v));
+                             (v===null ? missing : f(v));
   };
   svg.querySelector(".hit").onmouseleave=()=>{
     $("#pthint").textContent=ptSummary(body); };
@@ -2881,26 +3012,87 @@ function ptShown(on){
   if(on) ptMark(); else $("#ptmark").style.display="none";
 }
 // the point still stands, the numbers no longer do
-function ptStale(){
+function ptStale(why){
   clearTimeout(ptPoll);
   if(!PT) return;
-  PT.series=null;
+  PT.series=null; PT.key=null;
   $("#ptchart").style.display="none";
-  $("#ptgo").disabled=false;
-  $("#pthint").textContent="level changed \u2014 read it again";
+  $("#ptgo").disabled=false;                 // a read in flight is abandoned,
+  $("#ptstop").style.display="none";         // so the button must come back
+  $("#pthint").textContent=`${why} \u2014 read it again`;
+}
+// The variable changed under the panel: its title, its value and its chart
+// were all about the old one. Re-probe the same place for the new field.
+async function ptRefresh(){
+  if(!PT || !cur || plotMode()) return;
+  ptStale("variable changed");
+  PT.var=cur.name;
+  $("#ptnow").innerHTML=`${cur.label}<br><b>\u2026</b>`;
+  const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
+                               time:$("#time").value, level:$("#level").value});
+  try{
+    const r=await fetch("api/probe?"+q);
+    if(!r.ok){ $("#pthint").textContent=(await r.json()).error||"probe failed";
+               $("#ptnow").innerHTML=`${cur.label}<br><b>no data</b>`; return; }
+    const d=await r.json();
+    if(!PT || cur.name!==PT.var) return;
+    PT.cell=d.cell; PT.snapped={lon:+d.lon, lat:+d.lat};
+    $("#pttitle").textContent=`${d.lat}\u00b0, ${d.lon}\u00b0`+
+                              (d.cell>=0 ? ` \u00b7 cell ${d.cell}` : "");
+    ptValue(d.value);
+  }catch(e){ $("#pthint").textContent="probe failed: "+e; }
 }
 $("#ptgo").onclick=ptSeries;
 $("#ptclose").onclick=ptClose;
-$("#ptlog").onclick=()=>{ if(!PT) return; PT.log=!PT.log;
-  $("#ptlog").classList.toggle("on", PT.log); ptChart(); };
+$("#ptlog").onclick=()=>{
+  if(!PT || !PT.series) return;
+  const v=PT.series.values.filter(x=>x!==null);
+  if(!PT.log && (!v.length || Math.min(...v)<=0)){
+    // lighting the button over a linear line is the lie; decline out loud
+    $("#pthint").textContent="log needs values above zero \u2014 this series "+
+                             "reaches "+(v.length?Math.min(...v):"nothing");
+    return;
+  }
+  PT.log=!PT.log;
+  $("#ptlog").classList.toggle("on", PT.log);
+  ptChart();
+};
+function ptRows(){
+  const body=PT && PT.series;
+  if(!body) return null;
+  if(body.preview){
+    // 1400 empty rows labelled "1500 rows copied" is not an export
+    $("#pthint").textContent="still a preview \u2014 wait for the full series";
+    return null;
+  }
+  const head=`# ${cur.label} at ${body.lat}, ${body.lon}\\ntime,value\\n`;
+  const rows=body.labels.map((t,i)=>`${t},${body.values[i]===null?"":body.values[i]}`);
+  return {text:head+rows.join("\\n")+"\\n", n:rows.length};
+}
+// Saving works everywhere; the clipboard does not exist over plain HTTP,
+// which is exactly the --host 0.0.0.0 tunnel this tool documents.
+$("#ptsave").onclick=()=>{
+  const out=ptRows(); if(!out) return;
+  const name=`${(cur.name||"series").replace(/[^A-Za-z0-9._-]+/g,"_")}_`+
+             `${PT.snapped.lat}_${PT.snapped.lon}.csv`;
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([out.text], {type:"text/csv"}));
+  a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 10000);
+  $("#pthint").textContent=`${out.n} rows \u2192 ${name}`;
+};
 $("#ptcsv").onclick=async ()=>{
   if(!PT || !PT.series) return;
   const body=PT.series;
-  const head=`# ${cur.label} at ${body.lat}, ${body.lon}\\ntime,value\\n`;
-  const rows=body.labels.map((t,i)=>`${t},${body.values[i]===null?"":body.values[i]}`);
-  try{ await navigator.clipboard.writeText(head+rows.join("\\n")+"\\n");
-       $("#pthint").textContent=`${rows.length} rows copied`; }
-  catch(e){ $("#pthint").textContent="clipboard refused: "+e; }
+  const out=ptRows(); if(!out) return;
+  try{
+    if(!navigator.clipboard) throw new Error("no clipboard over plain HTTP");
+    await navigator.clipboard.writeText(out.text);
+    $("#pthint").textContent=`${out.n} rows copied`;
+  }catch(e){
+    $("#pthint").textContent="the clipboard is not available here \u2014 "+
+                             "use save instead";
+  }
 };
 // dragged by its title bar, with the pointer capture the map drag uses
 $("#pthead").onpointerdown=ev=>{

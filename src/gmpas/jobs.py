@@ -144,6 +144,20 @@ class Jobs:
         threading.Thread(target=run, daemon=True, name=self._name).start()
         return job
 
+    def cancel(self, key) -> bool:
+        """Stop the job for `key` if one is reading. Returns whether it was.
+
+        A read nobody is waiting for is waste on a shared machine -- each one
+        holds a pool of file-opening processes -- so the page can say so when
+        the user closes the panel or presses stop.
+        """
+        with self._lock:
+            job = self._jobs.get(key)
+            if job is None or job["finished"].is_set():
+                return False
+            job["cancel"].set()
+            return True
+
     def running(self) -> int:
         """How many jobs are still reading. For shutdown checks and tests."""
         with self._lock:
