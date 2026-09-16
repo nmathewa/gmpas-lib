@@ -1,6 +1,6 @@
 # Status
 
-As of 0.4.9, gmpas covers the pipeline from both ends.
+As of 0.5.0, gmpas covers the pipeline from both ends.
 
 **Postprocessing** — plotting, the interactive viewer, and conservative
 remapping — is implemented. `gmpas remap` writes the grid files ESMF needs,
@@ -14,6 +14,14 @@ gmpas does not install ESMF (or NCO) itself, on purpose — see
 load the site's own build (`module load esmf`) rather than a conda-forge copy
 in gmpas's own environment; the two compete on `PATH`/`LD_LIBRARY_PATH`
 rather than help.
+
+**The viewer** draws a run as a fast raster and, for `--generic` files, as a
+composite of layers, a Hovmoller diagram, or any of the xarray plot kinds.
+Both viewers offer the same colours: matplotlib, cmocean, the Ferret palettes
+and the GrADS tables, with discrete bands, out-of-range and missing colours,
+reverse and a power scale, and a colorbar drawn from the very colours the
+image was drawn with. Clicking the map opens that point's value and, on
+request, its time series through every file of the run.
 
 **Preprocessing** covers `prep view`, `prep hfun`, `prep generate`,
 `prep scale`, `prep relocate` and `prep create-region`: looking at a mesh
