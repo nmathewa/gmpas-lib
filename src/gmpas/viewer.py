@@ -1357,6 +1357,7 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #ptchart .ln{fill:none;stroke:var(--accent);stroke-width:1.5}
 #ptchart .now{stroke:#fff;stroke-width:1;opacity:.5;stroke-dasharray:3 3}
 #ptchart .hit{stroke:none;fill:transparent}
+#ptchart .pt{fill:var(--accent);stroke:none}
 #ptchart text{fill:var(--dim);font-size:9px}
 #ptfoot{display:flex;gap:6px;align-items:center;margin-top:6px}
 #ptfoot .hint{flex:1;margin:0}
@@ -2806,10 +2807,18 @@ function ptChart(){
   const y=v=>T+(1-(tr(v)-tlo)/(thi-tlo))*(H-T-B);
   const f=n=>Math.abs(n)>=1e4||(n!==0&&Math.abs(n)<1e-3)
     ? n.toExponential(1) : (+n.toPrecision(4)).toString();
-  let d="", pen=false;
+  // A gap means two different things. In a finished series a null is missing
+  // data and the line must break at it. In a preview the nulls are merely
+  // steps not read yet, and breaking at them draws a hundred isolated
+  // move-commands -- which renders as an empty box. So a preview joins its
+  // samples up and marks them, and says in the hint that it is coarse.
+  const coarse=!!body.preview;
+  let d="", pen=false, dots="";
   vals.forEach((v,i)=>{
-    if(v===null){ pen=false; return; }
+    if(v===null){ if(!coarse) pen=false; return; }
     d+=(pen?"L":"M")+x(i).toFixed(1)+" "+y(v).toFixed(1)+" "; pen=true;
+    if(coarse) dots+=`<circle class="pt" cx="${x(i).toFixed(1)}" `+
+                     `cy="${y(v).toFixed(1)}" r="1.4"/>`;
   });
   const step=+$("#time").value;
   const nowX=(step>=0 && step<vals.length) ? x(step) : null;
@@ -2825,7 +2834,7 @@ function ptChart(){
     `<text x="${W-R}" y="${H-6}" text-anchor="end">${ends[1].slice(0,16)}</text>`+
     (nowX!==null ? `<line class="now" x1="${nowX.toFixed(1)}" y1="${T}" `+
                    `x2="${nowX.toFixed(1)}" y2="${H-B}"/>` : "")+
-    `<path class="ln" d="${d.trim()}"/>`+
+    `<path class="ln" d="${d.trim()}"/>`+dots+
     `<rect class="hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}"/>`;
   svg.style.display="block";
   svg.querySelector(".hit").onmousemove=ev=>{
