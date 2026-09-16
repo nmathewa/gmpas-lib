@@ -40,7 +40,7 @@ from . import data as _data
 from . import timing
 from .cache import BuildCache
 from .mesh import MpasMesh
-from .raster import target_grid
+from .raster import grid_points, target_grid
 from .series import PARALLEL_MIN_FILES, Series, series_pool, series_workers
 
 #: the matplotlib colormaps offered in the picker, chosen to cover the usual
@@ -92,12 +92,7 @@ class ViewIndex:
         self.extent, self.nx, self.ny = tuple(extent), nx, ny
 
         with timing.step("view.build", px=nx * ny):
-            lon, lat = target_grid(self.extent, nx, ny)
-            lon2, lat2 = np.meshgrid(lon, lat)
-            lon_r, lat_r = np.radians(lon2), np.radians(lat2)
-            pts = np.stack([np.cos(lat_r) * np.cos(lon_r),
-                            np.cos(lat_r) * np.sin(lon_r),
-                            np.sin(lat_r)], axis=-1).reshape(-1, 3)
+            pts = grid_points(self.extent, nx, ny)
 
             radius = np.sqrt(np.asarray(mesh.area_cell) / np.pi) / mesh.sphere_radius
             with timing.step("view.query", px=nx * ny):
@@ -168,6 +163,27 @@ def _palette(cmap: str) -> list:
 
     lut = (np.asarray(colormaps[cmap](np.linspace(0, 1, 255)))[:, :3] * 255)
     return np.vstack([lut.round().astype(np.uint8), [[0, 0, 0]]]).ravel().tolist()
+
+
+def _frame_range(img: np.ndarray, vmin, vmax) -> tuple[float, float]:
+    """The colour range a frame is drawn with.
+
+    Estimates the percentiles from a subsample: scanning every pixel of a
+    1.5M-pixel frame costs ~8 ms to place two percentiles, and a ninth of the
+    pixels puts them in the same place to well within a colour step.
+    """
+    if vmin is not None and vmax is not None:
+        lo, hi = vmin, vmax            # animation fixes the range: measure nothing
+    else:
+        sample = img[::3, ::3]
+        finite = sample[np.isfinite(sample)]
+        if finite.size < 1000:                     # sparse view: be exact
+            finite = img[np.isfinite(img)]
+        lo = vmin if vmin is not None else (
+            float(np.percentile(finite, 2)) if finite.size else 0.0)
+        hi = vmax if vmax is not None else (
+            float(np.percentile(finite, 98)) if finite.size else 1.0)
+    return (lo, lo + 1.0) if hi <= lo else (lo, hi)
 
 
 def _quantize(img: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
@@ -305,7 +321,7 @@ class Viewer:
             "home": list(self.home),
             "nx": self.nx,
             "ny": self.ny,
-            **_colour.describe(),
+            **_colour.description(),
             "variables": out,
         }
 
@@ -401,23 +417,7 @@ class Viewer:
         else:
             img = view.frame(values)
 
-        if vmin is not None and vmax is not None:
-            lo, hi = vmin, vmax        # animation fixes the range: measure nothing
-        else:
-            # Estimate the percentiles from a subsample. Scanning every pixel of
-            # a 1.5M-pixel frame costs ~8 ms to place two percentiles, and a
-            # ninth of the pixels puts them in the same place to well within a
-            # colour step.
-            sample = img[::3, ::3]
-            finite = sample[np.isfinite(sample)]
-            if finite.size < 1000:                     # sparse view: be exact
-                finite = img[np.isfinite(img)]
-            lo = vmin if vmin is not None else (
-                float(np.percentile(finite, 2)) if finite.size else 0.0)
-            hi = vmax if vmax is not None else (
-                float(np.percentile(finite, 98)) if finite.size else 1.0)
-        if hi <= lo:
-            hi = lo + 1.0
+        lo, hi = _frame_range(img, vmin, vmax)
         outside = None if on_grid is None else ~on_grid
         return _colour.frame_png(img, cmap, lo, hi, compress, colour,
                                  outside=outside, meta=meta), lo, hi
@@ -489,6 +489,11 @@ class Viewer:
         """
         from PIL import Image
 
+        # Encoding a PNG per step and decoding it straight back looks like
+        # waste, and a version that built the palette image directly was tried
+        # and measured: byte-identical output, and SLOWER (1.74 s against
+        # 1.52 s over 120 frames at 1200x700), because PIL's GIF writer is
+        # happier with what its own PNG decoder hands it. Left alone.
         frames = []
         for step in range(len(self.series)):
             png, _, _ = self.frame(var, step, level, extent, cmap,

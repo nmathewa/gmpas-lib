@@ -18,6 +18,7 @@ Nothing here registers palettes at import: `describe()` and `clean()` call
 
 from __future__ import annotations
 
+import functools
 import json
 
 from . import layers as _layers
@@ -61,11 +62,16 @@ def groups() -> dict[str, list[str]]:
     return palettes.groups()
 
 
+@functools.lru_cache(maxsize=1)
 def describe() -> dict:
     """What the page needs to build the picker, the bar and the colour form.
 
     Merged into each viewer's own `describe()`, so the MPAS page and the
     --generic page are offered exactly the same colours.
+
+    Cached because it depends on nothing and costs ~100 ms: sixty-three
+    colormaps, each sampled at thirty-two stops. Every /api/meta was paying
+    that again, which on a small mesh is more than the first frame.
     """
     from .viewer import ramp
 
@@ -75,6 +81,13 @@ def describe() -> dict:
             "ramps": {n: ramp(n) for n in names},
             "palettes": by_group,
             "colour_options": OPTIONS}
+
+
+def description() -> dict:
+    """A fresh copy of `describe`, for a caller that merges it into its own."""
+    got = describe()
+    return {k: (dict(v) if isinstance(v, dict) else list(v))
+            for k, v in got.items()}
 
 
 def frame_png(img, cmap: str, lo: float, hi: float, compress: int = 1,

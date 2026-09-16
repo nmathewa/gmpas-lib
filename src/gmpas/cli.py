@@ -147,6 +147,23 @@ def _sel(pairs) -> dict[str, int]:
     return out
 
 
+#: One open series per worker process, built once by `_worker_init` and reused
+#: by every step that worker renders. Without it each step paid for a fresh
+#: scan of every file in the run -- O(steps x files) opens -- plus its own
+#: KD-tree build.
+_WORKER: dict = {}
+
+
+def _worker_init(paths, mesh_path):
+    """Open the run once in this worker, and keep it."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    from .series import Series
+
+    _WORKER["series"] = Series(paths, mesh_path)
+
+
 def _render_one(job):
     """Render a single step. Top level so it survives being sent to a worker."""
     import matplotlib
@@ -158,7 +175,10 @@ def _render_one(job):
     from .style import Style, save_figure
 
     paths, mesh_path, var, step, opts = job
-    series = Series(paths, mesh_path)
+    series = _WORKER.get("series")
+    alone = series is None                 # -j 1 renders here
+    if alone:
+        series = Series(paths, mesh_path)
     try:
         da = series.dataarray(var, step)
         values = series.values(var, step=step, level=opts["level"],
@@ -178,19 +198,21 @@ def _render_one(job):
         out = save_figure(fig, opts["pattern"].format(step=step, var=var),
                           style=style)
     finally:
-        series.close()
+        if alone:
+            series.close()
     return str(out)
 
 
 def _plot_series(args) -> int:
     """Render every step, in parallel.
 
-    Each worker builds its own KD-tree and view geometry. The geometry part of
-    that is genuinely cheap -- the mesh cache is memory-mapped, so every
-    process shares one copy through the page cache rather than reading its own
-    -- but the KD-tree and the series scan are not cached anywhere, so they are
-    paid again in full by every worker. Resolving the mesh here and naming it
-    explicitly at least spares each of them the directory probe.
+    Each worker opens the run once, in `_worker_init`, and keeps it. The mesh
+    cache is memory-mapped, so the geometry is shared through the page cache,
+    but the step scan and the KD-tree are not cached anywhere -- and paying
+    those per STEP rather than per worker was most of the wall time of a batch
+    render, growing with the length of the run while the rendering itself
+    stayed flat. Resolving the mesh here also spares every worker the
+    directory probe.
     """
     import os
     from multiprocessing import Pool
@@ -226,7 +248,8 @@ def _plot_series(args) -> int:
     # one BLAS/OpenMP thread per worker, or the processes fight for the cores
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         os.environ.setdefault(var, "1")
-    with Pool(jobs) as pool:
+    with Pool(jobs, initializer=_worker_init,
+              initargs=(args.path, mesh_path)) as pool:
         for out in pool.imap_unordered(_render_one, work):
             print(out)
     return 0

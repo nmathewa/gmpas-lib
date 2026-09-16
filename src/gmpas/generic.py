@@ -703,7 +703,7 @@ class GenericViewer:
             "home": list(self.home),
             "nx": self.nx,
             "ny": self.ny,
-            **_colour.describe(),
+            **_colour.description(),
             "kind_labels": KIND_LABELS,
             "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),

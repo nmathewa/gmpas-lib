@@ -37,6 +37,29 @@ def target_grid(extent: tuple[float, float, float, float], nx: int, ny: int):
     return lon, lat
 
 
+def grid_points(extent: tuple[float, float, float, float], nx: int, ny: int):
+    """Unit vectors for every pixel centre of a lat-lon grid, (ny*nx, 3).
+
+    A lat-lon grid is separable -- longitude varies along x only, latitude
+    along y only -- so the sines and cosines are nx + ny of them, combined by
+    outer product, rather than the 2*nx*ny a meshgrid would take them for. At
+    a 4K window with the render outset that is 16 million pixels, where the
+    difference is most of the time spent building a view.
+
+    Bit-identical to the meshgrid form, not merely close: the same products of
+    the same doubles, in the same order.
+    """
+    lon, lat = target_grid(extent, nx, ny)
+    lon_r, lat_r = np.radians(lon), np.radians(lat)
+    cos_lon, sin_lon = np.cos(lon_r), np.sin(lon_r)
+    cos_lat, sin_lat = np.cos(lat_r), np.sin(lat_r)
+    pts = np.empty((lat.size, lon.size, 3), dtype=np.float64)
+    np.outer(cos_lat, cos_lon, out=pts[..., 0])
+    np.outer(cos_lat, sin_lon, out=pts[..., 1])
+    pts[..., 2] = sin_lat[:, None]
+    return pts.reshape(-1, 3)
+
+
 def rasterize(mesh: MpasMesh, values: np.ndarray,
               extent: tuple[float, float, float, float] | None = None,
               nx: int = 1600, ny: int = 900, mask_outside: bool = True):
@@ -57,15 +80,7 @@ def rasterize(mesh: MpasMesh, values: np.ndarray,
 def _rasterize(mesh, values, extent, nx, ny, mask_outside):
     extent = extent or mesh.extent
     lon, lat = target_grid(extent, nx, ny)
-    lon2, lat2 = np.meshgrid(lon, lat)
-
-    lon_r, lat_r = np.radians(lon2), np.radians(lat2)
-    pts = np.stack(
-        [np.cos(lat_r) * np.cos(lon_r),
-         np.cos(lat_r) * np.sin(lon_r),
-         np.sin(lat_r)],
-        axis=-1,
-    ).reshape(-1, 3)
+    pts = grid_points(extent, nx, ny)
 
     values = np.asarray(values, dtype=np.float64)
 
