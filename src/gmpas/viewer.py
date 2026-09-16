@@ -409,7 +409,8 @@ class Viewer:
 
     # -- export ----------------------------------------------------------
 
-    def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper"):
+    def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
+               colour=None):
         """A publication-shaped figure, not the bare raster the browser shows.
 
         Goes through the ordinary plotting path so it gets cartopy axes,
@@ -436,14 +437,34 @@ class Viewer:
         if int(da.sizes.get("nVertLevels", 1)) > 1:
             title += f"  (level {level})"
 
+        # the exported figure is drawn by matplotlib, not by the fast map's
+        # encoder, so the options become a colormap and a norm here
+        lo, hi = self._figure_range(values, vmin, vmax, colour)
+        cm, norm, extend = _colour.figure_scale(cmap, lo, hi, colour)
         fig, _ = cell_field(self.mesh, values, style=Style.preset(style),
-                            cmap=cmap or "viridis", vmin=vmin, vmax=vmax,
+                            cmap=cm, vmin=vmin, vmax=vmax, norm=norm, extend=extend,
                             extent=tuple(extent), label=label, title=title)
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=Style.preset(style).dpi)
         import matplotlib.pyplot as plt
         plt.close(fig)
         return buf.getvalue()
+
+    @staticmethod
+    def _figure_range(values, vmin, vmax, colour):
+        """The range a coloured figure spans, settled before it is drawn.
+
+        Bands and a power scale need their edges up front, and they have to be
+        the edges `cell_field` would have used, or the key would describe a
+        picture the figure does not draw. So this is `plot._limits`, the rule
+        that function applies to the same values.
+        """
+        if not _colour.clean(colour):
+            return 0.0, 1.0                       # unused: no norm is built
+        from .plot import _limits
+
+        return _limits(np.asarray(values).squeeze(), vmin, vmax,
+                       symmetric=False, robust=True)
 
     def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8, colour=None):
         """Every timestep as one animated GIF.
