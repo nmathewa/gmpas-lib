@@ -1,6 +1,6 @@
 # Status
 
-As of 0.5.0, gmpas covers the pipeline from both ends.
+As of 0.5.5, gmpas covers the pipeline from both ends.
 
 **Postprocessing** — plotting, the interactive viewer, and conservative
 remapping — is implemented. `gmpas remap` writes the grid files ESMF needs,
@@ -22,6 +22,14 @@ and the GrADS tables, with discrete bands, out-of-range and missing colours,
 reverse and a power scale, and a colorbar drawn from the very colours the
 image was drawn with. Clicking the map opens that point's value and, on
 request, its time series through every file of the run.
+
+**When `--generic` cannot work a file out** it does not guess and draw. The
+viewer starts, nothing is drawn, and a panel asks which variable is x and y
+and which dimensions are time and level; the answer is checked the same way
+a detected one is, and remembered for that file. The panel is also shown,
+without blocking, when the file loaded but the reading involved a guess —
+an axis identified on a bare CF `axis` attribute, or a second stacking axis
+pinned at 0 whose data the map cannot otherwise reach.
 
 **Preprocessing** covers `prep view`, `prep hfun`, `prep generate`,
 `prep scale`, `prep relocate` and `prep create-region`: looking at a mesh
