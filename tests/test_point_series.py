@@ -264,3 +264,24 @@ def test_the_generic_series_reports_progress_and_can_be_cancelled(grid):
     cancel.set()
     with pytest.raises(Cancelled):
         grid._series_at("t2m", 20.0, 0.0, 0, cancel=cancel)
+
+
+def test_closing_a_series_waits_for_its_background_scan(tmp_path):
+    """A scan left reading past its Series meets whatever writes netCDF next,
+    and HDF5 answers a concurrent read-and-write with a segfault, not a stale
+    value. Closing must leave no thread in the library."""
+    import threading as th
+
+    from conftest import write_mesh
+    from gmpas.series import Series
+
+    folder = tmp_path / "run"
+    folder.mkdir()
+    for step in range(6):
+        write_mesh(folder / f"history.2012-03-{step + 1:02d}_00.00.00.nc",
+                   [(0.0, 0.0), (10.0, 0.0)])
+    series = Series(folder, background_scan=True)
+    series.close()
+    assert series.scanning is False
+    assert not any(t.name == "gmpas-scan" and t.is_alive()
+                   for t in th.enumerate())

@@ -231,9 +231,17 @@ class Series:
         self.steps, self.labels = self._axis()
         self.scanning = False
 
+        # A scan left running past its Series keeps reading HDF5 while
+        # whatever comes next may be writing a file without the lock, which is
+        # a segfault rather than a stale read. So it is stoppable and `close`
+        # waits for it.
+        self._stop_scan = threading.Event()
+        self._scan_thread: threading.Thread | None = None
         if background_scan and len(self.files) > 1:
             self.scanning = True
-            threading.Thread(target=self._scan, daemon=True).start()
+            self._scan_thread = threading.Thread(target=self._scan, daemon=True,
+                                                 name="gmpas-scan")
+            self._scan_thread.start()
         elif len(self.files) > 1:
             self._scan()
 
@@ -317,6 +325,8 @@ class Series:
         opened = 0
         with timing.step("series.scan", files=len(self.files)) as t:
             for path in self.files:
+                if self._stop_scan.is_set():
+                    return                       # the Series is going away
                 if path in counts:
                     continue
                 try:
@@ -348,6 +358,7 @@ class Series:
         return ds
 
     def close(self) -> None:
+        self.stop_scan()
         with self._lock:
             for ds in self._open.values():
                 ds.close()
@@ -356,6 +367,20 @@ class Series:
             # the handles but keeping them resident would free almost nothing
             self._values.clear()
             self._values_bytes = 0
+
+    def stop_scan(self, timeout: float = 30.0) -> None:
+        """Stop the background step count and wait for it to let go.
+
+        Called by `close`, and worth calling directly before anything writes
+        netCDF beside a live Series -- a test fixture building the next file,
+        say. The scan checks between files, so this returns as soon as the one
+        in flight is done.
+        """
+        self._stop_scan.set()
+        thread, self._scan_thread = self._scan_thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)
+        self.scanning = False
 
     # -- access ----------------------------------------------------------
 
