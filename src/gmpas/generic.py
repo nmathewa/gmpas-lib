@@ -189,6 +189,41 @@ KIND_LABELS = {
 }
 _GRID_KINDS = ("pcolormesh", "contourf", "contour", "imshow")
 
+#: What each plot kind actually uses, so the page can show, hide or disable a
+#: control from one table instead of each control deciding for itself. Written
+#: here rather than in the page because the answers come from what `plot`,
+#: `frame`, `gif` and `netcdf` below really do with each kind.
+#:
+#: colour  the colormap picker and colour range
+#: options the fast map's colour options (bands, extremes): its encoder only
+#: pan     pan, zoom, reset view and the graticule: a map on a geographic axis
+#: frames  cached palette frames, which is what the top bar's play button plays
+#: probe   the clicked point, which the plot is taken at
+#: gif     an animated export
+#: data    netCDF export
+#: data is False almost everywhere here: `netcdf` below exports the Hovmöller
+#: only, where the numbers behind the picture are not in the input files
+_KIND_MAP = {"colour": True, "options": True, "pan": True, "frames": True,
+             "probe": True, "gif": True, "data": False}
+_KIND_FIGURE = {**_KIND_MAP, "pan": False, "frames": False}
+_KIND_LINE = {**_KIND_FIGURE, "colour": False, "options": False}
+KIND_CAPS = {
+    "map": _KIND_MAP,
+    "auto": _KIND_FIGURE,
+    **{k: _KIND_FIGURE for k in _GRID_KINDS},
+    "line": _KIND_LINE,
+    "step": _KIND_LINE,
+    "hist": {**_KIND_LINE, "probe": False},
+    "series": _KIND_LINE,
+    "profile": _KIND_LINE,
+    # its own panel drives it: colour comes from the picker and the range, and
+    # the band options the encoder applies are not part of a matplotlib figure
+    "hovmoller": {**_KIND_FIGURE, "options": False, "probe": False, "gif": False,
+                  "data": True},
+    # every layer carries its own colours, so the shared picker means nothing
+    "layers": {**_KIND_FIGURE, "colour": False, "options": False, "probe": False},
+}
+
 #: a non-map variable is read whole to plot it; past this it is refused
 PLOT_READ_BYTES = 256 * 1024 * 1024
 
@@ -698,6 +733,7 @@ class GenericViewer:
             "palettes": self._palette_groups(),
             "colour_options": COLOUR_OPTIONS,
             "kind_labels": KIND_LABELS,
+            "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),
             "variables": variables,
         }

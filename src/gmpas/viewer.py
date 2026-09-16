@@ -1320,14 +1320,14 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <div class="hint" id="rangehint"></div>
   </div>
 
-  <div class="sec"><label>extent</label>
+  <div class="sec" id="extentsec"><label>extent</label>
     <div class="row"><input type="text" id="elon0" placeholder="lon min"><input type="text" id="elon1" placeholder="lon max"></div>
     <div class="row" style="margin-top:6px"><input type="text" id="elat0" placeholder="lat min"><input type="text" id="elat1" placeholder="lat max"></div>
     <div class="row" style="margin-top:6px"><button id="applyext">apply</button><button id="copyext">copy</button></div>
     <div class="hint" id="exthint"></div>
   </div>
 
-  <div class="sec"><label>animation</label>
+  <div class="sec" id="animsec"><label>animation</label>
     <div class="kv"><span>frames / second</span><b id="fpslab">8</b></div>
     <input type="range" id="fps" min="1" max="24" value="8">
     <div class="kv" style="margin-top:8px"><span>quality</span><b id="qlab">fast</b></div>
@@ -1338,7 +1338,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <div class="hint" id="animhint"></div>
   </div>
 
-  <div class="sec"><label>export</label>
+  <div class="sec" id="exportsec"><label>export</label>
     <select id="figstyle" title="figure size and dpi">
       <option value="paper">paper &middot; 10x6 @130</option>
       <option value="notebook">notebook &middot; 9x5 @100</option>
@@ -1355,7 +1355,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
       and <b>not</b> area-conservative</div>
   </div>
 
-  <div class="sec"><label>probe</label>
+  <div class="sec" id="probesec"><label>probe</label>
     <div class="hint" id="probe2">click the map</div>
   </div>
 </div>
@@ -1480,8 +1480,22 @@ function plotMode(){
 // A plot is a whole matplotlib figure -- its own axes, labels and colorbar --
 // so the map's furniture (coastline overlay, graticule, colour ramp, pan and
 // zoom) steps aside rather than being drawn over or beside it.
+// What the current plot kind uses, from the server's table (gmpas/generic.py
+// KIND_CAPS). The MPAS page sends none and only ever draws the fast map, so
+// the fallback is the map's own set.
+const MAP_CAPS={colour:true, options:true, pan:true, frames:true, probe:true,
+                gif:true, data:true};
+function caps(){
+  if(!M) return MAP_CAPS;
+  const kind = (cur && cur.kinds && $("#kind").value) || "map";
+  return (M.kind_caps||{})[kind] || MAP_CAPS;
+}
+// One place decides what applies: a control that cannot do anything for this
+// plot is hidden, or disabled and left saying why. Before this, each control
+// set its own state and they disagreed -- the play button switched itself back
+// on whenever the animation list refreshed.
 function setMode(){
-  const p=plotMode();
+  const p=plotMode(), c=caps();
   $("#frame").style.display = p ? "none" : "";
   $("#plotimg").style.display = p ? "block" : "none";
   $("#bar").style.visibility = p ? "hidden" : "";
@@ -1490,13 +1504,24 @@ function setMode(){
   document.body.classList.toggle("layering", layering);
   $("#layersec").style.display = layering ? "" : "none";
   if(layering) lyOpen();
-  ["#zoom","#home","#anim","#grid"].forEach(id=>{ $(id).disabled=p; });
-  if(p) stopPlayback();
-  const hov = p && $("#kind").value==="hovmoller";
-  // A Hovmöller draws its own colour key from cmap and the range alone, so
-  // hide the options it would not honour rather than let them look applied.
-  if(M.colour_options) $("#coloursec").style.display = hov ? "none" : "";
-  hovMode(hov);
+  ["#zoom","#home","#grid"].forEach(id=>{ $(id).disabled=!c.pan; });
+  if(!c.frames) stopPlayback();
+  show("#cmapsec", c.colour); show("#rangesec", c.colour);
+  if(M.colour_options) show("#coloursec", c.options);
+  show("#animsec", c.frames); show("#probesec", c.probe);
+  hovMode(p && $("#kind").value==="hovmoller");
+  renderAnimList();
+  exportModes();
+}
+function show(sel, on){ const el=$(sel); if(el) el.style.display = on ? "" : "none"; }
+// An export the kind cannot produce stays visible but disabled, so the button
+// tells you it is not on offer rather than vanishing as you look for it.
+function exportModes(){
+  const c=caps();
+  const off=(sel, why)=>{ const b=$(sel); if(!b) return;
+    b.disabled=!!why; b.title = why || ""; };
+  off("#expgif", c.gif ? "" : "this plot has no animated export");
+  off("#expnc", c.data ? "" : "netCDF export is for the map and the Hovmöller");
 }
 let probePt=null;       // last clicked map point: where series and profiles are taken
 // A derived expression ("a - b", "hypot(a,b)", "diff(a)") isn't in
@@ -2151,7 +2176,10 @@ function renderAnimList(){
     const curKey=animKeyOf(animParams());
     const entry=anims.get(curKey);
     const playing=entry && playingKey===curKey;
-    btn.disabled = !!entry && entry.loading && !playing && entry.ready===0;
+    // a plot that is not the fast map has no frames to play, and setMode's
+    // ruling must survive this refresh rather than be overwritten by it
+    btn.disabled = !caps().frames
+      || (!!entry && entry.loading && !playing && entry.ready===0);
     btn.textContent = playing ? "⏸ pause"
                      : (entry && entry.loading) ? "loading…"
                      : "▶ play";
