@@ -114,6 +114,21 @@ def series_workers() -> int:
     return max(1, min(SERIES_WORKERS, os.cpu_count() or 1))
 
 
+def can_spawn() -> bool:
+    """Whether this process is allowed to start worker processes at all.
+
+    `gmpas plot -j 8` renders in a `multiprocessing.Pool`, whose workers are
+    daemonic, and a daemonic process may not have children -- the library
+    refuses with "daemonic processes are not allowed to have children". Each
+    of those workers opens its own `Series`, so anything that reaches for a
+    pool during startup has to ask first, or the answer is a crash rather
+    than a slow read.
+    """
+    import multiprocessing as mp
+
+    return not mp.current_process().daemon
+
+
 def _pool_context():
     """A start method that is safe to use beside an open HDF5 library.
 
@@ -144,6 +159,17 @@ def series_pool(workers: int):
 #: short enough that a viewer left open overnight is not holding it.
 POOL_IDLE_SECONDS = 120.0
 POOL_IDLE_ENV = "GMPAS_SERIES_POOL_IDLE"
+
+#: Roughly what starting a pool of readers costs -- eight processes, each
+#: importing netCDF4. Measured at 0.49 s on this hardware. Only ever used to
+#: decide whether a piece of work is long enough to be worth handing over, so
+#: being approximately right is the whole requirement.
+POOL_START_SECONDS = 0.5
+
+#: How many files the scan reads here, and times, before deciding whether the
+#: rest should go to workers. Enough to average out one unlucky open; few
+#: enough to cost nothing when the answer turns out to be yes.
+SCAN_PROBE_FILES = 12
 
 
 def pool_idle() -> float:
@@ -194,6 +220,11 @@ class ReaderPool:
         self._users = 0
         self._timer = None
         self._lock = threading.Lock()
+
+    @property
+    def is_warm(self) -> bool:
+        """Whether the workers are already up, so leasing costs nothing."""
+        return self._pool is not None
 
     def lease(self, workers: int):
         """A context manager over the shared pool, kept alive while held."""
@@ -310,6 +341,23 @@ def _point_in(nc, name: str, var: str, cell: int, level: int, pins: dict,
         raw = np.ma.asarray(v[take]).astype(np.float64)
         out.append((index, float(np.ma.filled(raw, np.nan).reshape(-1)[0])))
     return out
+
+
+def _count_steps(path: str) -> tuple[str, int]:
+    """How many timesteps one file holds. Runs in a worker process.
+
+    The whole of what the scan needs from a file, and a pure function of its
+    path -- nothing to keep consistent between workers, which is what makes
+    the scan an easier thing to parallelise than a point series.
+    """
+    import netCDF4
+
+    try:
+        with netCDF4.Dataset(path) as nc:
+            dim = nc.dimensions.get("Time")
+            return path, len(dim) if dim is not None else 1
+    except Exception:
+        return path, 1                    # unreadable: leave it as one step
 
 
 def _read_point(job) -> list:
@@ -564,36 +612,118 @@ class Series:
 
         Uses netCDF4 rather than xarray -- 1.6 ms per file against 7.3 ms,
         because reading one dimension does not need xarray's decoding. Keeps
-        its own handles so it never touches the LRU another thread is using
-        -- but still takes `self._lock` per file, held only for that one
-        open+read: the cache dict is not the only thing at risk here, the
-        underlying netCDF4/HDF5 library itself is not safe under concurrent
-        access from another thread, whether or not the two sides share a
-        handle. Locked per file rather than for the whole scan so a frame
-        request only ever waits as long as one file's dimension read.
-        """
-        import netCDF4
+        its own handles so it never touches the LRU another thread is using.
 
+        Whether to hand the rest to worker processes is *measured*, not
+        assumed, because the answer differs by a factor of ten between the
+        two filesystems this runs on. A local disk opens a file in under two
+        milliseconds, so a run of a few hundred is over before a pool has
+        finished starting; a parallel filesystem charges a metadata round
+        trip per open -- twenty milliseconds is normal -- and there the pool
+        pays for itself within thirty files. So the first few are timed here,
+        and the projection decides.
+
+        Reading here takes `self._lock` per file: the netCDF4/HDF5 library is
+        not safe under concurrent access from another thread, whether or not
+        the two sides share a handle. Held for one open at a time so a frame
+        request waits no longer than a single dimension read -- and the whole
+        point of the parallel path is that it takes the lock not at all.
+        """
         counts = dict(self._counts)
-        opened = 0
+        todo = [p for p in self.files if p not in counts]
         with timing.step("series.scan", files=len(self.files)) as t:
-            for path in self.files:
-                if self._stop_scan.is_set():
-                    return                       # the Series is going away
-                if path in counts:
-                    continue
+            probe = todo[:SCAN_PROBE_FILES]
+            started = _time.monotonic()
+            if not self._scan_serial(probe, counts):
+                return                                 # the Series is going away
+            per_open = (_time.monotonic() - started) / max(1, len(probe))
+
+            rest = todo[len(probe):]
+            workers = series_workers()
+            parallel = self._worth_a_pool(rest, per_open, workers)
+            done = False
+            if parallel:
                 try:
-                    opened += 1
-                    with self._lock, netCDF4.Dataset(path) as nc:
-                        dim = nc.dimensions.get("Time")
-                        counts[path] = len(dim) if dim is not None else 1
-                except Exception:
-                    counts[path] = 1      # unreadable: leave it as one step
-            t.note(opened=opened)
+                    done = self._scan_parallel(rest, counts, workers)
+                except BrokenProcessPool:
+                    pass                  # no workers here; read them in turn
+            if self._stop_scan.is_set():
+                return
+            if not done and not self._scan_serial(rest, counts):
+                return
+            t.note(opened=len(todo), workers=workers if parallel else 1,
+                   per_open_ms=round(per_open * 1000, 2))
         self._counts = counts
         # plain assignment, so a reader mid-request keeps a consistent list
         self.steps, self.labels = self._axis()
         self.scanning = False
+
+    def _worth_a_pool(self, rest, per_open: float, workers: int) -> bool:
+        """Whether worker processes would finish the scan sooner than this
+        thread would, given what an open has just been measured to cost.
+
+        Starting eight readers takes about half a second. That is nothing
+        against three thousand files on a parallel filesystem and everything
+        against three hundred on a local disk, which is why this is arithmetic
+        rather than a constant. If a pool is already warm -- the point panel
+        was opened, or a series has been read -- there is nothing to pay and
+        the only question is whether there is enough left to divide.
+        """
+        if len(rest) < PARALLEL_MIN_FILES or workers < 2 or not can_spawn():
+            return False
+        saved = len(rest) * per_open * (1 - 1 / workers)
+        return saved > (0.0 if self.readers.is_warm else POOL_START_SECONDS)
+
+    def _scan_serial(self, todo, counts) -> bool:
+        """Count each file here, under the lock. False if asked to stop."""
+        import netCDF4
+
+        for path in todo:
+            if self._stop_scan.is_set():
+                return False
+            try:
+                with self._lock, netCDF4.Dataset(path) as nc:
+                    dim = nc.dimensions.get("Time")
+                    counts[path] = len(dim) if dim is not None else 1
+            except Exception:
+                counts[path] = 1          # unreadable: leave it as one step
+        return True
+
+    def _scan_parallel(self, todo, counts, workers: int) -> bool:
+        """Count the files in worker processes. False to fall back to serial.
+
+        The point is not really that it finishes sooner, though it does. It is
+        that **this process never enters HDF5**, so it never takes the lock
+        that every `/api/frame` also needs, and the map keeps its full speed
+        while the count runs. Serially the two compete: measured on 600 files
+        of an 8,000-cell mesh, scrubbing the time slider throughout, frames
+        went from a 3.0 ms p95 to 9.8 ms, with a 51 ms worst case -- and that
+        gap widens with per-open latency, which on a parallel filesystem is
+        twenty times what it is on a local disk.
+
+        A `BrokenProcessPool` is left to the caller: it means this process
+        cannot start workers at all, which is a fact about the environment
+        rather than about the files.
+        """
+        from concurrent.futures import as_completed
+
+        by_name = {str(p): p for p in todo}
+        with self.readers.lease(min(workers, len(todo))) as pool:
+            futures = [pool.submit(_count_steps, name) for name in by_name]
+            try:
+                for future in as_completed(futures):
+                    if self._stop_scan.is_set():
+                        for f in futures:
+                            f.cancel()
+                        return False
+                    name, steps = future.result()
+                    counts[by_name[name]] = steps
+            except BrokenProcessPool:
+                self.readers.discard(pool)
+                for f in futures:
+                    f.cancel()
+                raise
+        return True
 
     # -- files -----------------------------------------------------------
 
@@ -762,7 +892,8 @@ class Series:
         pins = dict(sel or {})
         if workers is None:
             workers = series_workers()
-        if pool is not None or (workers > 1 and len(plan) >= PARALLEL_MIN_FILES):
+        if pool is not None or (workers > 1 and len(plan) >= PARALLEL_MIN_FILES
+                                and can_spawn()):
             try:
                 return self._at_cell_parallel(var, cell, level, pins, plan, out,
                                               progress, cancel, workers, pool,
