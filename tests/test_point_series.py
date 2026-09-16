@@ -159,3 +159,108 @@ def test_frames_are_still_served_while_a_series_is_read(run):
     assert png[:4] == b"\x89PNG"
     assert done.wait(30)
     thread.join()
+
+
+# -------------------------------------------------------------- over HTTP
+
+
+def _serve(viewer):
+    import threading as th
+
+    from gmpas.viewer import PAGE, _handler, bind
+
+    srv = bind(_handler(viewer, PAGE), 0)
+    th.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def _poll(base, query, tries=200):
+    import json
+    import urllib.parse
+    import urllib.request
+
+    url = f"{base}/api/series?{urllib.parse.urlencode(query)}"
+    saw_202 = False
+    for _ in range(tries):
+        with urllib.request.urlopen(url) as r:
+            saw_202 |= r.status == 202
+            body = json.loads(r.read())
+        if body["state"] == "done":
+            return body, saw_202
+        threading.Event().wait(0.01)
+    raise AssertionError("series never finished over HTTP")
+
+
+def test_the_route_answers_202_while_reading_then_the_numbers(run):
+    srv, base = _serve(run)
+    try:
+        body, saw_202 = _poll(base, {"lon": 10.0, "lat": 0.0, "var": "theta",
+                                     "level": 1})
+    finally:
+        srv.shutdown()
+    assert saw_202, "the first call should not have blocked"
+    assert body["values"] == [100 * s + 1 + 0.1 for s in range(12)]
+    assert body["cell"] == 1 and len(body["labels"]) == 12
+
+
+def test_a_bad_request_is_an_error_not_a_hang(run):
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    srv, base = _serve(run)
+    q = urllib.parse.urlencode({"lon": 10.0, "lat": 0.0, "var": "nope"})
+    try:
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(f"{base}/api/series?{q}")
+        assert "nope" in json.loads(err.value.read())["error"]
+    finally:
+        srv.shutdown()
+
+
+# ------------------------------------------------------- the generic side
+
+
+@pytest.fixture
+def grid(tmp_path):
+    """Three files of two steps each on a regular grid."""
+    import pandas as pd
+
+    from gmpas.generic import GenericViewer
+
+    lat, lon = np.linspace(-10, 10, 5), np.linspace(0, 40, 9)
+    for k, month in enumerate(("01", "02", "03")):
+        t = 100 * k + np.arange(2)[:, None, None] + np.zeros((2, lat.size, lon.size))
+        xr.Dataset({"t2m": (("time", "lat", "lon"), t, {"units": "K"})},
+                   coords={"time": pd.date_range(f"2024-{month}-01", periods=2),
+                           "lat": lat, "lon": lon}
+                   ).to_netcdf(tmp_path / f"era5_{month}.nc")
+    gv = GenericViewer(tmp_path)
+    yield gv
+    gv.close()
+
+
+def test_both_viewers_answer_a_point_series_the_same_way(grid):
+    state = _wait(grid, 20.0, 0.0, "t2m", 0)
+    assert set(state) == {"state", "cell", "lon", "lat", "label", "labels", "values"}
+    assert state["values"] == [0.0, 1.0, 100.0, 101.0, 200.0, 201.0]
+    assert state["labels"][0].startswith("2024-01-01")
+
+
+def test_a_point_off_the_grid_says_so(grid):
+    with pytest.raises(ValueError, match="outside the grid"):
+        grid.series_at_point(300.0, 80.0, "t2m", 0)
+
+
+def test_the_generic_series_reports_progress_and_can_be_cancelled(grid):
+    seen = []
+    grid._series_at("t2m", 20.0, 0.0, 0, progress=lambda d, t: seen.append((d, t)))
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+    from gmpas.jobs import Cancelled
+
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(Cancelled):
+        grid._series_at("t2m", 20.0, 0.0, 0, cancel=cancel)

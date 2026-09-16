@@ -824,6 +824,38 @@ class GenericViewer:
                 "lat": round(float(self.lat[i]), 4),
                 "value": value}
 
+    def series_at_point(self, lon, lat, var, level=0, blocking=False) -> dict:
+        """The clicked grid point's value at every step, as the page wants it.
+
+        The same shape the MPAS viewer answers with, through the same runner:
+        a count while it reads, the numbers when it is done.
+        """
+        if var not in self._spatial_vars():
+            raise ValueError(f"{var!r} is not a map variable, so it has no "
+                             f"series at a point")
+        i, j = self._point(lon, lat)              # raises off-grid, with the point
+        key = ("series", var, i, j, int(level))
+
+        def work(progress, cancel):
+            return self._series_at(var, lon, lat, int(level),
+                                   progress=progress, cancel=cancel)
+
+        total = len(self.files)
+        found = (self._hov_jobs.result(key, total, work) if blocking
+                 else self._hov_jobs.peek(key))
+        if found is None:
+            return {"state": "running", **self._hov_jobs.progress(key, total, work)}
+        values = np.asarray(found.values, dtype=float)
+        axis = found.coords[found.dims[0]].values
+        return {"state": "done", "cell": i * self.lon.size + j,
+                "lon": round(float(self.lon[j]), 4),
+                "lat": round(float(self.lat[i]), 4),
+                "label": _data.field_label(self.ds[var]),
+                "labels": [str(np.datetime_as_string(t, unit="m"))
+                           if np.issubdtype(np.asarray(t).dtype, np.datetime64)
+                           else str(t) for t in axis],
+                "values": [None if not np.isfinite(v) else float(v) for v in values]}
+
     # -- Hovmöller: time x longitude, averaged over a latitude band ---------
 
     def _hov_spec(self, var: str, level: int, band, lons=None, steps=None) -> dict:
@@ -1034,18 +1066,26 @@ class GenericViewer:
         fj = (self.lon.size - 1 - j) if self._lon_flip else j
         return {self.lat_dim: fi, self.lon_dim: fj}
 
-    def _series_at(self, var: str, lon: float, lat: float, level: int = 0):
+    def _series_at(self, var: str, lon: float, lat: float, level: int = 0,
+                   progress=None, cancel=None):
         """`var` at one point, through every step of every file, as a DataArray.
 
         One read per file rather than per step, each under the lock only for
         that file, so a long series does not freeze the rest of the viewer.
+        The read is a hyperslab at one grid point, so what grows here is the
+        answer and nothing else.
+
+        `progress(done, total)` is called per file and `cancel` is checked
+        there, so this can run under `jobs.Jobs` for a long run.
         """
         import xarray as xr
 
         i, j = self._point(lon, lat)
         where = self._file_index(i, j)
         values, times = [], []
-        for path in self.files:
+        for done, path in enumerate(self.files):
+            if cancel is not None and cancel.is_set():
+                raise _jobs.Cancelled()
             with self._lock:
                 ds = self._dataset(path, check=path != self.files[0])
                 if var not in ds:
@@ -1054,6 +1094,9 @@ class GenericViewer:
                 values.append(np.atleast_1d(np.asarray(da.values, dtype=np.float64)))
                 if self.time_name in da.dims and self.time_name in ds.variables:
                     times.append(np.atleast_1d(ds[self.time_name].values))
+            if progress is not None:
+                progress(done + 1, len(self.files))
+            _time.sleep(0)                       # let a frame request in
         y = np.concatenate(values)
         dated = len(times) == len(self.files) and all(
             np.issubdtype(t.dtype, np.datetime64) for t in times)

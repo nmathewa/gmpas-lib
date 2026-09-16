@@ -690,6 +690,21 @@ def _hov_params(q: dict) -> dict:
     return hov
 
 
+def _serve_series(handler, viewer, q: dict) -> None:
+    """One point's series: 202 with a count while it reads, then the numbers.
+
+    A function taking the handler rather than a method on it, for the reason
+    `_serve_hovmoller` is one: the dashboard mounts a page by calling its
+    `do_GET` with the router's own `self`, so only what PageHandler defines
+    exists there.
+    """
+    state = viewer.series_at_point(float(q["lon"]), float(q["lat"]), q["var"],
+                                   int(q.get("level", 0)))
+    body = json.dumps(state).encode()
+    status = 202 if state["state"] == "running" else 200
+    return handler._send(body, "application/json", status)
+
+
 def _serve_hovmoller(handler, viewer, q: dict, extent) -> None:
     """202 with progress while the job reads; then the image, with the row of
     every step so the page can mark the current one itself.
@@ -839,6 +854,8 @@ def _handler(viewer: Viewer, html: str = ""):
                     out = viewer.probe(float(q["lon"]), float(q["lat"]), q["var"],
                                        int(q.get("time", 0)), int(q.get("level", 0)))
                     return self._send(json.dumps(out).encode(), "application/json")
+                if url.path == "/api/series" and hasattr(viewer, "series_at_point"):
+                    return _serve_series(self, viewer, q)
             except Exception as exc:                      # surface, don't hang
                 body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
                 self.send_response(500)
