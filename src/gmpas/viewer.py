@@ -1297,6 +1297,29 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #scalebar{height:5px;border:1px solid #fff;border-top:none;box-shadow:0 0 3px #000;
           margin-top:2px}
 #scaletext{display:block;font-variant-numeric:tabular-nums}
+/* the point panel: ncview's popup, kept inside the page */
+#point{position:absolute;display:none;z-index:6;width:330px;background:var(--panel);
+       border:1px solid var(--line);border-radius:6px;box-shadow:0 6px 24px #0008;
+       font-size:12px;color:var(--fg)}
+#pthead{display:flex;align-items:center;gap:6px;padding:5px 8px;cursor:move;
+        border-bottom:1px solid var(--line);user-select:none}
+#pttitle{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim)}
+#ptclose{background:none;border:none;color:var(--dim);cursor:pointer;padding:0 4px;
+         font-size:14px;line-height:1}
+#ptclose:hover{color:var(--fg)}
+#ptbody{padding:8px}
+#ptnow{font-variant-numeric:tabular-nums;margin-bottom:6px}
+#ptnow b{color:var(--fg);font-size:14px}
+#ptchart{width:100%;height:150px;display:none}
+#ptchart .ax{stroke:var(--line);stroke-width:1}
+#ptchart .ln{fill:none;stroke:var(--accent);stroke-width:1.5}
+#ptchart .now{stroke:#fff;stroke-width:1;opacity:.5;stroke-dasharray:3 3}
+#ptchart .hit{stroke:none;fill:transparent}
+#ptchart text{fill:var(--dim);font-size:9px}
+#ptfoot{display:flex;gap:6px;align-items:center;margin-top:6px}
+#ptfoot .hint{flex:1;margin:0}
+#ptmark{position:absolute;pointer-events:none;display:none;z-index:4}
+#ptmark i{position:absolute;background:#fff;box-shadow:0 0 2px #000}
 #msg{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:#000a;
      padding:4px 10px;border-radius:4px;color:var(--dim);opacity:0;transition:opacity .2s;
      pointer-events:none}
@@ -1362,10 +1385,25 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
       <div id="wrap">
         <img id="data"><img id="over">
         <div id="grat"></div>
+        <div id="ptmark"><i></i><i></i></div>
         <div id="scale"><span id="scaletext"></span><div id="scalebar"></div></div>
       </div>
       <div id="corner"></div>
       <div id="lonax"></div>
+    </div>
+    <div id="point">
+      <div id="pthead"><span id="pttitle"></span>
+        <button id="ptclose" title="close">\u00d7</button></div>
+      <div id="ptbody">
+        <div id="ptnow"></div>
+        <div class="row"><button id="ptgo" style="flex:1">time series</button></div>
+        <svg id="ptchart" preserveAspectRatio="none"></svg>
+        <div id="ptfoot">
+          <div class="hint" id="pthint">the value here, through the run</div>
+          <button id="ptlog" title="log scale">log</button>
+          <button id="ptcsv" title="copy the numbers">copy</button>
+        </div>
+      </div>
     </div>
     <div id="msg"></div>
   </div>
@@ -1631,6 +1669,8 @@ function setMode(){
   show("#cmapsec", c.colour); show("#rangesec", c.colour);
   if(M.colour_options) show("#coloursec", c.options);
   show("#animsec", c.frames); show("#probesec", c.probe);
+  // the point panel marks a place on the map; a figure has no place to mark
+  ptShown(!p && c.probe);
   hovMode(p && $("#kind").value==="hovmoller");
   renderAnimList();
   exportModes();
@@ -1919,7 +1959,7 @@ async function drawPlot(){
 }
 $("#kind").onchange = ()=>{
   setMode();
-  if(!plotMode()){ layout(); overlay(); scalebar(); graticule(); }
+  if(!plotMode()){ layout(); overlay(); scalebar(); graticule(); ptMark(); }
   draw();
 };
 // ---------------------------------------------------------------- layers
@@ -2538,6 +2578,7 @@ function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); clear
   redrawTimer=setTimeout(()=>{ overlay(); draw(); }, ms); }
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
+  if(PT && PT.series) ptChart();       // the series is in hand: just move the mark
   // a Hovmöller already holds every step: moving time only moves its marker
   if(plotMode() && $("#kind").value==="hovmoller"){ hovMark(); return; }
   if(plotMode()){ clearTimeout(redrawTimer); redrawTimer=setTimeout(draw, 120); return; }
@@ -2545,7 +2586,8 @@ $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
   const entry=anims.get(animKeyOf(animParams()));
   if(entry && entry.urls[e.target.value]){ $("#data").src=entry.urls[e.target.value]; return; }
   draw(); };
-$("#level").oninput = e=>{ $("#llab").textContent=e.target.value; stopPlayback(); draw(); };
+$("#level").oninput = e=>{ $("#llab").textContent=e.target.value; stopPlayback();
+  ptStale(); draw(); };
 $("#cmap").onchange = ()=>{ stopPlayback(); draw(); };
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
@@ -2581,7 +2623,7 @@ $("#wrap").onpointermove = ev=>{
   const dy=(ev.clientY-drag.y)/r.height*(b[3]-b[2]);
   if(Math.abs(ev.clientX-drag.x)+Math.abs(ev.clientY-drag.y)>3) drag.moved=true;
   view.clon=drag.clon-dx; view.clat=drag.clat+dy;
-  clamp(); preview(); scalebar(); graticule();
+  clamp(); preview(); scalebar(); graticule(); ptMark();
   if(!covers(rendered, boxOf(view))) schedule(90);   // ran past the margin
 };
 $("#wrap").onpointerup = async ev=>{
@@ -2598,9 +2640,200 @@ $("#wrap").onpointerup = async ev=>{
   const d=await (await fetch("api/probe?"+q)).json();
   $("#probe2").innerHTML=`cell ${d.cell}<br>${d.lat}\u00b0, ${d.lon}\u00b0<br>`+
                          `<b>${d.value.toPrecision(6)}</b>`;
+  ptOpen(lon, lat, d);
 };
-$("#grid").onchange = graticule;
-addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); });
+$("#grid").onchange = ()=>{ graticule(); ptMark(); };
+addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); ptMark(); });
+// ------------------------------------------------------------ point panel
+// ncview's gesture: click the map, and this location's numbers are one button
+// away. The value is instant -- the step is already in hand -- but the series
+// is one read per file, so it is asked for, not assumed, and the server
+// answers 202 with a count while it reads.
+let PT=null;                 // {lon, lat, cell, key, series, log}
+let ptPoll=null, ptDrag=null;
+
+function ptKey(){ return JSON.stringify([cur&&cur.name, $("#level").value,
+                                         PT&&PT.lon, PT&&PT.lat]); }
+function ptOpen(lon, lat, d){
+  if(!caps().probe) return;
+  const box=$("#point");
+  const first=box.style.display!=="block";
+  PT={lon, lat, cell:d.cell, series:null, log:PT?PT.log:false, key:null};
+  box.style.display="block";
+  if(first){                 // sits top-left of the stage until dragged
+    box.style.left="14px"; box.style.top="14px";
+  }
+  $("#pttitle").textContent=`${d.lat}\u00b0, ${d.lon}\u00b0`+
+                            (d.cell>=0 ? ` \u00b7 cell ${d.cell}` : "");
+  const value=(d.value===null||d.value===undefined||!isFinite(d.value))
+    ? "no data" : (+d.value).toPrecision(6);
+  $("#ptnow").innerHTML=`${cur.label}<br><b>${value}</b>`;
+  $("#ptchart").style.display="none";
+  $("#pthint").textContent="the value here, through the run";
+  $("#ptgo").disabled=false;
+  clearTimeout(ptPoll);
+  ptMark();
+}
+function ptClose(){
+  clearTimeout(ptPoll); PT=null;
+  $("#point").style.display="none"; $("#ptmark").style.display="none";
+}
+// the clicked point, marked on the map: a cross, redrawn wherever the view goes
+function ptMark(){
+  const m=$("#ptmark");
+  if(!PT || plotMode() || !$("#wrap").clientWidth){ m.style.display="none"; return; }
+  const b=boxOf(view), w=$("#wrap").clientWidth, h=$("#wrap").clientHeight;
+  let lon=PT.lon;
+  while(lon<b[0]-180) lon+=360;              // the same point, one turn along
+  while(lon>b[1]+180) lon-=360;
+  const x=(lon-b[0])/(b[1]-b[0])*w, y=(b[3]-PT.lat)/(b[3]-b[2])*h;
+  if(x<0||y<0||x>w||y>h){ m.style.display="none"; return; }
+  m.style.display="block"; m.style.left="0"; m.style.top="0";
+  const arms=m.querySelectorAll("i");
+  arms[0].style.cssText=`left:${x-6}px;top:${y}px;width:13px;height:1px`;
+  arms[1].style.cssText=`left:${x}px;top:${y-6}px;width:1px;height:13px`;
+}
+async function ptSeries(){
+  if(!PT || !cur) return;
+  const key=ptKey();
+  PT.key=key;
+  $("#ptgo").disabled=true;
+  const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
+                               level:$("#level").value});
+  try{
+    const r=await fetch("api/series?"+q);
+    if(r.status===202){                      // fetch calls 202 ok: check first
+      const [done,total]=(await r.json()).progress;
+      $("#pthint").textContent=`reading ${done} / ${total}\u2026`;
+      ptPoll=setTimeout(()=>{ if(PT && ptKey()===key) ptSeries(); }, 400);
+      return;
+    }
+    if(!r.ok){
+      $("#pthint").textContent=(await r.json()).error;
+      $("#ptgo").disabled=false; return;
+    }
+    const body=await r.json();
+    if(!PT || ptKey()!==key) return;         // moved on while it read
+    PT.series=body;
+    $("#pthint").textContent=ptSummary(body);
+    $("#ptgo").disabled=false;
+    ptChart();
+  }catch(e){
+    $("#pthint").textContent="series failed: "+e;
+    $("#ptgo").disabled=false;
+  }
+}
+function ptSummary(body){
+  const v=body.values.filter(x=>x!==null);
+  if(!v.length) return "no data at this point";
+  const mean=v.reduce((a,b)=>a+b,0)/v.length;
+  const f=x=>Math.abs(x)>=1e4||(x!==0&&Math.abs(x)<1e-3)
+    ? x.toExponential(2) : x.toPrecision(4);
+  return `${v.length} steps \u00b7 min ${f(Math.min(...v))} \u00b7 `+
+         `mean ${f(mean)} \u00b7 max ${f(Math.max(...v))}`;
+}
+// A small SVG rather than a plotted PNG: it redraws on hover and on the time
+// slider without asking the server for anything.
+function ptChart(){
+  const svg=$("#ptchart"), body=PT&&PT.series;
+  if(!body){ svg.style.display="none"; return; }
+  const W=314, H=150, L=38, R=6, T=8, B=18;
+  const vals=body.values;
+  const finite=vals.filter(x=>x!==null);
+  if(!finite.length){ svg.style.display="none"; return; }
+  let lo=Math.min(...finite), hi=Math.max(...finite);
+  // a log axis needs positive values; say so rather than quietly drawing linear
+  const logOK=PT.log && lo>0;
+  if(PT.log && !logOK) $("#pthint").textContent=
+    "log needs values above zero \u2014 drawn linear";
+  const tr=x=>logOK ? Math.log10(x) : x;
+  let tlo=tr(lo), thi=tr(hi);
+  if(thi-tlo < 1e-12){ tlo-=0.5; thi+=0.5; }
+  const x=i=>L+(vals.length<2 ? 0 : i/(vals.length-1)*(W-L-R));
+  const y=v=>T+(1-(tr(v)-tlo)/(thi-tlo))*(H-T-B);
+  const f=n=>Math.abs(n)>=1e4||(n!==0&&Math.abs(n)<1e-3)
+    ? n.toExponential(1) : (+n.toPrecision(4)).toString();
+  let d="", pen=false;
+  vals.forEach((v,i)=>{
+    if(v===null){ pen=false; return; }
+    d+=(pen?"L":"M")+x(i).toFixed(1)+" "+y(v).toFixed(1)+" "; pen=true;
+  });
+  const step=+$("#time").value;
+  const nowX=(step>=0 && step<vals.length) ? x(step) : null;
+  const ticks=[hi, lo].map((v,k)=>
+    `<text x="${L-4}" y="${(k?H-B:T+8).toFixed(0)}" text-anchor="end">${f(v)}</text>`);
+  const ends=[body.labels[0]||"", body.labels[vals.length-1]||""];
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML=
+    `<line class="ax" x1="${L}" y1="${T}" x2="${L}" y2="${H-B}"/>`+
+    `<line class="ax" x1="${L}" y1="${H-B}" x2="${W-R}" y2="${H-B}"/>`+
+    ticks.join("")+
+    `<text x="${L}" y="${H-6}">${ends[0].slice(0,16)}</text>`+
+    `<text x="${W-R}" y="${H-6}" text-anchor="end">${ends[1].slice(0,16)}</text>`+
+    (nowX!==null ? `<line class="now" x1="${nowX.toFixed(1)}" y1="${T}" `+
+                   `x2="${nowX.toFixed(1)}" y2="${H-B}"/>` : "")+
+    `<path class="ln" d="${d.trim()}"/>`+
+    `<rect class="hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}"/>`;
+  svg.style.display="block";
+  svg.querySelector(".hit").onmousemove=ev=>{
+    const r=svg.getBoundingClientRect();
+    const frac=(ev.clientX-r.left)/r.width*W;
+    const i=Math.round((frac-L)/(W-L-R)*(vals.length-1));
+    if(i<0||i>=vals.length) return;
+    const v=vals[i];
+    $("#pthint").textContent=`${body.labels[i]} \u00b7 `+
+                             (v===null ? "no data" : f(v));
+  };
+  svg.querySelector(".hit").onmouseleave=()=>{
+    $("#pthint").textContent=ptSummary(body); };
+}
+// the panel belongs to the map; a plot has no point to mark
+function ptShown(on){
+  if(!PT) return;
+  $("#point").style.display = on ? "block" : "none";
+  if(on) ptMark(); else $("#ptmark").style.display="none";
+}
+// the point still stands, the numbers no longer do
+function ptStale(){
+  clearTimeout(ptPoll);
+  if(!PT) return;
+  PT.series=null;
+  $("#ptchart").style.display="none";
+  $("#ptgo").disabled=false;
+  $("#pthint").textContent="level changed \u2014 read it again";
+}
+$("#ptgo").onclick=ptSeries;
+$("#ptclose").onclick=ptClose;
+$("#ptlog").onclick=()=>{ if(!PT) return; PT.log=!PT.log;
+  $("#ptlog").classList.toggle("on", PT.log); ptChart(); };
+$("#ptcsv").onclick=async ()=>{
+  if(!PT || !PT.series) return;
+  const body=PT.series;
+  const head=`# ${cur.label} at ${body.lat}, ${body.lon}\\ntime,value\\n`;
+  const rows=body.labels.map((t,i)=>`${t},${body.values[i]===null?"":body.values[i]}`);
+  try{ await navigator.clipboard.writeText(head+rows.join("\\n")+"\\n");
+       $("#pthint").textContent=`${rows.length} rows copied`; }
+  catch(e){ $("#pthint").textContent="clipboard refused: "+e; }
+};
+// dragged by its title bar, with the pointer capture the map drag uses
+$("#pthead").onpointerdown=ev=>{
+  if(ev.target.closest("#ptclose")) return;   // the close button is not a handle
+  const box=$("#point"), r=box.getBoundingClientRect();
+  const st=$("#stage").getBoundingClientRect();
+  ptDrag={dx:ev.clientX-r.left, dy:ev.clientY-r.top, st};
+  $("#pthead").setPointerCapture(ev.pointerId);
+};
+$("#pthead").onpointermove=ev=>{
+  if(!ptDrag) return;
+  const box=$("#point"), st=ptDrag.st;
+  const x=Math.max(0, Math.min(st.width-box.offsetWidth,
+                               ev.clientX-st.left-ptDrag.dx));
+  const y=Math.max(0, Math.min(st.height-box.offsetHeight,
+                               ev.clientY-st.top-ptDrag.dy));
+  box.style.left=x+"px"; box.style.top=y+"px";
+};
+$("#pthead").onpointerup=()=>{ ptDrag=null; };
+
 boot();
 </script></body></html>
 """
