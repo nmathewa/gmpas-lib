@@ -52,7 +52,23 @@ jobs:
         run: |
           python -c "import gmpas; print('gmpas', gmpas.__version__)"
           python -c "import numpy, scipy, xarray, netCDF4, matplotlib, cartopy; print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'xarray', xarray.__version__, 'netCDF4', netCDF4.__version__, 'matplotlib', matplotlib.__version__, 'cartopy', cartopy.__version__)"
+          python -c "from importlib.metadata import version; print('cmocean', version('cmocean'))"
           which ESMF_RegridWeightGen ncremap || echo "remap tools NOT on PATH"
+
+      - name: Check the wheel carries the palettes
+        # The Ferret .spk files and their public-domain notice are data, not
+        # Python: an editable install finds them in the tree whether or not a
+        # built wheel would include them, so build one and look.
+        run: |
+          pip wheel . --no-deps -w wheelhouse
+          python - <<'EOF'
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob("wheelhouse/gmpas-*.whl")[0]).namelist()
+          spk = [n for n in names if n.startswith("gmpas/palettes/ferret/") and n.endswith(".spk")]
+          assert len(spk) >= 25, f"only {len(spk)} Ferret palettes in the wheel"
+          assert "gmpas/palettes/ferret/NOTICE.txt" in names, "Ferret NOTICE.txt missing"
+          print(len(spk), "Ferret palettes and NOTICE.txt in the wheel")
+          EOF
 
       # No ruff step yet, deliberately. `ruff check src tests` currently reports
       # 42 pre-existing violations (mostly E501 in the embedded viewer page), so

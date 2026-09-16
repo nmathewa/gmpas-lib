@@ -33,6 +33,7 @@ dependencies:
   - matplotlib >=3.7
   - cartopy >=0.22
   - pillow                # palette PNG encoding for the viewer
+  - cmocean >=4.0          # cmo.* palettes offered by --generic
 
   # development
   - pytest >=7.0

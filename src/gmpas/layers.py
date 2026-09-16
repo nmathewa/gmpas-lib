@@ -24,6 +24,7 @@ import re
 import numpy as np
 
 from . import data as _data
+from . import palettes
 
 MAX_LAYERS = 24
 MAX_LEVELS = 256
@@ -36,7 +37,9 @@ MAX_TEXT = 200
 # here and the option forms in the browser, so the two cannot drift apart.
 
 _COLOUR_SCALE = {
-    "cmap": {"type": "cmap", "default": "viridis"},
+    "cmap": {"type": "cmap", "default": "viridis",
+             "help": "matplotlib, cmo.*, ferret.* or grads.*; empty follows the look"},
+    "reverse": {"type": "bool", "default": False, "help": "run the palette backwards"},
     "vmin": {"type": "float", "default": None},
     "vmax": {"type": "float", "default": None},
     "robust": {"type": "bool", "default": False,
@@ -44,15 +47,61 @@ _COLOUR_SCALE = {
     "center": {"type": "float", "default": None,
                "help": "diverging colormap centred on this value"},
     "norm": {"type": "choice", "default": "linear",
-             "choices": ["linear", "log", "symlog"]},
+             "choices": ["linear", "log", "symlog", "power"]},
     "linthresh": {"type": "float", "default": 1.0, "help": "symlog linear range"},
+    "gamma": {"type": "float", "default": 1.0, "min": 0.01, "max": 100.0,
+              "help": "power norm: below 1 spreads low values, above 1 high ones "
+                      "(ncview's Low/Hi)"},
     "extend": {"type": "choice", "default": "neither",
-               "choices": ["neither", "both", "min", "max"]},
+               "choices": ["neither", "both", "min", "max"],
+               "help": "colorbar triangles for values outside the range"},
+    "under_color": {"type": "color", "default": None,
+                    "help": "values below the range; empty is the palette's end"},
+    "over_color": {"type": "color", "default": None,
+                   "help": "values above the range; empty is the palette's end"},
     "colorbar": {"type": "bool", "default": True},
     "colorbar_label": {"type": "str", "default": None},
+    "colorbar_format": {"type": "fmt", "default": None, "help": "tick labels, e.g. %.0f"},
+    "colorbar_ticks": {"type": "levels", "default": None,
+                       "help": "a count (6) or the tick values"},
+}
+
+#: colour options only pixel layers have: contourf already bands by `levels`,
+#: and leaves missing cells unfilled rather than colouring them
+_RASTER_COLOUR = {
+    "bands": {"type": "int", "default": None, "min": 2, "max": 256,
+              "help": "N equal colour steps instead of a continuous scale"},
+    "missing_color": {"type": "color", "default": None,
+                      "help": "missing cells; empty leaves them transparent"},
 }
 
 _LINESTYLES = ["solid", "dashed", "dashdot", "dotted"]
+
+# Levels at a fixed step from a reference value -- MSLP every 4 hPa from 1000,
+# heights every 60 m -- which is how a weather map is specified and how Metview
+# (contour_interval, contour_reference_level) and GrADS (set cint) say it. The
+# alternative already here, a count, moves every line as soon as the field's
+# range moves, so two frames of a GIF are not drawn at the same values.
+_CONTOUR_INTERVAL = {
+    "interval": {"type": "float", "default": None, "min": 0.0,
+                 "help": "levels every this much, instead of a count"},
+    "reference": {"type": "float", "default": 0.0,
+                  "help": "interval counts from this value, e.g. 1000 hPa"},
+    "min_level": {"type": "float", "default": None, "help": "lowest interval level"},
+    "max_level": {"type": "float", "default": None, "help": "highest interval level"},
+}
+
+# Every Nth line drawn heavier, and labels thinned to match: dense contour sets
+# are read by their emphasised lines (Metview contour_highlight*).
+_CONTOUR_HIGHLIGHT = {
+    "highlight_every": {"type": "int", "default": 0, "min": 0, "max": MAX_LEVELS,
+                        "help": "emphasise every Nth level; 0 is off"},
+    "highlight_color": {"type": "color", "default": None,
+                        "help": "colour of the emphasised lines"},
+    "highlight_linewidth": {"type": "float", "default": 2.0, "min": 0.0},
+    "label_every": {"type": "int", "default": 1, "min": 1, "max": MAX_LEVELS,
+                    "help": "label only every Nth level"},
+}
 _RESOLUTIONS = ["110m", "50m", "10m"]
 
 LAYER_KINDS: dict[str, dict] = {
@@ -62,6 +111,7 @@ LAYER_KINDS: dict[str, dict] = {
         "options": {**_COLOUR_SCALE,
                     "levels": {"type": "levels", "default": None,
                                "help": "a count (10) or the values (0, 5, 10)"},
+                    **_CONTOUR_INTERVAL,
                     "hatches": {"type": "hatches", "default": None,
                                 "help": "one pattern per band, from "
                                         "/ \\ | - + x o O . *"}},
@@ -69,6 +119,7 @@ LAYER_KINDS: dict[str, dict] = {
     "contour": {
         "label": "contour lines", "group": "field", "needs": ["var"],
         "options": {"levels": {"type": "levels", "default": None},
+                    **_CONTOUR_INTERVAL,
                     "colors": {"type": "colors", "default": "black",
                                "help": "one colour, or one per level; ignored with a cmap"},
                     "cmap": {"type": "cmap", "default": None},
@@ -82,17 +133,18 @@ LAYER_KINDS: dict[str, dict] = {
                     "labels": {"type": "bool", "default": True},
                     "label_fontsize": {"type": "float", "default": 8.0, "min": 1.0},
                     "label_fmt": {"type": "fmt", "default": "%g"},
+                    **_CONTOUR_HIGHLIGHT,
                     "colorbar": {"type": "bool", "default": False}},
     },
     "pcolormesh": {
         "label": "pcolormesh", "group": "field", "needs": ["var"],
-        "options": {**_COLOUR_SCALE,
+        "options": {**_COLOUR_SCALE, **_RASTER_COLOUR,
                     "shading": {"type": "choice", "default": "auto",
                                 "choices": ["auto", "nearest", "gouraud"]}},
     },
     "imshow": {
         "label": "imshow", "group": "field", "needs": ["var"],
-        "options": {**_COLOUR_SCALE,
+        "options": {**_COLOUR_SCALE, **_RASTER_COLOUR,
                     "interpolation": {"type": "choice", "default": "nearest",
                                       "choices": ["nearest", "bilinear", "bicubic"]}},
     },
@@ -213,7 +265,27 @@ FIGURE_OPTIONS = {
                          "help": "Orthographic and LambertConformal"},
     "extent": {"type": "choice", "default": "view", "choices": ["view", "global"]},
     "title": {"type": "str", "default": None, "help": "empty writes one"},
-    "colorbar": {"type": "choice", "default": "bottom", "choices": ["bottom", "right"]},
+    "subtitle": {"type": "str", "default": None},
+    "footnote_left": {"type": "str", "default": None, "help": "e.g. the data source"},
+    "footnote_right": {"type": "str", "default": None, "help": "e.g. the run or units"},
+    "look": {"type": "choice", "default": "matplotlib",
+             "choices": ["matplotlib", "grads", "ferret"],
+             "help": "GrADS or Ferret: their default palette and colour key"},
+    "colorbar_style": {"type": "choice", "default": None,
+                       "choices": ["matplotlib", "grads", "ferret"],
+                       "help": "empty follows the look"},
+    "colorbar": {"type": "choice", "default": "bottom", "choices": ["bottom", "right"],
+                 "help": "empty follows the colorbar style"},
+}
+
+#: what a look changes when the stack does not say otherwise
+LOOKS = {
+    "matplotlib": {"palette": None, "colorbar_style": "matplotlib"},
+    # GrADS draws shaded fields and contour lines in its 13-colour rainbow,
+    # with a horizontal bar of boxed colours under the plot (cbarn)
+    "grads": {"palette": "grads.rainbow", "colorbar_style": "grads"},
+    # Ferret's own default palette, with its key down the right-hand side
+    "ferret": {"palette": "ferret.default", "colorbar_style": "ferret"},
 }
 
 
@@ -278,9 +350,9 @@ def _coerce(name: str, spec: dict, value, where: str):
         if kind == "str":
             return text
         if kind == "cmap":
-            from matplotlib import colormaps
-            if text not in colormaps:
-                raise ValueError(f"{where}{name}={text!r} is not a matplotlib colormap")
+            if not palettes.known(text):
+                raise ValueError(f"{where}{name}={text!r} is not a known colormap "
+                                 f"(matplotlib, cmo.*, ferret.* or grads.*)")
             return text
         if kind == "color":
             from matplotlib.colors import is_color_like
@@ -394,6 +466,9 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
         }
         if clean_layer["opacity"] is None:
             clean_layer["opacity"] = 1.0
+        _check_colour_options(clean_layer["options"], where)
+        if kind in ("contour", "contourf"):
+            _check_contour_options(clean_layer["options"], where)
         for need in spec["needs"]:
             name = layer.get(need)
             if name not in spatial_vars:
@@ -415,6 +490,118 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
             clean_layer["name"] = layer["name"][:MAX_TEXT]
         out["layers"].append(clean_layer)
     return out
+
+
+def _check_contour_options(opts: dict, where: str) -> None:
+    """Refuse contour levels that contradict each other, by name."""
+    if opts.get("interval") is not None:
+        if opts.get("levels") is not None:
+            raise ValueError(f"{where}interval and levels cannot be combined: interval "
+                             f"generates the levels, levels gives them outright")
+        if opts["interval"] <= 0:
+            raise ValueError(f"{where}interval={opts['interval']:g} must be above zero")
+    low, high = opts.get("min_level"), opts.get("max_level")
+    if low is not None and high is not None and high <= low:
+        raise ValueError(f"{where}max_level={high:g} must be above min_level={low:g}")
+    if opts.get("interval") is None:
+        for name in ("min_level", "max_level"):
+            if opts.get(name) is not None:
+                raise ValueError(f"{where}{name} applies to interval levels; "
+                                 f"set interval too")
+
+
+def interval_levels(lo: float, hi: float, interval: float, reference: float = 0.0,
+                    min_level=None, max_level=None, where: str = "") -> list[float]:
+    """Levels at `reference + k*interval` covering `lo..hi`, inclusive of both.
+
+    The reference is a level itself whenever it falls in range, so 1000 hPa
+    every 4 gives ..., 996, 1000, 1004, ... wherever the field happens to sit;
+    that is what makes the same line mean the same value in every frame.
+    """
+    if min_level is not None:
+        lo = max(lo, float(min_level))
+    if max_level is not None:
+        hi = min(hi, float(max_level))
+    if hi < lo:
+        raise ValueError(f"{where}min_level..max_level leaves nothing to draw between "
+                         f"{lo:g} and {hi:g}")
+    first = math.ceil((lo - reference) / interval - 1e-9)
+    last = math.floor((hi - reference) / interval + 1e-9)
+    count = last - first + 1
+    if count < 1:
+        raise ValueError(f"{where}interval={interval:g} from reference={reference:g} "
+                         f"puts no level between {lo:g} and {hi:g}")
+    if count > MAX_LEVELS:
+        raise ValueError(f"{where}interval={interval:g} would draw {count} levels "
+                         f"between {lo:g} and {hi:g}; the limit is {MAX_LEVELS}. "
+                         f"Use a larger interval, or min_level and max_level")
+    return [reference + k * interval for k in range(first, last + 1)]
+
+
+def _highlighted(levels, opts: dict) -> list[bool]:
+    """Which levels are emphasised: every Nth, counted from the reference when
+    an interval set them, so the emphasised lines keep their values as the
+    field's range moves."""
+    every = int(opts.get("highlight_every") or 0)
+    if every < 1:
+        return [False] * len(levels)
+    interval, reference = opts.get("interval"), opts.get("reference") or 0.0
+    if interval:
+        steps = [round((float(v) - reference) / interval) for v in levels]
+    else:
+        steps = list(range(len(levels)))
+    return [step % every == 0 for step in steps]
+
+
+def _levels_of(values, opts: dict):
+    """What to pass as `levels`: the interval's own values, or whatever the
+    layer already asked for (a list, a count, or None for matplotlib's pick)."""
+    if not opts.get("interval"):
+        return opts.get("levels")
+    lo, hi = _auto_range(values, opts)
+    return interval_levels(lo, hi, opts["interval"], opts.get("reference") or 0.0,
+                           opts.get("min_level"), opts.get("max_level"))
+
+
+def _emphasise(artist, opts: dict, coloured: bool) -> list[bool]:
+    """Draw every Nth contour heavier (and in its own colour). Returns which
+    levels were emphasised, so the labels can follow the same lines."""
+    heavy = _highlighted(list(artist.levels), opts)
+    if not any(heavy):
+        return heavy
+    widths = [opts["highlight_linewidth"] if on else opts["linewidths"] for on in heavy]
+    artist.set_linewidth(widths)
+    if opts.get("highlight_color") and not coloured:
+        base = artist.get_edgecolor()
+        colours = [opts["highlight_color"] if on else base[i % len(base)]
+                   for i, on in enumerate(heavy)]
+        artist.set_edgecolor(colours)
+    return heavy
+
+
+def _labelled(artist, opts: dict, heavy: list[bool]) -> list[float]:
+    """Which levels carry a label: every Nth, starting at an emphasised line
+    when there is one, so a heavy line is the one that reads its value."""
+    levels = list(artist.levels)
+    every = int(opts.get("label_every") or 1)
+    if every <= 1:
+        return levels
+    start = heavy.index(True) if any(heavy) else 0
+    return levels[start::every]
+
+
+def _check_colour_options(opts: dict, where: str) -> None:
+    """Refuse colour options that contradict each other, by name."""
+    norm = opts.get("norm", "linear")
+    if opts.get("bands") and norm != "linear":
+        raise ValueError(f"{where}bands and norm={norm} cannot be combined: bands are "
+                         f"equal steps of the value, a {norm} scale is not")
+    if opts.get("gamma", 1.0) != 1.0 and norm != "power":
+        raise ValueError(f"{where}gamma applies to norm=power, not norm={norm}")
+    if opts.get("center") is not None and norm in ("log", "power"):
+        raise ValueError(f"{where}center and norm={norm} cannot be combined: the range "
+                         f"is made symmetric about the centre, which a {norm} scale "
+                         f"then distorts")
 
 
 # --------------------------------------------------------------- drawing
@@ -465,16 +652,40 @@ def freeze_ranges(viewer, stack: dict, level: int, extent) -> dict:
         if opts.get("vmin") is not None and opts.get("vmax") is not None:
             continue
         values = np.asarray(layer_data(viewer, layer, 0, level, extent).values, float)
-        finite = values[np.isfinite(values)]
-        if finite.size:
-            robust = bool(opts.get("robust"))
-            lo = np.percentile(finite, 2) if robust else finite.min()
-            hi = np.percentile(finite, 98) if robust else finite.max()
-            opts.setdefault("vmin", float(lo))
-            opts.setdefault("vmax", float(hi))
+        if np.isfinite(values).any():
+            lo, hi = _auto_range(values, opts)
+            opts.setdefault("vmin", lo)
+            opts.setdefault("vmax", hi)
             if opts["vmax"] <= opts["vmin"]:
                 opts["vmax"] = opts["vmin"] + 1.0
     return frozen
+
+
+def _auto_range(values, opts: dict) -> tuple[float, float]:
+    """The colour range a layer draws with when vmin/vmax are not both given.
+
+    Min/max, or the 2nd-98th percentile with `robust`; with `center`, widened
+    to be symmetric about it -- the rule xarray applies, written out so bands
+    (which need their edges before drawing) and GIF freezing agree with it.
+    """
+    finite = np.asarray(values, float)
+    finite = finite[np.isfinite(finite)]
+    if not finite.size:
+        return 0.0, 1.0
+    robust = bool(opts.get("robust"))
+    lo = float(np.percentile(finite, 2) if robust else finite.min())
+    hi = float(np.percentile(finite, 98) if robust else finite.max())
+    if opts.get("vmin") is not None:
+        lo = float(opts["vmin"])
+    if opts.get("vmax") is not None:
+        hi = float(opts["vmax"])
+    center = opts.get("center")
+    if center is not None and opts.get("vmin") is None and opts.get("vmax") is None:
+        half = max(abs(lo - center), abs(hi - center))
+        lo, hi = center - half, center + half
+    if hi <= lo:
+        hi = lo + 1.0
+    return lo, hi
 
 
 def _projection(fig_opts: dict, box, ccrs):
@@ -561,6 +772,8 @@ def _norm(opts: dict, vmin, vmax):
     if kind == "symlog":
         return colors.SymLogNorm(linthresh=opts.get("linthresh") or 1.0,
                                  vmin=vmin, vmax=vmax)
+    if kind == "power":
+        return colors.PowerNorm(gamma=opts.get("gamma") or 1.0, vmin=vmin, vmax=vmax)
     return None
 
 
@@ -606,6 +819,14 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
     ax = fig.add_subplot(projection=proj)
     colorbars = []
     described = []
+    look = LOOKS[fig_opts.get("look") or "matplotlib"]
+
+    def palette(layer, opts, fallback="viridis"):
+        """The layer's colormap: its own name, else the look's, else `fallback`,
+        reversed and given its out-of-range and missing colours."""
+        name = layer["options"].get("cmap") or look["palette"] or fallback
+        return palettes.get(name, bool(opts.get("reverse")), opts.get("under_color"),
+                            opts.get("over_color"), opts.get("missing_color"))
     whole = (fig_opts.get("projection") or "PlateCarree") in _WHOLE_GRID \
         or fig_opts.get("extent") == "global"
     lo = float(viewer.lon.min())
@@ -625,34 +846,53 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
             common = dict(ax=ax, x=viewer.lon_name, y=viewer.lat_name, transform=data_crs,
                           add_colorbar=False, add_labels=False, alpha=alpha, zorder=z)
             if kind == "contour":
-                kw = dict(levels=opts["levels"], linewidths=opts["linewidths"],
+                levels = _levels_of(shifted.values, opts)
+                kw = dict(levels=levels, linewidths=opts["linewidths"],
                           linestyles=opts["linestyles"],
                           negative_linestyles=opts["negative_linestyles"])
                 # vmin/vmax pick the levels even for single-colour lines, so a
                 # GIF's frozen range keeps each frame's contours at the same values
                 kw.update(vmin=opts["vmin"], vmax=opts["vmax"])
-                if opts["cmap"]:
-                    kw["cmap"] = opts["cmap"]
+                given = layer["options"]
+                rainbow = look["palette"] == "grads.rainbow" and not given.get("colors")
+                if opts["cmap"] or rainbow:
+                    kw["cmap"] = palettes.get(opts["cmap"] or look["palette"])
                 else:
                     kw["colors"] = opts["colors"]
                 artist = shifted.plot.contour(**common, **kw)
+                # after drawing, not before: a count (or no levels at all)
+                # leaves matplotlib to choose them, and which line is the Nth
+                # can only be answered once they exist
+                heavy = _emphasise(artist, opts, "cmap" in kw)
                 if opts["labels"]:
-                    ax.clabel(artist, fmt=opts["label_fmt"],
+                    ax.clabel(artist, levels=_labelled(artist, opts, heavy),
+                              fmt=opts["label_fmt"],
                               fontsize=opts["label_fontsize"], inline=True)
-                if opts["colorbar"] and opts["cmap"]:
-                    colorbars.append((artist, _field_label(viewer, layer, da, lvl)))
+                if opts["colorbar"] and "cmap" in kw:
+                    colorbars.append({"artist": artist, "extend": "neither",
+                                      "label": _field_label(viewer, layer, da, lvl)})
             else:
-                norm = _norm(opts, opts["vmin"], opts["vmax"])
-                kw = dict(cmap=opts["cmap"], robust=opts["robust"], center=opts["center"],
-                          extend=opts["extend"])
-                if norm is not None:
-                    kw["norm"] = norm
+                cmap = palette(layer, opts)
+                if opts.get("bands"):
+                    # bands need their edges before drawing, so the range is
+                    # settled here rather than left to xarray
+                    lo, hi = _auto_range(shifted.values, opts)
+                    cmap, norm, _ = palettes.scale(
+                        {**opts, "cmap": layer["options"].get("cmap") or look["palette"]
+                         or "viridis"}, lo, hi)
+                    kw = dict(cmap=cmap, norm=norm, extend=opts["extend"])
                 else:
-                    kw.update(vmin=opts["vmin"], vmax=opts["vmax"])
-                if opts["center"] is None:
-                    kw.pop("center")
+                    norm = _norm(opts, opts["vmin"], opts["vmax"])
+                    kw = dict(cmap=cmap, robust=opts["robust"], center=opts["center"],
+                              extend=opts["extend"])
+                    if norm is not None:
+                        kw["norm"] = norm
+                    else:
+                        kw.update(vmin=opts["vmin"], vmax=opts["vmax"])
+                    if opts["center"] is None:
+                        kw.pop("center")
                 if kind == "contourf":
-                    kw["levels"] = opts["levels"]
+                    kw["levels"] = _levels_of(shifted.values, opts)
                     if opts["hatches"]:
                         kw["hatches"] = opts["hatches"]
                 elif kind == "pcolormesh":
@@ -660,8 +900,15 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                 elif kind == "imshow":
                     kw["interpolation"] = opts["interpolation"]
                 artist = getattr(shifted.plot, kind)(**common, **kw)
+                if kind == "contourf":
+                    # a discrete cmap built from `levels` would drop the extremes
+                    artist.set_cmap(artist.get_cmap().with_extremes(
+                        under=cmap.get_under(), over=cmap.get_over(), bad=cmap.get_bad()))
                 if opts["colorbar"]:
-                    colorbars.append((artist, _field_label(viewer, layer, da, lvl)))
+                    colorbars.append({"artist": artist, "extend": opts["extend"],
+                                      "label": _field_label(viewer, layer, da, lvl),
+                                      "format": opts["colorbar_format"],
+                                      "ticks": opts["colorbar_ticks"]})
             described.append(f"{spec['label']} {layer['var']}"
                              + _level_text(viewer, layer["var"], lvl))
 
@@ -680,7 +927,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                           linewidth=opts["linewidth"], arrowsize=opts["arrowsize"],
                           zorder=z)
                 if opts["colorize"]:
-                    kw.update(color=speed, cmap=opts["cmap"])
+                    kw.update(color=speed, cmap=palette(layer, opts))
                 else:
                     kw["color"] = opts["color"]
                 artist = ax.streamplot(lon, lat, uu, vv, **kw)
@@ -688,7 +935,8 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                 artist.arrows.set_alpha(alpha)
                 if opts["colorize"] and opts["colorbar"]:
                     units = _speed_units(viewer, layer["u"])
-                    colorbars.append((artist.lines, f"speed [{units}]"))
+                    colorbars.append({"artist": artist.lines, "extend": "neither",
+                                      "label": f"speed [{units}]"})
             else:
                 target = 30 if kind == "quiver" else 22
                 sy = _stride(lat.size, target, opts["stride"])
@@ -704,10 +952,11 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                         kw["width"] = opts["width"]
                     if opts["colorize"]:
                         artist = ax.quiver(X, Y, U, V, np.hypot(U, V),
-                                           cmap=opts["cmap"], **kw)
+                                           cmap=palette(layer, opts), **kw)
                         if opts["colorbar"]:
-                            colorbars.append(
-                                (artist, f"speed [{_speed_units(viewer, layer['u'])}]"))
+                            units = _speed_units(viewer, layer["u"])
+                            colorbars.append({"artist": artist, "extend": "neither",
+                                              "label": f"speed [{units}]"})
                     else:
                         artist = ax.quiver(X, Y, U, V, color=opts["color"], **kw)
                     if opts["key"]:
@@ -770,21 +1019,102 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                 global_view=viewer.cyclic and box[1] - box[0] >= 359.0 - 2 * _cell(viewer),
                 ccrs=ccrs)
 
-    horizontal = fig_opts.get("colorbar", "bottom") == "bottom"
-    for artist, label in reversed(colorbars):              # top layer nearest the map
-        fig.colorbar(artist, ax=ax, orientation="horizontal" if horizontal else "vertical",
-                     shrink=0.8 if horizontal else 0.9, aspect=45 if horizontal else 30,
-                     pad=0.06 if horizontal else 0.03, label=label)
+    style = fig_opts.get("colorbar_style") or look["colorbar_style"]
+    side = fig_opts.get("colorbar") or ("right" if style == "ferret" else "bottom")
+    for entry in reversed(colorbars):                      # top layer nearest the map
+        _colorbar(fig, ax, entry, style, side)
 
     title = fig_opts.get("title")
     if not title:
         title = viewer.labels[time] + (f"\n{' · '.join(reversed(described))}"
                                        if described else "")
+    if fig_opts.get("subtitle"):
+        title = f"{title}\n{fig_opts['subtitle']}"
     # a figure title, not an axes one: constrained layout reserves no room for
     # an axes title over a non-rectangular map (Lambert, Orthographic), and it
     # was placed above the top edge of the figure and cut off
     fig.suptitle(title, fontsize=10)
+    _footnotes(fig, fig_opts.get("footnote_left"), fig_opts.get("footnote_right"))
     return ax
+
+
+def _colorbar(fig, ax, entry: dict, style: str, side: str):
+    """One colorbar, drawn the way the look's tool draws its colour key.
+
+    - matplotlib: a plain continuous bar.
+    - grads: GrADS' `cbarn` -- each colour its own outlined box, labelled at
+      the boundaries between colours, with pointed ends when the range is
+      extended.
+    - ferret: Ferret's shade key -- boxed colours down the side, a label at
+      every level boundary.
+
+    The style changes only how the bar is drawn; a look never adds bands.
+    """
+    import matplotlib.ticker as mticker
+
+    artist = entry["artist"]
+    horizontal = side == "bottom"
+    boundaries = getattr(getattr(artist, "norm", None), "boundaries", None)
+    if boundaries is None and getattr(artist, "levels", None) is not None \
+            and getattr(artist, "filled", False):
+        boundaries = artist.levels
+    boxed = style in ("grads", "ferret") and boundaries is not None
+    kw = dict(ax=ax, orientation="horizontal" if horizontal else "vertical",
+              label=entry["label"], extend=entry.get("extend", "neither"))
+    if style == "matplotlib":
+        kw.update(shrink=0.8 if horizontal else 0.9, aspect=45 if horizontal else 30,
+                  pad=0.06 if horizontal else 0.03)
+    else:
+        kw.update(shrink=0.9 if horizontal else 0.95, aspect=40 if horizontal else 25,
+                  pad=0.05 if horizontal else 0.03, drawedges=boxed,
+                  extendrect=False, extendfrac="auto")
+    if getattr(artist, "filled", True) is False:
+        kw.pop("extend")                                    # contour lines: no ends
+    cb = fig.colorbar(artist, **kw)
+    if style != "matplotlib":
+        cb.outline.set_linewidth(1.0)
+        cb.outline.set_edgecolor("black")
+    if boxed:
+        cb.dividers.set_color("black")
+        cb.dividers.set_linewidth(0.8)
+        edges = [float(b) for b in boundaries]
+        if style == "grads":
+            ticks = edges[1:-1] or edges                    # between the boxes
+        else:
+            # every boundary, thinned once there are more than 20
+            step = max(1, int(np.ceil(len(edges) / 20)))
+            ticks = edges[::step]
+        cb.set_ticks(ticks)
+    ticks = entry.get("ticks")
+    if isinstance(ticks, int):
+        cb.locator = mticker.MaxNLocator(ticks)
+    elif isinstance(ticks, list):
+        cb.set_ticks(ticks)
+    if entry.get("format"):
+        cb.formatter = mticker.FormatStrFormatter(entry["format"])
+    elif boxed:
+        # band edges are exact and rarely round (247.6034...); four significant
+        # figures reads like GrADS' and Ferret's own key labels
+        cb.formatter = mticker.FormatStrFormatter("%.4g")
+    cb.update_ticks()
+    return cb
+
+
+def _footnotes(fig, left, right) -> None:
+    """Small text under the figure. Built on `supxlabel`, which constrained
+    layout reserves room for, so a footnote never overlaps a colorbar or falls
+    off the figure on a non-rectangular map. A right-hand footnote beside a
+    left-hand one is placed on the left one's line, wherever layout puts it."""
+    from matplotlib.text import Annotation
+
+    if left:
+        anchor = fig.supxlabel(left, x=0.01, ha="left", fontsize=7)
+        if right:
+            fig.add_artist(Annotation(right, xy=(0.99, 0.5),
+                                      xycoords=("figure fraction", anchor),
+                                      ha="right", va="center", fontsize=7))
+    elif right:
+        fig.supxlabel(right, x=0.99, ha="right", fontsize=7)
 
 
 def _in_frame(viewer, da, central: float):

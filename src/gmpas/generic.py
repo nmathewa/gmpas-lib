@@ -30,13 +30,14 @@ from pathlib import Path
 
 import numpy as np
 
+from . import colour as _colour
 from . import data as _data
 from . import layers as _layers
-from . import netcdf, timing
+from . import netcdf, palettes, timing
 from .cache import BuildCache, view_budget
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
-from .viewer import CMAPS, _overlay, _png, ramp
+from .viewer import _overlay, _png
 
 # How each axis is recognised, strongest evidence first. These are the CF
 # conventions' own markers, the same ones cf_xarray keys on -- `standard_name`,
@@ -189,8 +190,49 @@ KIND_LABELS = {
 }
 _GRID_KINDS = ("pcolormesh", "contourf", "contour", "imshow")
 
+#: What each plot kind actually uses, so the page can show, hide or disable a
+#: control from one table instead of each control deciding for itself. Written
+#: here rather than in the page because the answers come from what `plot`,
+#: `frame`, `gif` and `netcdf` below really do with each kind.
+#:
+#: colour  the colormap picker and colour range
+#: options the fast map's colour options (bands, extremes): its encoder only
+#: pan     pan, zoom, reset view and the graticule: a map on a geographic axis
+#: frames  cached palette frames, which is what the top bar's play button plays
+#: probe   the clicked point, which the plot is taken at
+#: gif     an animated export
+#: data    netCDF export
+#: data is False almost everywhere here: `netcdf` below exports the Hovmöller
+#: only, where the numbers behind the picture are not in the input files
+_KIND_MAP = {"colour": True, "options": True, "pan": True, "frames": True,
+             "probe": True, "gif": True, "data": False}
+_KIND_FIGURE = {**_KIND_MAP, "pan": False, "frames": False}
+_KIND_LINE = {**_KIND_FIGURE, "colour": False, "options": False}
+KIND_CAPS = {
+    "map": _KIND_MAP,
+    "auto": _KIND_FIGURE,
+    **{k: _KIND_FIGURE for k in _GRID_KINDS},
+    "line": _KIND_LINE,
+    "step": _KIND_LINE,
+    "hist": {**_KIND_LINE, "probe": False},
+    "series": _KIND_LINE,
+    "profile": _KIND_LINE,
+    # its own panel drives it: colour comes from the picker and the range, and
+    # the band options the encoder applies are not part of a matplotlib figure
+    "hovmoller": {**_KIND_FIGURE, "options": False, "probe": False, "gif": False,
+                  "data": True},
+    # every layer carries its own colours, so the shared picker means nothing
+    "layers": {**_KIND_FIGURE, "colour": False, "options": False, "probe": False},
+}
+
 #: a non-map variable is read whole to plot it; past this it is refused
 PLOT_READ_BYTES = 256 * 1024 * 1024
+
+#: the fast map's colour options and their checking live in `gmpas.colour`,
+#: the one place both viewers get their colours from; these names stay because
+#: the page handler duck-types on `clean_colour` and callers import them
+COLOUR_OPTIONS = _colour.OPTIONS
+clean_colour = _colour.clean
 
 #: a figure-per-frame GIF renders each step through matplotlib (~0.3 s each)
 GIF_FIGURE_FRAMES = 1000
@@ -391,6 +433,7 @@ class GenericViewer:
         self._steps, self.labels = self._axis()
         self.scanning = False
         self.series = self
+        palettes.register()           # cmo.*, ferret.*, grads.* for this viewer's picker
         # Hovmöller results and the jobs reading them; see hovmoller_progress
         self._hov_cache = BuildCache(budget=view_budget())
         self._hov_jobs: dict = {}
@@ -664,9 +707,9 @@ class GenericViewer:
             "home": list(self.home),
             "nx": self.nx,
             "ny": self.ny,
-            "cmaps": CMAPS,
-            "ramps": {name: ramp(name) for name in CMAPS},
+            **_colour.describe(),
             "kind_labels": KIND_LABELS,
+            "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),
             "variables": variables,
         }
@@ -691,7 +734,17 @@ class GenericViewer:
                              dtype=np.float64)
         return arr[np.ix_(frow - r0, fcol - c0)]
 
+    @staticmethod
+    def clean_colour(colour) -> dict:
+        """The fast map's colour options, checked (see `clean_colour`)."""
+        return clean_colour(colour)
+
     def _raster(self, var, step, level, extent, nx, ny) -> np.ndarray:
+        return self._raster_masked(var, step, level, extent, nx, ny)[0]
+
+    def _raster_masked(self, var, step, level, extent, nx, ny):
+        """`_raster`, and which pixels fall on the grid at all -- so a colour for
+        missing cells paints NaN data but never the area beyond a regional grid."""
         """The field sampled onto exactly the (ny, nx) pixels of `extent`.
 
         Row 0 is the southernmost row, as `_png` expects. Pixels beyond a
@@ -705,11 +758,12 @@ class GenericViewer:
         cols, col_in = _nearest_along(self.lon, lon_t, self.cyclic)
         rows, row_in = _nearest_along(self.lat, lat_t, False)
         img = np.full((ny, nx), np.nan)
+        on_grid = row_in[:, None] & col_in[None, :]
         if not (row_in.any() and col_in.any()):
-            return img
+            return img, on_grid
         vals = self._gather(var, step, level, rows[row_in], cols[col_in])
         img[np.ix_(row_in, col_in)] = vals
-        return img
+        return img, on_grid
 
     def _slice(self, var: str, time: int, level: int, extent) -> np.ndarray:
         """The grid's own cells inside `extent`, ascending, at native resolution."""
@@ -721,15 +775,25 @@ class GenericViewer:
         return self._gather(var, time, level, i, j)
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
-              nx=None, ny=None, compress=1):
+              nx=None, ny=None, compress=1, colour=None, meta=None):
+        """A map frame. With no `colour` options this is `viewer._png`, byte for
+        byte; with them, `palettes.encode`, and `meta["colorbar"]` describes
+        the bar the page should draw beside it."""
         nx, ny = nx or self.nx, ny or self.ny
         if var not in self._spatial_vars():
             # no colour range for a plain plot; 0..1 is an unused placeholder
             return self.plot(var, time, level, "auto", extent, nx, ny), 0.0, 1.0
 
-        img = self._raster(var, time, level, extent, nx, ny)
+        if not clean_colour(colour):
+            # the plain path does not need the mask, so it does not build one
+            img = self._raster(var, time, level, extent, nx, ny)
+            lo, hi = self._range(img, vmin, vmax)
+            return _png(img, cmap, lo, hi, compress), lo, hi
+
+        img, on_grid = self._raster_masked(var, time, level, extent, nx, ny)
         lo, hi = self._range(img, vmin, vmax)
-        return _png(img, cmap, lo, hi, compress), lo, hi
+        return _colour.frame_png(img, cmap, lo, hi, compress, colour,
+                                 outside=~on_grid, meta=meta), lo, hi
 
     @staticmethod
     def _range(img, vmin, vmax) -> tuple[float, float]:
@@ -1133,7 +1197,7 @@ class GenericViewer:
             return da.load()
 
     def _draw(self, fig, var, time, level, kind, extent, cmap, vmin, vmax, lon, lat,
-              hov=None, layers=None):
+              hov=None, layers=None, colour=None):
         """Put one plot on `fig`. Shared by the live plot, figures and GIF frames."""
         import matplotlib.pyplot as plt  # noqa: F401  (backend already chosen)
 
@@ -1156,6 +1220,20 @@ class GenericViewer:
             method = kind if kind != "map" else (
                 "imshow" if self._even(da) else "pcolormesh")
             opts = dict(cmap=cmap or None, vmin=vmin, vmax=vmax)
+            colours = clean_colour(colour)
+            if colours:
+                # the fast map's colours, in a figure: the same range rule as
+                # the map (_range) and the same colormap and norm (palettes.scale)
+                lo, hi = self._range(np.asarray(da.values, float), vmin, vmax)
+                levels = None
+                if colours.get("bands") and method in ("contour", "contourf"):
+                    # contours band by their levels, not by a norm
+                    levels = list(palettes.band_edges(lo, hi, colours["bands"]))
+                    colours = {**colours, "bands": None}
+                cm, norm, _ = palettes.scale({**colours, "cmap": cmap or "viridis"}, lo, hi)
+                opts = dict(cmap=cm, norm=norm, extend=colours.get("extend") or "neither")
+                if levels is not None:
+                    opts["levels"] = levels
             if method != "contour":
                 # under the map, not beside it: a 2:1 map leaves a vertical
                 # colorbar twice the map's height and the plot squeezed
@@ -1385,7 +1463,7 @@ class GenericViewer:
 
     def _render(self, var, time, level, kind, extent, figsize, dpi,
                 cmap=None, vmin=None, vmax=None, lon=None, lat=None, hov=None,
-                meta=None, layers=None) -> bytes:
+                meta=None, layers=None, colour=None) -> bytes:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -1393,7 +1471,7 @@ class GenericViewer:
         fig = plt.figure(figsize=figsize, dpi=dpi, layout="constrained")
         try:
             ax = self._draw(fig, var, time, level, kind, extent, cmap, vmin, vmax,
-                            lon, lat, hov, layers)
+                            lon, lat, hov, layers, colour)
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=dpi)
             if meta is not None and kind == "hovmoller":
@@ -1404,7 +1482,7 @@ class GenericViewer:
 
     def plot(self, var, time, level, kind, extent, width=900, height=560,
              cmap=None, vmin=None, vmax=None, lon=None, lat=None, hov=None,
-             meta=None, layers=None) -> bytes:
+             meta=None, layers=None, colour=None) -> bytes:
         """The live plot pane: `kind` drawn at the browser's pixel size.
 
         `hov` holds a Hovmöller's band, longitudes, steps, method and time
@@ -1416,12 +1494,13 @@ class GenericViewer:
         width, height = int(np.clip(width, 200, 4000)), int(np.clip(height, 150, 3000))
         return self._render(var, time, level, kind, extent,
                             (width / 100, height / 100), 100, cmap, vmin, vmax, lon, lat,
-                            hov, meta, layers)
+                            hov, meta, layers, colour)
 
     # -- export ------------------------------------------------------------
 
     def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
-               kind="map", lon=None, lat=None, hov=None, layers=None) -> bytes:
+               kind="map", lon=None, lat=None, hov=None, layers=None,
+               colour=None) -> bytes:
         """A publication-shaped figure of what is on screen.
 
         Sized by the same `Style` presets as the MPAS path. The fast map
@@ -1434,10 +1513,11 @@ class GenericViewer:
         if var not in self._spatial_vars() and kind == "map":
             kind = "auto"
         return self._render(var, time, level, kind, extent, st.figsize, st.dpi,
-                            cmap, vmin, vmax, lon, lat, hov, None, layers)
+                            cmap, vmin, vmax, lon, lat, hov, None, layers, colour)
 
     def gif(self, var, level, extent, cmap, vmin, vmax, nx=None, ny=None, fps=8,
-            kind="map", lon=None, lat=None, hov=None, layers=None) -> bytes:
+            kind="map", lon=None, lat=None, hov=None, layers=None,
+            colour=None) -> bytes:
         """Every timestep as one animated GIF, drawn the way the screen is.
 
         The fast map re-containers its own palette frames, as `Viewer.gif`
@@ -1466,7 +1546,7 @@ class GenericViewer:
                                          vmin, vmax)
             for step in range(n):
                 png, _, _ = self.frame(var, step, level, extent, cmap, vmin, vmax,
-                                       nx, ny, compress=1)
+                                       nx, ny, compress=1, colour=colour)
                 frames.append(Image.open(io.BytesIO(png)).convert("P"))
             transparency = {"transparency": 255}
         else:
@@ -1498,7 +1578,7 @@ class GenericViewer:
                 fig = plt.figure(figsize=st.figsize, dpi=80, layout="constrained")
                 try:
                     ax = self._draw(fig, var, step, level, kind, extent, cmap,
-                                    vmin, vmax, lon, lat, hov, layers)
+                                    vmin, vmax, lon, lat, hov, layers, colour)
                     if kind == "profile":
                         pad = 0.02 * (hi - lo or 1.0)
                         ax.set_xlim(lo - pad, hi + pad)
@@ -1517,7 +1597,7 @@ class GenericViewer:
         return buf.getvalue()
 
     def netcdf(self, var, time, level, extent, nx=None, ny=None, kind=None,
-               lon=None, lat=None, hov=None, layers=None) -> bytes:
+               lon=None, lat=None, hov=None, layers=None, colour=None) -> bytes:
         """The numbers behind a Hovmöller, as netCDF. Other kinds: not yet."""
         if kind != "hovmoller":
             raise NotImplementedError(

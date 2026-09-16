@@ -108,12 +108,17 @@ def cell_field(mesh: MpasMesh, values: np.ndarray, *, style: Style | None = None
                cmap: str = "", vmin=None, vmax=None, symmetric: bool = False,
                robust: bool = True, extent=None, central_lon: float = 0.0,
                label: str = "", title: str = "", method: str = "auto",
-               nx: int = 1600, ny: int = 900):
+               nx: int = 1600, ny: int = 900, norm=None, extend: str = "neither"):
     """Fill each Voronoi cell with a cell-centred scalar.
 
     method: poly   -- one matplotlib polygon per cell, exact cell outlines
             raster -- KD-tree Voronoi lookup onto a pixel grid, O(pixels)
             auto   -- poly for small meshes, raster above ~150k cells
+
+    `cmap` may be a name or a Colormap. `norm`, when given, carries the whole
+    value-to-colour mapping -- discrete bands, a power scale -- and replaces
+    vmin/vmax; `extend` puts the matching triangles on the colorbar. The viewer
+    passes what its fast map used, so an exported figure matches the screen.
     """
     import cartopy.crs as ccrs
     from matplotlib.collections import PolyCollection
@@ -127,12 +132,14 @@ def cell_field(mesh: MpasMesh, values: np.ndarray, *, style: Style | None = None
 
     if should_raster(mesh, method):
         return _cell_field_raster(mesh, values, style, cmap, lo, hi, extent,
-                                  central_lon, label, title, nx, ny)
+                                  central_lon, label, title, nx, ny, norm, extend)
 
     fig, ax = _basemap(mesh, style, extent, central_lon)
 
     def _add(verts, vals):
-        pc = PolyCollection(verts, array=vals, cmap=cmap, clim=(lo, hi),
+        pc = PolyCollection(verts, array=vals, cmap=cmap,
+                            **(dict(norm=norm) if norm is not None else
+                               dict(clim=(lo, hi))),
                             transform=ccrs.PlateCarree(), edgecolors="face",
                             linewidths=style.edge_lw)
         ax.add_collection(pc, autolim=False)
@@ -146,7 +153,7 @@ def cell_field(mesh: MpasMesh, values: np.ndarray, *, style: Style | None = None
         dup[..., 0] -= 360.0
         _add(dup, values[mesh.cell_wrapped])
 
-    cb = fig.colorbar(pc, ax=ax, shrink=0.8, pad=0.02)
+    cb = fig.colorbar(pc, ax=ax, shrink=0.8, pad=0.02, extend=extend)
     if label:
         cb.set_label(label, size=style.label_size)
     if title:
@@ -155,7 +162,7 @@ def cell_field(mesh: MpasMesh, values: np.ndarray, *, style: Style | None = None
 
 
 def _cell_field_raster(mesh, values, style, cmap, lo, hi, extent, central_lon,
-                       label, title, nx, ny):
+                       label, title, nx, ny, norm=None, extend="neither"):
     """Raster path: cost scales with pixels, not with cell count."""
     box = resolve_extent(mesh, extent)
     # rasterize works in geographic degrees and is happy past +180, since the
@@ -164,10 +171,11 @@ def _cell_field_raster(mesh, values, style, cmap, lo, hi, extent, central_lon,
 
     fig, ax = _basemap(mesh, style, extent, central_lon)
     _, src, framed = _frame(box, central_lon)
-    im = ax.imshow(img, origin="lower", extent=framed, cmap=cmap, vmin=lo, vmax=hi,
+    im = ax.imshow(img, origin="lower", extent=framed, cmap=cmap,
+                   **(dict(norm=norm) if norm is not None else dict(vmin=lo, vmax=hi)),
                    transform=src, interpolation="nearest")
 
-    cb = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+    cb = fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02, extend=extend)
     if label:
         cb.set_label(label, size=style.label_size)
     if title:
@@ -181,7 +189,8 @@ def _cell_field_raster(mesh, values, style, cmap, lo, hi, extent, central_lon,
 def edge_field(mesh: MpasMesh, values: np.ndarray, *, style: Style | None = None,
                cmap: str = "", vmin=None, vmax=None, symmetric: bool = True,
                robust: bool = True, extent=None, central_lon: float = 0.0,
-               linewidth: float = 1.2, label: str = "", title: str = ""):
+               linewidth: float = 1.2, label: str = "", title: str = "",
+               norm=None, extend: str = "neither"):
     """Colour each Voronoi cell face by an edge-centred scalar.
 
     Edge quantities (normal velocity `u`, fluxes) live on the faces between
@@ -202,7 +211,9 @@ def edge_field(mesh: MpasMesh, values: np.ndarray, *, style: Style | None = None
     fig, ax = _basemap(mesh, style, extent, central_lon)
 
     def _add(segs, vals):
-        lc = LineCollection(segs, array=vals, cmap=cmap, clim=(lo, hi),
+        lc = LineCollection(segs, array=vals, cmap=cmap,
+                            **(dict(norm=norm) if norm is not None else
+                               dict(clim=(lo, hi))),
                             transform=ccrs.PlateCarree(), linewidths=linewidth)
         ax.add_collection(lc, autolim=False)
         return lc
@@ -213,7 +224,7 @@ def edge_field(mesh: MpasMesh, values: np.ndarray, *, style: Style | None = None
         dup[..., 0] -= 360.0
         _add(dup, values[mesh.edge_wrapped])
 
-    cb = fig.colorbar(lc, ax=ax, shrink=0.8, pad=0.02)
+    cb = fig.colorbar(lc, ax=ax, shrink=0.8, pad=0.02, extend=extend)
     if label:
         cb.set_label(label, size=style.label_size)
     if title:

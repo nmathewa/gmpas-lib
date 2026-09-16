@@ -25,6 +25,15 @@ the same cached geometry and KD-tree as `prep view`. Each request names a
 variable, timestep, level and view box; only the file holding that step is
 opened, and the values are gathered through the view index straight into a
 palette PNG.
+
+The colour picker offers matplotlib's colormaps, [cmocean](https://matplotlib.org/cmocean/)'s
+`cmo.*` set, the Ferret palettes (`ferret.*`, vendored from NOAA-PMEL) and the
+GrADS colours (`grads.*`). Beside it, **colour options** set discrete bands,
+reverse the palette, apply a log, symlog or power scale, and give out-of-range
+and missing values their own colours — with the colorbar drawn from exactly the
+colours the image was drawn with. All of it applies to `view` and
+`view --generic` alike, and to the figures and GIFs they export. A frame with
+no option set is encoded the way it always was.
 `scrip` and `target` prepare the two grid files a conservative remapper needs
 — see [Conservative remapping](./remapping.md).
 

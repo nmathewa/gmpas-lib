@@ -88,7 +88,7 @@ COUNTS = {name: 3 for name in SPATIAL}
     ({"layers": [{"kind": "contourf", "var": "t", "options": {"transform": 1}}]},
      "unknown option"),
     ({"layers": [{"kind": "contourf", "var": "t", "options": {"cmap": "__import__"}}]},
-     "not a matplotlib colormap"),
+     "not a known colormap"),
     ({"layers": [{"kind": "coastlines", "options": {"color": "red; x"}}]}, "not a colour"),
     ({"layers": [{"kind": "contour", "var": "t", "options": {"label_fmt": "%s%n"}}]},
      "printf number format"),
@@ -334,3 +334,21 @@ def test_every_projection_survives_every_view(gv, projection, extent):
     stack = {"figure": {"projection": projection},
              "layers": [{"kind": "contourf", "var": "t"}, {"kind": "coastlines"}]}
     _png(gv.plot("t", 0, 0, "layers", extent, 320, 240, layers=stack))
+
+
+def test_every_plot_kind_declares_what_its_controls_can_do(gv):
+    """The page shows, hides and disables from this table alone, so a kind
+    missing from it would silently get the fast map's controls."""
+    from gmpas.generic import KIND_CAPS, KIND_LABELS
+
+    assert set(KIND_CAPS) == set(KIND_LABELS)
+    keys = {"colour", "options", "pan", "frames", "probe", "gif", "data"}
+    assert all(set(caps) == keys for caps in KIND_CAPS.values())
+    assert gv.describe()["kind_caps"] == KIND_CAPS
+    # only the fast map has palette frames to pan over and play
+    assert [k for k, c in KIND_CAPS.items() if c["frames"]] == ["map"]
+    assert [k for k, c in KIND_CAPS.items() if c["pan"]] == ["map"]
+    # netCDF holds the numbers behind a picture the input files do not have
+    assert [k for k, c in KIND_CAPS.items() if c["data"]] == ["hovmoller"]
+    for kind in ("layers", "hovmoller", "series"):
+        assert not KIND_CAPS[kind]["options"], kind

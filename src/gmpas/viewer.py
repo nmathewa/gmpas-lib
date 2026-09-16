@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from . import colour as _colour
 from . import data as _data
 from . import timing
 from .cache import BuildCache
@@ -40,7 +41,10 @@ from .mesh import MpasMesh
 from .raster import target_grid
 from .series import Series
 
-#: colormaps offered in the picker, chosen to cover the usual field kinds
+#: the matplotlib colormaps offered in the picker, chosen to cover the usual
+#: field kinds. Both viewers now offer the cmocean, Ferret and GrADS palettes
+#: beside them -- see `gmpas.colour.describe` -- and this stays as the
+#: matplotlib group of that list, and as the set the prep pages draw from.
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo",
          "RdBu_r", "coolwarm", "BrBG", "Blues", "Spectral_r"]
 
@@ -108,6 +112,16 @@ class ViewIndex:
         """One field, sampled onto this view. A gather, nothing more."""
         img = np.asarray(values, dtype=np.float64)[self.idx].reshape(self.ny, self.nx)
         return np.where(self.blank, np.nan, img)
+
+    def frame_masked(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """The frame, and which pixels are on the mesh at all.
+
+        `frame` folds both kinds of emptiness into NaN, which is all the plain
+        encoder needs. Giving missing values a colour needs them apart: a cell
+        that holds NaN is missing data and takes that colour, a pixel with no
+        cell under it is off the mesh and stays transparent.
+        """
+        return self.frame(values), ~self.blank
 
 
 def _png(img: np.ndarray, cmap: str, vmin: float, vmax: float,
@@ -282,8 +296,7 @@ class Viewer:
             "home": list(self.home),
             "nx": self.nx,
             "ny": self.ny,
-            "cmaps": CMAPS,
-            "ramps": {name: ramp(name) for name in CMAPS},
+            **_colour.describe(),
             "variables": out,
         }
 
@@ -361,9 +374,23 @@ class Viewer:
             f"expression (a + b, a - b, a * b, a / b, hypot(a, b), or diff(a))"
         )
 
+    #: the handler forwards a colour parameter only to a viewer that has this,
+    #: and returns the bar it produces as the X-Colorbar header
+    clean_colour = staticmethod(_colour.clean)
+
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
-              nx=None, ny=None, compress=1):
-        img = self.view(extent, nx, ny).frame(self.values(var, time, level))
+              nx=None, ny=None, compress=1, colour=None, meta=None):
+        """A map frame. Without `colour` options this is what it always was,
+        byte for byte; with them the indexed encoder draws it and `meta` comes
+        back holding the bar the page should draw beside it."""
+        view = self.view(extent, nx, ny)
+        values = self.values(var, time, level)
+        # the plain path does not need the mask, so it does not build one
+        on_grid = None
+        if _colour.clean(colour):
+            img, on_grid = view.frame_masked(values)
+        else:
+            img = view.frame(values)
 
         if vmin is not None and vmax is not None:
             lo, hi = vmin, vmax        # animation fixes the range: measure nothing
@@ -382,11 +409,14 @@ class Viewer:
                 float(np.percentile(finite, 98)) if finite.size else 1.0)
         if hi <= lo:
             hi = lo + 1.0
-        return _png(img, cmap, lo, hi, compress), lo, hi
+        outside = None if on_grid is None else ~on_grid
+        return _colour.frame_png(img, cmap, lo, hi, compress, colour,
+                                 outside=outside, meta=meta), lo, hi
 
     # -- export ----------------------------------------------------------
 
-    def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper"):
+    def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
+               colour=None):
         """A publication-shaped figure, not the bare raster the browser shows.
 
         Goes through the ordinary plotting path so it gets cartopy axes,
@@ -413,8 +443,12 @@ class Viewer:
         if int(da.sizes.get("nVertLevels", 1)) > 1:
             title += f"  (level {level})"
 
+        # the exported figure is drawn by matplotlib, not by the fast map's
+        # encoder, so the options become a colormap and a norm here
+        lo, hi = self._figure_range(values, vmin, vmax, colour)
+        cm, norm, extend = _colour.figure_scale(cmap, lo, hi, colour)
         fig, _ = cell_field(self.mesh, values, style=Style.preset(style),
-                            cmap=cmap or "viridis", vmin=vmin, vmax=vmax,
+                            cmap=cm, vmin=vmin, vmax=vmax, norm=norm, extend=extend,
                             extent=tuple(extent), label=label, title=title)
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=Style.preset(style).dpi)
@@ -422,7 +456,23 @@ class Viewer:
         plt.close(fig)
         return buf.getvalue()
 
-    def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8):
+    @staticmethod
+    def _figure_range(values, vmin, vmax, colour):
+        """The range a coloured figure spans, settled before it is drawn.
+
+        Bands and a power scale need their edges up front, and they have to be
+        the edges `cell_field` would have used, or the key would describe a
+        picture the figure does not draw. So this is `plot._limits`, the rule
+        that function applies to the same values.
+        """
+        if not _colour.clean(colour):
+            return 0.0, 1.0                       # unused: no norm is built
+        from .plot import _limits
+
+        return _limits(np.asarray(values).squeeze(), vmin, vmax,
+                       symmetric=False, robust=True)
+
+    def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8, colour=None):
         """Every timestep as one animated GIF.
 
         Frames are already palette images, which is exactly what GIF wants, so
@@ -433,7 +483,7 @@ class Viewer:
         frames = []
         for step in range(len(self.series)):
             png, _, _ = self.frame(var, step, level, extent, cmap,
-                                   vmin, vmax, nx, ny, compress=1)
+                                   vmin, vmax, nx, ny, compress=1, colour=colour)
             frames.append(Image.open(io.BytesIO(png)).convert("P"))
 
         buf = io.BytesIO()
@@ -442,7 +492,7 @@ class Viewer:
                        disposal=2, transparency=255)
         return buf.getvalue()
 
-    def netcdf(self, var, time, level, extent, nx, ny):
+    def netcdf(self, var, time, level, extent, nx, ny, colour=None):
         """The current view sampled onto a regular lat-lon grid, as netCDF.
 
         NEAREST-CELL SAMPLING, not a conservative remap: every point takes the
@@ -543,6 +593,8 @@ def _plot_extras(q: dict) -> dict:
         out["kind"] = q["kind"]
     if q.get("layers"):
         out["layers"] = q["layers"]            # JSON text; gmpas.layers checks it
+    if q.get("colour"):
+        out["colour"] = q["colour"]            # JSON text; generic.clean_colour checks it
     for key in ("lon", "lat"):
         if q.get(key):
             out[key] = float(q[key])
@@ -639,6 +691,11 @@ def _handler(viewer: Viewer, html: str = ""):
                                       "application/json")
                 if url.path == "/api/frame":
                     extent = [float(v) for v in q["extent"].split(",")]
+                    # colour options only for a viewer that has them (--generic);
+                    # the MPAS viewer's frame call is exactly what it was
+                    colours: dict = {}
+                    if hasattr(viewer, "clean_colour") and q.get("colour"):
+                        colours = {"colour": q["colour"], "meta": {}}
                     png, lo, hi = viewer.frame(
                         q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
                         extent, q.get("cmap", "viridis"),
@@ -647,10 +704,15 @@ def _handler(viewer: Viewer, html: str = ""):
                         int(q["nx"]) if q.get("nx") else None,
                         int(q["ny"]) if q.get("ny") else None,
                         int(q.get("compress", 1)),
+                        **colours,
                     )
                     self.send_response(200)
                     self.send_header("Content-Type", "image/png")
                     self.send_header("X-Range", f"{lo},{hi}")
+                    if colours.get("meta", {}).get("colorbar"):
+                        # ASCII JSON: header values are latin-1
+                        spec = json.dumps(colours["meta"]["colorbar"])
+                        self.send_header("X-Colorbar", spec)
                     self.send_header("Content-Length", str(len(png)))
                     self.end_headers()
                     return self.wfile.write(png)
@@ -1112,7 +1174,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #stage.plotting #msg{top:auto;bottom:14px}   /* keep off the figure's own title */
 /* --generic layers: a stack editor in a wider right panel */
 body.layering #right{width:330px}
-body.layering #cmapsec,body.layering #rangesec{display:none}
+body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:none}
 #lyList{margin-top:8px;border:1px solid var(--line);border-radius:4px}
 .lyrow{display:flex;align-items:center;gap:5px;padding:5px 6px;
        border-bottom:1px solid var(--line);font-size:12px;cursor:pointer;user-select:none}
@@ -1125,8 +1187,12 @@ body.layering #cmapsec,body.layering #rangesec{display:none}
 .lyrow button{padding:1px 5px;font-size:11px;min-width:0}
 .lygroup{color:var(--dim);font-size:10px;text-transform:uppercase}
 #lyEdit{margin-top:10px}
-#lyEdit .f,#lyFigForm .f{display:grid;grid-template-columns:108px 1fr;gap:4px 8px;
-       align-items:center;margin-bottom:4px;font-size:11px;color:var(--dim)}
+#lyEdit .f,#lyFigForm .f,#colourForm .f{display:grid;grid-template-columns:78px 1fr;
+       gap:4px 6px;align-items:center;margin-bottom:4px;font-size:11px;color:var(--dim)}
+#colourForm .f input,#colourForm .f select{width:100%;box-sizing:border-box;font-size:11px;
+       padding:2px 4px}
+#colourForm .f .pair{display:flex;gap:4px}
+#colourForm .f input[type=color]{width:26px;padding:0;flex:none}
 #lyEdit .f input,#lyEdit .f select,#lyFigForm .f input,#lyFigForm .f select{
        width:100%;box-sizing:border-box;font-size:11px;padding:2px 4px}
 #lyEdit .f .pair{display:flex;gap:4px}
@@ -1164,6 +1230,12 @@ body.layering #cmapsec,body.layering #rangesec{display:none}
      pointer-events:none}
 #bar{padding:8px 14px;border-top:1px solid var(--line)}
 #ramp{height:14px;border-radius:2px;border:1px solid var(--line)}
+/* --generic colour options: a row with out-of-range triangles either side */
+.cbrow{display:flex;align-items:center}
+.cbrow #ramp{flex:1}
+#cbunder,#cbover{display:none;width:12px;height:16px;flex:none}
+#cbunder{clip-path:polygon(100% 0,100% 100%,0 50%)}
+#cbover{clip-path:polygon(0 0,100% 50%,0 100%)}
 #ticks{display:flex;justify-content:space-between;margin-top:3px;color:var(--dim);
        font-size:11px;font-variant-numeric:tabular-nums}
 #cblabel{color:var(--dim);font-size:11px;margin-bottom:4px}
@@ -1227,7 +1299,8 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
   </div>
   <div id="bar">
     <div id="cblabel"></div>
-    <div id="ramp"></div>
+    <div class="cbrow">
+      <div id="cbunder"></div><div id="ramp"></div><div id="cbover"></div></div>
     <div id="ticks"></div>
   </div>
 </div>
@@ -1280,6 +1353,13 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
 
   <div class="sec" id="cmapsec"><label>colormap</label><select id="cmap"></select></div>
 
+  <div class="sec" id="coloursec" style="display:none"><label>colour options</label>
+    <div id="colourForm"></div>
+    <div class="row" style="margin-top:6px"><button id="colourReset">reset</button></div>
+    <div class="hint" id="colourhint">bands, out-of-range and missing colours, reverse,
+      and a power scale -- also used by figures and animations</div>
+  </div>
+
   <div class="sec" id="rangesec"><label>colour range</label>
     <div class="row">
       <input type="text" id="vmin" placeholder="auto"><input type="text" id="vmax" placeholder="auto">
@@ -1290,14 +1370,14 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <div class="hint" id="rangehint"></div>
   </div>
 
-  <div class="sec"><label>extent</label>
+  <div class="sec" id="extentsec"><label>extent</label>
     <div class="row"><input type="text" id="elon0" placeholder="lon min"><input type="text" id="elon1" placeholder="lon max"></div>
     <div class="row" style="margin-top:6px"><input type="text" id="elat0" placeholder="lat min"><input type="text" id="elat1" placeholder="lat max"></div>
     <div class="row" style="margin-top:6px"><button id="applyext">apply</button><button id="copyext">copy</button></div>
     <div class="hint" id="exthint"></div>
   </div>
 
-  <div class="sec"><label>animation</label>
+  <div class="sec" id="animsec"><label>animation</label>
     <div class="kv"><span>frames / second</span><b id="fpslab">8</b></div>
     <input type="range" id="fps" min="1" max="24" value="8">
     <div class="kv" style="margin-top:8px"><span>quality</span><b id="qlab">fast</b></div>
@@ -1308,7 +1388,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <div class="hint" id="animhint"></div>
   </div>
 
-  <div class="sec"><label>export</label>
+  <div class="sec" id="exportsec"><label>export</label>
     <select id="figstyle" title="figure size and dpi">
       <option value="paper">paper &middot; 10x6 @130</option>
       <option value="notebook">notebook &middot; 9x5 @100</option>
@@ -1325,7 +1405,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
       and <b>not</b> area-conservative</div>
   </div>
 
-  <div class="sec"><label>probe</label>
+  <div class="sec" id="probesec"><label>probe</label>
     <div class="hint" id="probe2">click the map</div>
   </div>
 </div>
@@ -1368,7 +1448,21 @@ function clamp(){
 async function boot(){
   M = await (await fetch("api/meta")).json();
   $("#title").textContent = M.file;
-  M.cmaps.forEach(c=>{const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
+  if(M.palettes){                      // --generic: palettes grouped by their source
+    const names={matplotlib:"matplotlib", cmocean:"cmocean",
+                 ferret:"Ferret", grads:"GrADS"};
+    Object.entries(M.palettes).forEach(([group, list])=>{
+      if(!list.length) return;
+      const og=document.createElement("optgroup"); og.label=names[group]||group;
+      list.forEach(c=>{
+        const o=document.createElement("option"); o.textContent=c; og.append(o); });
+      $("#cmap").append(og);
+    });
+    colourOpen();
+  }else{
+    M.cmaps.forEach(c=>{
+      const o=document.createElement("option");o.textContent=c;$("#cmap").append(o)});
+  }
   if(M.layer_schema){                  // --generic: colormap suggestions for layer forms
     const dl=document.createElement("datalist"); dl.id="lyCmaps";
     M.cmaps.forEach(c=>{ const o=document.createElement("option"); o.value=c;
@@ -1436,8 +1530,22 @@ function plotMode(){
 // A plot is a whole matplotlib figure -- its own axes, labels and colorbar --
 // so the map's furniture (coastline overlay, graticule, colour ramp, pan and
 // zoom) steps aside rather than being drawn over or beside it.
+// What the current plot kind uses, from the server's table (gmpas/generic.py
+// KIND_CAPS). The MPAS page sends none and only ever draws the fast map, so
+// the fallback is the map's own set.
+const MAP_CAPS={colour:true, options:true, pan:true, frames:true, probe:true,
+                gif:true, data:true};
+function caps(){
+  if(!M) return MAP_CAPS;
+  const kind = (cur && cur.kinds && $("#kind").value) || "map";
+  return (M.kind_caps||{})[kind] || MAP_CAPS;
+}
+// One place decides what applies: a control that cannot do anything for this
+// plot is hidden, or disabled and left saying why. Before this, each control
+// set its own state and they disagreed -- the play button switched itself back
+// on whenever the animation list refreshed.
 function setMode(){
-  const p=plotMode();
+  const p=plotMode(), c=caps();
   $("#frame").style.display = p ? "none" : "";
   $("#plotimg").style.display = p ? "block" : "none";
   $("#bar").style.visibility = p ? "hidden" : "";
@@ -1446,9 +1554,24 @@ function setMode(){
   document.body.classList.toggle("layering", layering);
   $("#layersec").style.display = layering ? "" : "none";
   if(layering) lyOpen();
-  ["#zoom","#home","#anim","#grid"].forEach(id=>{ $(id).disabled=p; });
-  if(p) stopPlayback();
+  ["#zoom","#home","#grid"].forEach(id=>{ $(id).disabled=!c.pan; });
+  if(!c.frames) stopPlayback();
+  show("#cmapsec", c.colour); show("#rangesec", c.colour);
+  if(M.colour_options) show("#coloursec", c.options);
+  show("#animsec", c.frames); show("#probesec", c.probe);
   hovMode(p && $("#kind").value==="hovmoller");
+  renderAnimList();
+  exportModes();
+}
+function show(sel, on){ const el=$(sel); if(el) el.style.display = on ? "" : "none"; }
+// An export the kind cannot produce stays visible but disabled, so the button
+// tells you it is not on offer rather than vanishing as you look for it.
+function exportModes(){
+  const c=caps();
+  const off=(sel, why)=>{ const b=$(sel); if(!b) return;
+    b.disabled=!!why; b.title = why || ""; };
+  off("#expgif", c.gif ? "" : "this plot has no animated export");
+  off("#expnc", c.data ? "" : "netCDF export is for the map and the Hovmöller");
 }
 let probePt=null;       // last clicked map point: where series and profiles are taken
 // A derived expression ("a - b", "hypot(a,b)", "diff(a)") isn't in
@@ -1574,17 +1697,71 @@ function graticule(){
   }
 }
 
+let lastBar=null;          // --generic: the server's description of the bar
 function colorbar(lo,hi){
+  const fmt=v=>Math.abs(v)>=1e4||(v!==0&&Math.abs(v)<1e-3)
+    ? v.toExponential(2) : v.toPrecision(4);
+  if(lastBar){ return colorbarSpec(lastBar, fmt); }
+  $("#cbunder").style.display="none"; $("#cbover").style.display="none";
   const stops=M.ramps[$("#cmap").value];
   $("#ramp").style.background=`linear-gradient(90deg,${stops.join(",")})`;
   const n=5, out=[];
   for(let i=0;i<n;i++){
     const v=lo+(hi-lo)*i/(n-1);
-    out.push(`<span>${Math.abs(v)>=1e4||(v!==0&&Math.abs(v)<1e-3)?v.toExponential(2):v.toPrecision(4)}</span>`);
+    out.push(`<span>${fmt(v)}</span>`);
   }
   $("#ticks").innerHTML=out.join("");
   $("#cblabel").textContent=cur?cur.label:"";
 }
+// Bands as hard colour steps, triangles for the out-of-range colours: drawn
+// from the colours the server used for the image, so the two cannot disagree.
+function colorbarSpec(spec, fmt){
+  const s=spec.stops;
+  if(spec.edges){
+    const w=100/s.length;
+    $("#ramp").style.background="linear-gradient(90deg,"+
+      s.map((c,i)=>`${c} ${(i*w).toFixed(3)}% ${((i+1)*w).toFixed(3)}%`).join(",")+")";
+  }else{
+    $("#ramp").style.background=`linear-gradient(90deg,${s.join(",")})`;
+  }
+  const tri=(id, colour)=>{ const el=$(id);
+    el.style.display=colour?"block":"none"; if(colour) el.style.background=colour; };
+  tri("#cbunder", spec.under); tri("#cbover", spec.over);
+  const ticks = spec.edges && spec.edges.length<=13 ? spec.edges
+    : [0,1,2,3,4].map(i=>spec.lo+(spec.hi-spec.lo)*i/4);
+  $("#ticks").innerHTML=ticks.map(v=>`<span>${fmt(v)}</span>`).join("");
+  $("#cblabel").textContent=cur?cur.label:"";
+}
+
+// ------------------------------------------------------- colour options
+// --generic only: the fast map's bands, out-of-range and missing colours,
+// reverse and power scale. Saved per file; sent as one JSON parameter the
+// server checks against the same table layers use.
+let COL={};
+function colourKey(){ return "gmpas.colour."+M.file; }
+function colourParam(){
+  if(!M || !M.colour_options) return "";
+  return Object.keys(COL).length ? JSON.stringify(COL) : "";
+}
+function colourOpen(){
+  if(!M.colour_options) return;
+  try{ COL=JSON.parse(localStorage.getItem(colourKey())||"{}")||{}; }catch(e){ COL={}; }
+  $("#coloursec").style.display="";
+  colourForm();
+}
+function colourForm(){
+  const host=$("#colourForm"); host.innerHTML="";
+  Object.entries(M.colour_options).forEach(([k, spec])=>lyField(host, k.replace("_"," "),
+    spec, COL[k], v=>{
+      if(v===null) delete COL[k]; else COL[k]=v;
+      try{ localStorage.setItem(colourKey(), JSON.stringify(COL)); }catch(e){}
+      stopPlayback(); draw();
+    }));
+}
+$("#colourReset").onclick=()=>{
+  COL={}; try{ localStorage.removeItem(colourKey()); }catch(e){}
+  colourForm(); stopPlayback(); draw();
+};
 
 async function draw(){
   if(!cur) return;
@@ -1604,10 +1781,12 @@ async function draw(){
     nx:Math.round(M.nx*OUTSET), ny:Math.round(M.ny*OUTSET)});
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
+  if(colourParam()) p.set("colour", colourParam());
   const t0=performance.now();
   const r=await fetch("api/frame?"+p, {signal: ctrl.signal});
   if(!r.ok){ say((await r.json()).error); return; }
   const [lo,hi]=r.headers.get("X-Range").split(",").map(Number);
+  lastBar = r.headers.get("X-Colorbar") ? JSON.parse(r.headers.get("X-Colorbar")) : null;
   const url=URL.createObjectURL(await r.blob());
   const img=$("#data"), old=img.src;
   img.onload=()=>{ if(old.startsWith("blob:")) URL.revokeObjectURL(old); };
@@ -1638,6 +1817,7 @@ async function drawPlot(){
     if($("#vmin").value) p.set("vmin",$("#vmin").value);
     if($("#vmax").value) p.set("vmax",$("#vmax").value);
     if($("#kind").value==="layers") p.set("layers", JSON.stringify(LY));
+    if(colourParam()) p.set("colour", colourParam());
     const t0=performance.now();
     const r=await fetch("api/plot?"+p, {signal: ctrl.signal});
     if(!r.ok){
@@ -1791,7 +1971,10 @@ function lyField(host, label, spec, value, set){
     const pick=document.createElement("input"); pick.type="color";
     pick.value=/^#[0-9a-f]{6}$/i.test(text.value||dflt) ? (text.value||dflt) : "#000000";
     pick.oninput=()=>{ text.value=pick.value; set(pick.value); };
-    text.onchange=()=>set(text.value.trim()||null);
+    text.onchange=()=>{
+      if(/^#[0-9a-f]{6}$/i.test(text.value.trim())) pick.value=text.value.trim();
+      set(text.value.trim()||null);
+    };
     input.append(text, pick);
   }else{
     input=document.createElement("input");
@@ -2004,11 +2187,12 @@ let lastRange=null;
 
 function animParams(){
   return {varName:cur.name, level:$("#level").value, box:boxOf(view),
-          cmap:$("#cmap").value, vmin:$("#vmin").value, vmax:$("#vmax").value};
+          cmap:$("#cmap").value, vmin:$("#vmin").value, vmax:$("#vmax").value,
+          colour:colourParam()};
 }
 function animKeyOf(p){
   return JSON.stringify([p.varName, p.level, p.box.map(v=>+v.toFixed(4)),
-                         p.cmap, p.vmin, p.vmax]);
+                         p.cmap, p.vmin, p.vmax, p.colour||""]);
 }
 
 function animRow(key, entry){
@@ -2042,7 +2226,10 @@ function renderAnimList(){
     const curKey=animKeyOf(animParams());
     const entry=anims.get(curKey);
     const playing=entry && playingKey===curKey;
-    btn.disabled = !!entry && entry.loading && !playing && entry.ready===0;
+    // a plot that is not the fast map has no frames to play, and setMode's
+    // ruling must survive this refresh rather than be overwritten by it
+    btn.disabled = !caps().frames
+      || (!!entry && entry.loading && !playing && entry.ready===0);
     btn.textContent = playing ? "⏸ pause"
                      : (entry && entry.loading) ? "loading…"
                      : "▶ play";
@@ -2093,6 +2280,7 @@ async function animLoad(key, params){
       const p=new URLSearchParams({var:params.varName, time:i, level:params.level,
         extent:fetchBox.join(","), cmap:params.cmap, nx, ny,
         vmin:params.vmin, vmax:params.vmax, compress:$("#quality").value});
+      if(params.colour) p.set("colour", params.colour);
       const r=await fetch("api/frame?"+p);
       if(!r.ok) throw new Error((await r.json()).error);
       urls[i]=URL.createObjectURL(await r.blob());
@@ -2238,6 +2426,7 @@ async function exportAs(kind, label){
   if(cur.kinds){                       // --generic: export what is on screen
     p.set("kind", $("#kind").value);
     if($("#kind").value==="layers") p.set("layers", JSON.stringify(LY));
+    if(colourParam()) p.set("colour", colourParam());
     const pt=probePt||{lon:view.clon, lat:view.clat};
     p.set("lon", pt.lon); p.set("lat", pt.lat);
     if($("#kind").value==="hovmoller")
