@@ -21,9 +21,13 @@ The rules this encodes, learned from the Hovmöller it was lifted from:
 * **Everything stops on close.** A job outliving its viewer keeps entering HDF5
   while whatever runs next may be writing a file without the lock.
 
-The work itself is a callable taking `progress` and `cancel`; it decides how
-often to report and where it is safe to give up. It must check `cancel` at
-points where it holds nothing, and raise `Cancelled` there.
+The work itself is a callable taking `progress`, `cancel` and `publish`; it
+decides how often to report and where it is safe to give up. It must check
+`cancel` at points where it holds nothing, and raise `Cancelled` there.
+`publish(partial)` offers something worth drawing before the whole answer
+exists -- a strided preview of a long read -- which polling picks up. A
+partial is never cached: only what the work returns is, so nothing can later
+be served a preview as though it were the finished thing.
 """
 
 from __future__ import annotations
@@ -67,7 +71,10 @@ class Jobs:
             if key in self._errors:
                 return {"state": "error", "error": self._errors[key]}
             job = self._start(key, total, work)
-            return {"state": "running", "progress": [job["done"], job["total"]]}
+            state = {"state": "running", "progress": [job["done"], job["total"]]}
+            if job["partial"] is not None:
+                state["partial"] = job["partial"]
+            return state
 
     def result(self, key, total: int, work: Callable):
         """The finished thing, waiting for its job. For figures and exports,
@@ -103,6 +110,7 @@ class Jobs:
                 other["cancel"].set()
 
         job = {"done": 0, "total": total, "waiters": 0, "result": None,
+               "partial": None,
                "cancel": threading.Event(), "finished": threading.Event()}
 
         def progress(done, total=None):
@@ -110,9 +118,12 @@ class Jobs:
             if total is not None:
                 job["total"] = total
 
+        def publish(partial):
+            job["partial"] = partial
+
         def run():
             try:
-                result = work(progress, job["cancel"])
+                result = work(progress, job["cancel"], publish)
                 job["result"] = result
                 self.cache.get(key, lambda: result)
             except Cancelled:

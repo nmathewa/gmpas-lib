@@ -90,6 +90,83 @@ def values_budget() -> int:
         return VALUES_CACHE_BYTES
 
 
+#: Below this many files a pool costs more than it saves: the read is a
+#: fraction of a second either way, and starting workers is not.
+PARALLEL_MIN_FILES = 32
+
+#: How many files to have open at once when reading a point's series. The
+#: default is deliberately modest: this often runs on a login node shared with
+#: everyone else on the cluster, and the gain is in overlapping I/O latency,
+#: not in using every core.
+SERIES_WORKERS = 8
+SERIES_WORKERS_ENV = "GMPAS_SERIES_WORKERS"
+
+
+def series_workers() -> int:
+    """How many worker processes a point series may use."""
+    raw = os.environ.get(SERIES_WORKERS_ENV)
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:                  # unparseable: keep the default
+            pass
+    return max(1, min(SERIES_WORKERS, os.cpu_count() or 1))
+
+
+def _pool_context():
+    """A start method that is safe to use beside an open HDF5 library.
+
+    Never `fork`: this process has netCDF files open and may be inside the
+    library on another thread, and a child that inherits a locked internal
+    mutex deadlocks the first time it reads. `forkserver` forks from a clean
+    process started before any of that, which costs about 100 ms once --
+    nothing against a read whose whole point is that it takes seconds.
+    """
+    import multiprocessing as mp
+
+    for method in ("forkserver", "spawn"):
+        if method in mp.get_all_start_methods():
+            return mp.get_context(method)
+    return mp.get_context()
+
+
+def series_pool(workers: int):
+    """A pool of reader processes, for one series job to use and shut down."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    return ProcessPoolExecutor(max_workers=max(1, workers),
+                               mp_context=_pool_context())
+
+
+def _point_in(nc, name: str, var: str, cell: int, level: int, pins: dict,
+              wanted) -> list:
+    """(position, value) for each wanted step of one already-open file."""
+    if var not in nc.variables:
+        raise KeyError(f"{var!r} not in {name}")
+    v = nc.variables[var]
+    picks = Series._cell_index(v, cell, level, pins)
+    out = []
+    for index, local in wanted:
+        take = tuple(local if d == "Time" else picks[d] for d in v.dimensions)
+        out.append((index, float(np.asarray(v[take]).reshape(-1)[0])))
+    return out
+
+
+def _read_point(job) -> list:
+    """One file's worth of a point series, in a worker process.
+
+    Deliberately a module-level function taking plain data: it is pickled to
+    the worker, so it must not close over a Series, a mesh or anything else
+    that would drag the package -- and the point of the worker is to do
+    nothing but open, read one hyperslab, and answer.
+    """
+    import netCDF4
+
+    path, var, cell, level, pins, wanted = job
+    with netCDF4.Dataset(path) as nc:
+        return _point_in(nc, path, var, cell, level, pins, wanted)
+
+
 def is_sidecar(path: Path) -> bool:
     """Whether this is a metadata shadow of a real file rather than data.
 
@@ -463,8 +540,8 @@ class Series:
             return arr
 
     def at_cell(self, var: str, cell: int, level: int = 0,
-                sel: dict[str, int] | None = None,
-                progress=None, cancel=None) -> np.ndarray:
+                sel: dict[str, int] | None = None, steps=None,
+                progress=None, cancel=None, workers=None, pool=None) -> np.ndarray:
         """One mesh element's value at every step: the series behind a probe.
 
         The only read here that does not materialise a whole field, and it
@@ -483,37 +560,93 @@ class Series:
         is using.
 
         One open per FILE, not per step, so a file holding many steps is read
-        once. The lock is taken and released per file, and the thread yields
-        between files, so frames keep being served while a long run is read.
+        once -- and measured, that open is 81% of the whole cost, the value
+        itself 0.3 ms. Which is why a long run is read by a pool of PROCESSES:
+        threads cannot, since the HDF5 we ship against is not thread-safe, and
+        processes have the better property anyway -- the parent never enters
+        the library, so `netcdf.LOCK` stays free and the map keeps redrawing
+        at full speed while the series reads.
+
+        `steps` limits which of the series' steps are read, as indices into
+        `self.steps`; the preview pass uses it to draw a strided series before
+        the full one exists. Unread positions come back NaN.
 
         `progress(done, total)` is called per file and `cancel` is checked
         there, which is where nothing is held.
         """
+        wanted = range(len(self.steps)) if steps is None else steps
+        plan: OrderedDict[Path, list] = OrderedDict()
+        for index in wanted:
+            path, local = self.steps[index]
+            plan.setdefault(path, []).append((int(index), int(local)))
+
+        out = np.full(len(self.steps), np.nan, dtype=np.float64)
+        pins = dict(sel or {})
+        if workers is None:
+            workers = series_workers()
+        if pool is not None or (workers > 1 and len(plan) >= PARALLEL_MIN_FILES):
+            return self._at_cell_parallel(var, cell, level, pins, plan, out,
+                                          progress, cancel, workers, pool)
+        return self._at_cell_serial(var, cell, level, pins, plan, out,
+                                    progress, cancel)
+
+    def _at_cell_serial(self, var, cell, level, pins, plan, out,
+                        progress, cancel) -> np.ndarray:
+        """One file at a time, in this process, under the lock."""
         import netCDF4
 
         from .jobs import Cancelled
 
-        steps = self.steps
-        order: OrderedDict[Path, list] = OrderedDict()
-        for index, (path, local) in enumerate(steps):
-            order.setdefault(path, []).append((index, local))
-
-        out = np.full(len(steps), np.nan, dtype=np.float64)
-        pins = dict(sel or {})
-        for done, (path, wanted) in enumerate(order.items()):
+        for done, (path, wanted) in enumerate(plan.items()):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
             with self._lock, netCDF4.Dataset(path) as nc:
-                if var not in nc.variables:
-                    raise KeyError(f"{var!r} not in {path.name}")
-                v = nc.variables[var]
-                picks = self._cell_index(v, cell, level, pins)
-                for index, local in wanted:
-                    take = tuple(local if d == "Time" else picks[d] for d in v.dimensions)
-                    out[index] = float(np.asarray(v[take]).reshape(-1)[0])
+                for index, value in _point_in(nc, str(path), var, cell, level,
+                                              pins, wanted):
+                    out[index] = value
             if progress is not None:
-                progress(done + 1, len(order))
+                progress(done + 1, len(plan))
             _time.sleep(0)                       # let a frame request in
+        return out
+
+    def _at_cell_parallel(self, var, cell, level, pins, plan, out,
+                          progress, cancel, workers, pool=None) -> np.ndarray:
+        """Many files at once, in worker processes.
+
+        The opens are what this costs, and they overlap: on a parallel
+        filesystem each one is a round trip to a metadata server, so the
+        wall time falls with the number of them in flight rather than with
+        any CPU. Nothing HDF5 happens in this process, so a frame request
+        arriving mid-read does not queue behind the lock.
+        """
+        from concurrent.futures import as_completed
+
+        from .jobs import Cancelled
+
+        jobs = [(str(path), var, cell, level, pins, wanted)
+                for path, wanted in plan.items()]
+        done = 0
+        # A pool handed in belongs to the caller and outlives this pass: the
+        # preview and the full read share one, so the ~100 ms of starting
+        # workers is paid once per click rather than twice.
+        own = pool is None
+        if own:
+            pool = series_pool(min(workers, len(jobs)))
+        try:
+            futures = [pool.submit(_read_point, job) for job in jobs]
+            for future in as_completed(futures):
+                if cancel is not None and cancel.is_set():
+                    for f in futures:
+                        f.cancel()
+                    raise Cancelled()
+                for index, value in future.result():
+                    out[index] = value
+                done += 1
+                if progress is not None:
+                    progress(done, len(jobs))
+        finally:
+            if own:
+                pool.shutdown(wait=False, cancel_futures=True)
         return out
 
     @staticmethod

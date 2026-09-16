@@ -40,7 +40,7 @@ from . import timing
 from .cache import BuildCache
 from .mesh import MpasMesh
 from .raster import target_grid
-from .series import Series
+from .series import PARALLEL_MIN_FILES, Series, series_pool, series_workers
 
 #: the matplotlib colormaps offered in the picker, chosen to cover the usual
 #: field kinds. Both viewers now offer the cmocean, Ferret and GrADS palettes
@@ -583,21 +583,30 @@ class Viewer:
         cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
         key = (var, cell, int(level), tuple(sorted(self._pins(var).items())))
 
-        def work(progress, cancel):
-            return self.series.at_cell(var, cell, int(level), self._pins(var),
-                                       progress=progress, cancel=cancel)
+        def work(progress, cancel, publish=None):
+            return _point_series(self.series, var, cell, int(level),
+                                 self._pins(var), progress, cancel, publish)
 
         total = len(self.series)
         found = (self._jobs.result(key, total, work) if blocking
                  else self._jobs.peek(key))
         if found is None:
-            return {"state": "running", **self._jobs.progress(key, total, work)}
-        return {"state": "done", "cell": cell,
+            state = {"state": "running", **self._jobs.progress(key, total, work)}
+            partial = state.pop("partial", None)
+            if partial is not None:
+                state.update(preview=True, **self._series_body(cell, var, partial))
+            return state
+        return {"state": "done", **self._series_body(cell, var, found)}
+
+    def _series_body(self, cell: int, var: str, values) -> dict:
+        """The series as the page wants it. Unread steps -- a preview's gaps --
+        come through as null, which the chart draws as a break in the line."""
+        return {"cell": cell,
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
                 "lat": round(float(self.mesh.lat_cell[cell]), 4),
                 "label": _data.field_label(self.series.dataarray(var, 0)),
                 "labels": list(self.series.labels),
-                "values": [None if not np.isfinite(v) else float(v) for v in found]}
+                "values": [None if not np.isfinite(v) else float(v) for v in values]}
 
 
 # ----------------------------------------------------------------- serving
@@ -688,6 +697,39 @@ def _hov_params(q: dict) -> dict:
         raise ValueError(f"Hovmöller time direction {ydir!r} is not down or up")
     hov.update(method=method, ydir=ydir)
     return hov
+
+
+#: How many steps a preview reads. ncview strides for the same reason: the
+#: shape of a series is legible from a hundred points, and a hundred opens is
+#: seconds where three thousand is a minute.
+PREVIEW_STEPS = 100
+
+
+def _point_series(series, var, cell, level, pins, progress, cancel, publish):
+    """A point's series, drawn coarse first and then in full.
+
+    Two passes over one pool of reader processes: a strided preview so the
+    panel has something within a second or so, then every step. Starting the
+    workers costs about 100 ms, paid once here rather than once per pass.
+    """
+    import numpy as np
+
+    total = len(series.steps)
+    workers = series_workers()
+    parallel = workers > 1 and total >= PARALLEL_MIN_FILES
+    pool = series_pool(workers) if parallel else None
+    try:
+        if parallel and total > PREVIEW_STEPS * 2:
+            stride = np.unique(np.linspace(0, total - 1, PREVIEW_STEPS).astype(int))
+            coarse = series.at_cell(var, cell, level, pins, steps=stride,
+                                    cancel=cancel, pool=pool)
+            if publish is not None:
+                publish(coarse)
+        return series.at_cell(var, cell, level, pins, progress=progress,
+                              cancel=cancel, pool=pool)
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _serve_series(handler, viewer, q: dict) -> None:
@@ -2703,9 +2745,20 @@ async function ptSeries(){
   try{
     const r=await fetch("api/series?"+q);
     if(r.status===202){                      // fetch calls 202 ok: check first
-      const [done,total]=(await r.json()).progress;
-      $("#pthint").textContent=`reading ${done} / ${total}\u2026`;
-      ptPoll=setTimeout(()=>{ if(PT && ptKey()===key) ptSeries(); }, 400);
+      const body=await r.json();
+      const [done,total]=body.progress;
+      // a preview arrives long before the full read: draw it rather than
+      // making the user watch a counter
+      if(body.values){
+        PT.series=body; ptChart();
+        const n=body.values.filter(v=>v!==null).length;
+        $("#pthint").textContent=`preview: ${n} of ${total} steps\u2026`;
+      }else{
+        $("#pthint").textContent=`reading ${done} / ${total}\u2026`;
+      }
+      // quick while there is nothing to look at, slower once there is
+      ptPoll=setTimeout(()=>{ if(PT && ptKey()===key) ptSeries(); },
+                        body.values ? 500 : 150);
       return;
     }
     if(!r.ok){

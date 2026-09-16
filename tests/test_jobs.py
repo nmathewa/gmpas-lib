@@ -12,7 +12,7 @@ from gmpas.jobs import Cancelled, Jobs
 
 def _slow(started=None, release=None, value=None, steps=3):
     """A job that reports progress and can be held open by the test."""
-    def work(progress, cancel):
+    def work(progress, cancel, publish=None):
         if started is not None:
             started.set()
         for i in range(steps):
@@ -52,7 +52,7 @@ def test_a_finished_job_is_served_from_the_cache_without_running_again():
     jobs = Jobs()
     runs = []
 
-    def work(progress, cancel):
+    def work(progress, cancel, publish=None):
         runs.append(1)
         return np.zeros(2)
 
@@ -68,7 +68,7 @@ def test_a_failure_is_remembered_rather_than_retried_on_every_poll():
     jobs = Jobs()
     runs = []
 
-    def work(progress, cancel):
+    def work(progress, cancel, publish=None):
         runs.append(1)
         raise ValueError("no such band")
 
@@ -87,7 +87,7 @@ def test_a_new_request_cancels_the_one_already_reading():
     started, release = threading.Event(), threading.Event()
     jobs.progress("first", 3, _slow(started, release))
     assert started.wait(5)
-    jobs.progress("second", 1, lambda progress, cancel: np.zeros(1))
+    jobs.progress("second", 1, lambda progress, cancel, publish=None: np.zeros(1))
     release.set()
     for _ in range(200):
         if jobs.running() == 0:
@@ -95,7 +95,7 @@ def test_a_new_request_cancels_the_one_already_reading():
         threading.Event().wait(0.01)
     assert jobs.peek("first") is None                # cancelled, nothing cached
     assert _wait_done(jobs, "second", 1,
-                      lambda p, c: np.zeros(1))["state"] == "done"
+                      lambda p, c, pub=None: np.zeros(1))["state"] == "done"
 
 
 def test_a_waiting_export_keeps_its_job_from_being_cancelled():
@@ -109,7 +109,7 @@ def test_a_waiting_export_keeps_its_job_from_being_cancelled():
     thread = threading.Thread(target=export)
     thread.start()
     assert started.wait(5)
-    jobs.progress("second", 1, lambda progress, cancel: np.zeros(1))  # would cancel
+    jobs.progress("second", 1, lambda progress, cancel, publish=None: np.zeros(1))  # would cancel
     release.set()
     thread.join(10)
     assert np.array_equal(out["value"], np.arange(4.0))
@@ -128,14 +128,14 @@ def test_stopping_cancels_everything_and_waits_for_it():
 def test_results_are_bounded_by_bytes_like_every_other_cache():
     jobs = Jobs(budget=1024)
     assert jobs.cache.budget == 1024
-    _wait_done(jobs, "small", 1, lambda p, c: np.zeros(8))
+    _wait_done(jobs, "small", 1, lambda p, c, pub=None: np.zeros(8))
     assert jobs.peek("small") is not None
 
 
 def test_the_result_call_raises_what_the_work_raised():
     jobs = Jobs()
 
-    def work(progress, cancel):
+    def work(progress, cancel, publish=None):
         raise KeyError("t2m")
 
     with pytest.raises(ValueError, match="t2m"):

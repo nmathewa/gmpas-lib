@@ -836,7 +836,7 @@ class GenericViewer:
         i, j = self._point(lon, lat)              # raises off-grid, with the point
         key = ("series", var, i, j, int(level))
 
-        def work(progress, cancel):
+        def work(progress, cancel, publish=None):
             return self._series_at(var, lon, lat, int(level),
                                    progress=progress, cancel=cancel)
 
@@ -1047,7 +1047,7 @@ class GenericViewer:
         """The read itself, as the runner wants it: progress in, result out."""
         band, lons, steps = self._hov_args(hov, extent)
 
-        def work(progress, cancel):
+        def work(progress, cancel, publish=None):
             return self.hovmoller(var, level, band, lons, steps,
                                   progress=progress, cancel=cancel)
         return work
