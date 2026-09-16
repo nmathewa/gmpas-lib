@@ -1,9 +1,13 @@
-"""The MPAS viewer's colours, pinned.
+"""The MPAS viewer's default colours, pinned.
 
-The palettes and colour options added for `--generic` must not change a single
-pixel the MPAS viewer serves, nor what its page is sent. These hashes were
-taken from the code before that work began; a change here is a change to MPAS
-output and needs to be deliberate.
+The MPAS viewer now offers the same palettes and colour options as `--generic`,
+but a frame nobody has set an option on must still be the frame it always was.
+These hashes were taken before any of that work began; a change here is a
+change to what every existing MPAS user sees and needs to be deliberate.
+
+What the page is *offered* did change, by design: the picker lists every
+palette and the colour form appears. Those assertions moved to
+`test_mpas_colour.py`, which pins the new behaviour.
 
 Decoded pixels and palettes are hashed, not the PNG bytes: compressed bytes
 differ between zlib/Pillow builds, which would fail CI without any change to
@@ -39,7 +43,9 @@ def _field():
     return img
 
 
-def test_the_colormap_list_the_mpas_page_offers_is_unchanged():
+def test_the_matplotlib_colormaps_are_unchanged():
+    """The picker offers more now, but these ten still mean what they meant:
+    a saved figure or a colleague's screenshot must still be reproducible."""
     assert CMAPS == ["viridis", "plasma", "magma", "cividis", "turbo", "RdBu_r",
                      "coolwarm", "BrBG", "Blues", "Spectral_r"]
 
@@ -69,8 +75,9 @@ GOLDEN = {
 }
 
 
-def test_the_mpas_viewer_describes_itself_as_before(tmp_path):
-    """No palette groups, colour options or layer schema leak onto the MPAS page."""
+def test_the_mpas_viewer_still_describes_its_own_shape(tmp_path):
+    """The colour keys grew (see test_mpas_colour.py); nothing else did, and
+    no plot kinds or layer schema leak onto the MPAS page."""
     from conftest import write_mesh
     from gmpas.viewer import Viewer
 
@@ -84,7 +91,8 @@ def test_the_mpas_viewer_describes_itself_as_before(tmp_path):
         v.series.close()
     assert set(meta) == {"file", "mesh", "cells", "regional", "coverage", "files", "steps",
                          "labels", "scanning", "home", "nx", "ny", "cmaps", "ramps",
-                         "variables"}
-    assert meta["cmaps"] == CMAPS
+                         "palettes", "colour_options", "variables"}
+    assert "kind_labels" not in meta and "layer_schema" not in meta
+    assert meta["cmaps"][:len(CMAPS)] == CMAPS          # matplotlib first, in order
     assert set(meta["variables"][0]) == {"name", "label", "static", "levels", "dim",
                                          "pinned"}

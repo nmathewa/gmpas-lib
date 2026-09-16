@@ -130,23 +130,3 @@ def test_the_frame_route_sends_the_colorbar_only_with_colour_options(regional):
         srv.shutdown()
 
 
-def test_the_mpas_frame_route_ignores_colour_options(tmp_path):
-    from conftest import write_mesh
-    from gmpas.viewer import Viewer
-
-    run = tmp_path / "run"
-    run.mkdir()
-    write_mesh(run / "history.2012-02-25_00.00.00.nc", [(0.0, 0.0), (10.0, 0.0)])
-    viewer = Viewer(run, nx=40, ny=30)
-    srv, base = _serve(viewer)
-    q = {"var": "areaCell", "extent": "-5,15,-5,5", "cmap": "viridis", "nx": 40, "ny": 20}
-    try:
-        with urllib.request.urlopen(f"{base}/api/frame?{urllib.parse.urlencode(q)}") as r:
-            plain = r.read()
-        coloured = urllib.parse.urlencode({**q, "colour": '{"bands": 4}'})
-        with urllib.request.urlopen(f"{base}/api/frame?{coloured}") as r:
-            assert r.headers.get("X-Colorbar") is None
-            assert r.read() == plain
-    finally:
-        srv.shutdown()
-        viewer.series.close()

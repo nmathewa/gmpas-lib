@@ -41,7 +41,10 @@ from .mesh import MpasMesh
 from .raster import target_grid
 from .series import Series
 
-#: colormaps offered in the picker, chosen to cover the usual field kinds
+#: the matplotlib colormaps offered in the picker, chosen to cover the usual
+#: field kinds. Both viewers now offer the cmocean, Ferret and GrADS palettes
+#: beside them -- see `gmpas.colour.describe` -- and this stays as the
+#: matplotlib group of that list, and as the set the prep pages draw from.
 CMAPS = ["viridis", "plasma", "magma", "cividis", "turbo",
          "RdBu_r", "coolwarm", "BrBG", "Blues", "Spectral_r"]
 
@@ -293,8 +296,7 @@ class Viewer:
             "home": list(self.home),
             "nx": self.nx,
             "ny": self.ny,
-            "cmaps": CMAPS,
-            "ramps": {name: ramp(name) for name in CMAPS},
+            **_colour.describe(),
             "variables": out,
         }
 
@@ -371,6 +373,10 @@ class Viewer:
             f"{expr!r} is not a known variable, and not a recognised derived "
             f"expression (a + b, a - b, a * b, a / b, hypot(a, b), or diff(a))"
         )
+
+    #: the handler forwards a colour parameter only to a viewer that has this,
+    #: and returns the bar it produces as the X-Colorbar header
+    clean_colour = staticmethod(_colour.clean)
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
               nx=None, ny=None, compress=1, colour=None, meta=None):
