@@ -228,6 +228,9 @@ KIND_CAPS = {
 #: a non-map variable is read whole to plot it; past this it is refused
 PLOT_READ_BYTES = 256 * 1024 * 1024
 
+#: how many steps a point series draws before it has read them all
+SERIES_PREVIEW = 100
+
 #: the fast map's colour options and their checking live in `gmpas.colour`,
 #: the one place both viewers get their colours from; these names stay because
 #: the page handler duck-types on `clean_colour` and callers import them
@@ -837,23 +840,51 @@ class GenericViewer:
         key = ("series", var, i, j, int(level))
 
         def work(progress, cancel, publish=None):
-            return self._series_at(var, lon, lat, int(level),
-                                   progress=progress, cancel=cancel)
+            # The step axis is provisional while the scan counts files, and a
+            # series read against it would be the wrong length; wait, as the
+            # MPAS side does.
+            while self.scanning:
+                if cancel is not None and cancel.is_set():
+                    raise _jobs.Cancelled()
+                _time.sleep(0.05)
+            n = len(self._steps)
+            # A strided pass first, for the same reason the MPAS side has one:
+            # the shape is legible long before every file has been opened.
+            if publish is not None and n > 2 * SERIES_PREVIEW:
+                stride = np.unique(np.linspace(0, n - 1, SERIES_PREVIEW).astype(int))
+                publish(self._series_values(var, lon, lat, int(level),
+                                            steps=stride, cancel=cancel))
+            return self._series_values(var, lon, lat, int(level),
+                                       progress=progress, cancel=cancel)
 
         total = len(self.files)
         found = (self._hov_jobs.result(key, total, work) if blocking
                  else self._hov_jobs.peek(key))
         if found is None:
-            return {"state": "running", **self._hov_jobs.progress(key, total, work)}
-        values = np.asarray(found.values, dtype=float)
-        axis = found.coords[found.dims[0]].values
-        return {"state": "done", "cell": i * self.lon.size + j,
+            state = {"state": "running", **self._hov_jobs.progress(key, total, work)}
+            partial = state.pop("partial", None)
+            if partial is not None:
+                state.update(preview=True, **self._series_body(i, j, var, partial))
+            return state
+        return {"state": "done", **self._series_body(i, j, var, found)}
+
+    def _series_body(self, i: int, j: int, var: str, found) -> dict:
+        """The series as the page wants it; a preview's gaps come through as
+        null, which the chart draws as unread rather than as missing.
+
+        Labels come from the viewer's own step axis, not from the values, so a
+        preview and the full series describe the same moments.
+        """
+        values = np.asarray(found, dtype=float)
+        labels = list(self.labels)
+        if values.size != len(labels):
+            raise ValueError("the time axis changed while the series was read; "
+                             "ask again")
+        return {"cell": i * self.lon.size + j,
                 "lon": round(float(self.lon[j]), 4),
                 "lat": round(float(self.lat[i]), 4),
                 "label": _data.field_label(self.ds[var]),
-                "labels": [str(np.datetime_as_string(t, unit="m"))
-                           if np.issubdtype(np.asarray(t).dtype, np.datetime64)
-                           else str(t) for t in axis],
+                "labels": labels,
                 "values": [None if not np.isfinite(v) else float(v) for v in values]}
 
     # -- Hovmöller: time x longitude, averaged over a latitude band ---------
@@ -1104,6 +1135,38 @@ class GenericViewer:
         xname = self.time_name if dated else "step"
         return xr.DataArray(y, dims=(xname,), coords={xname: x}, name=var,
                             attrs=dict(self.ds[var].attrs))
+
+    def _series_values(self, var: str, lon: float, lat: float, level: int = 0,
+                       steps=None, progress=None, cancel=None) -> np.ndarray:
+        """`var` at one point, as one value per step of the whole series.
+
+        Aligned to `self._steps`, so a partial read says which steps it has by
+        leaving the rest NaN rather than by being shorter. One read per file,
+        the lock taken and released per file, as `_series_at` does.
+        """
+        i, j = self._point(lon, lat)
+        where = self._file_index(i, j)
+        out = np.full(len(self._steps), np.nan, dtype=np.float64)
+        plan: dict = {}
+        for index in (range(len(self._steps)) if steps is None else steps):
+            path, local = self._steps[int(index)]
+            plan.setdefault(path, []).append((int(index), int(local)))
+        for done, (path, items) in enumerate(plan.items()):
+            if cancel is not None and cancel.is_set():
+                raise _jobs.Cancelled()
+            with self._lock:
+                ds = self._dataset(path, check=path != self.files[0])
+                if var not in ds:
+                    raise KeyError(f"{var!r} not in {path.name}")
+                da = self._pick_levels(ds[var], level).isel(where)
+                vals = np.atleast_1d(np.asarray(da.values, dtype=np.float64))
+            for index, local in items:
+                if local < vals.size:
+                    out[index] = vals[local]
+            if progress is not None:
+                progress(done + 1, len(plan))
+            _time.sleep(0)                   # let a frame request in
+        return out
 
     def _profile_at(self, var: str, time: int, lon: float, lat: float):
         """`var` along its level axis at one point and step, as a DataArray."""

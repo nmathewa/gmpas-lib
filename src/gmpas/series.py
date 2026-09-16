@@ -23,6 +23,7 @@ import sys
 import threading
 import time as _time
 from collections import OrderedDict
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime
 from pathlib import Path
 
@@ -138,21 +139,44 @@ def series_pool(workers: int):
                                mp_context=_pool_context())
 
 
+def _take(out, got, problems) -> None:
+    """Fold one file's answers into the series, keeping any complaint."""
+    for index, value in got:
+        if index == "error":
+            if problems is not None:
+                problems.append(value)
+        else:
+            out[index] = value
+
+
 def _point_in(nc, name: str, var: str, cell: int, level: int, pins: dict,
               wanted) -> list:
-    """(position, value) for each wanted step of one already-open file."""
+    """(position, value) for each wanted step of one already-open file.
+
+    A masked point comes back NaN, never 0.0. netCDF4 masks fill values for
+    us and `np.asarray` of a masked constant hands back the raw 0.0 sitting
+    under the mask -- which is a plausible temperature anomaly, a plausible
+    flux and a plausible wind component, so it would be believed. Everything
+    else in this package decodes a fill to NaN; so does this.
+    """
     if var not in nc.variables:
         raise KeyError(f"{var!r} not in {name}")
     v = nc.variables[var]
-    picks = Series._cell_index(v, cell, level, pins)
+    picks = Series._cell_index(v, cell, level, pins, name)
     out = []
     for index, local in wanted:
         take = tuple(local if d == "Time" else picks[d] for d in v.dimensions)
-        out.append((index, float(np.asarray(v[take]).reshape(-1)[0])))
+        raw = np.ma.asarray(v[take]).astype(np.float64)
+        out.append((index, float(np.ma.filled(raw, np.nan).reshape(-1)[0])))
     return out
 
 
 def _read_point(job) -> list:
+    """See `_read_one_file`; the pool calls this."""
+    return _read_one_file(job)
+
+
+def _read_one_file(job) -> list:
     """One file's worth of a point series, in a worker process.
 
     Deliberately a module-level function taking plain data: it is pickled to
@@ -163,8 +187,15 @@ def _read_point(job) -> list:
     import netCDF4
 
     path, var, cell, level, pins, wanted = job
-    with netCDF4.Dataset(path) as nc:
-        return _point_in(nc, path, var, cell, level, pins, wanted)
+    try:
+        with netCDF4.Dataset(path) as nc:
+            return _point_in(nc, path, var, cell, level, pins, wanted)
+    except OSError as exc:
+        # One unreadable file in a run of three thousand -- a write cut short,
+        # a truncated copy -- must cost its own steps and no more. The map
+        # already draws every other step of such a run; a series that threw
+        # the whole answer away for one bad file was the odd one out.
+        return [(index, float("nan")) for index, _ in wanted] + [("error", str(exc))]
 
 
 def is_sidecar(path: Path) -> bool:
@@ -541,7 +572,8 @@ class Series:
 
     def at_cell(self, var: str, cell: int, level: int = 0,
                 sel: dict[str, int] | None = None, steps=None,
-                progress=None, cancel=None, workers=None, pool=None) -> np.ndarray:
+                progress=None, cancel=None, workers=None, pool=None,
+                problems=None) -> np.ndarray:
         """One mesh element's value at every step: the series behind a probe.
 
         The only read here that does not materialise a whole field, and it
@@ -585,32 +617,41 @@ class Series:
         if workers is None:
             workers = series_workers()
         if pool is not None or (workers > 1 and len(plan) >= PARALLEL_MIN_FILES):
-            return self._at_cell_parallel(var, cell, level, pins, plan, out,
-                                          progress, cancel, workers, pool)
+            try:
+                return self._at_cell_parallel(var, cell, level, pins, plan, out,
+                                              progress, cancel, workers, pool,
+                                              problems)
+            except BrokenProcessPool:
+                # Worker processes re-import the caller's __main__, which fails
+                # for a script run from stdin, `python -c`, or some notebooks.
+                # The answer matters more than the speed: read it here instead.
+                print("gmpas: worker processes could not start (is this a "
+                      "script without an `if __name__ == \"__main__\"` guard?) "
+                      "-- reading the series in one process instead",
+                      file=sys.stderr)
+                out[:] = np.nan
         return self._at_cell_serial(var, cell, level, pins, plan, out,
-                                    progress, cancel)
+                                    progress, cancel, problems)
 
     def _at_cell_serial(self, var, cell, level, pins, plan, out,
-                        progress, cancel) -> np.ndarray:
+                        progress, cancel, problems=None) -> np.ndarray:
         """One file at a time, in this process, under the lock."""
-        import netCDF4
-
         from .jobs import Cancelled
 
         for done, (path, wanted) in enumerate(plan.items()):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
-            with self._lock, netCDF4.Dataset(path) as nc:
-                for index, value in _point_in(nc, str(path), var, cell, level,
-                                              pins, wanted):
-                    out[index] = value
+            with self._lock:
+                got = _read_one_file((str(path), var, cell, level, pins, wanted))
+            _take(out, got, problems)
             if progress is not None:
                 progress(done + 1, len(plan))
             _time.sleep(0)                       # let a frame request in
         return out
 
     def _at_cell_parallel(self, var, cell, level, pins, plan, out,
-                          progress, cancel, workers, pool=None) -> np.ndarray:
+                          progress, cancel, workers, pool=None,
+                          problems=None) -> np.ndarray:
         """Many files at once, in worker processes.
 
         The opens are what this costs, and they overlap: on a parallel
@@ -639,8 +680,7 @@ class Series:
                     for f in futures:
                         f.cancel()
                     raise Cancelled()
-                for index, value in future.result():
-                    out[index] = value
+                _take(out, future.result(), problems)
                 done += 1
                 if progress is not None:
                     progress(done, len(jobs))
@@ -650,30 +690,42 @@ class Series:
         return out
 
     @staticmethod
-    def _cell_index(v, cell: int, level: int, pins: dict) -> dict:
+    def _cell_index(v, cell: int, level: int, pins: dict, name: str = "") -> dict:
         """Which index each of a variable's dimensions takes for one cell.
 
         The mesh dimension takes `cell`; a stacking axis takes `level`, or
         whatever `sel` pins it to. Named by dimension rather than by position
         because a diagnostic writes its levels wherever it likes -- the
         `nIsoLevels` convention this package already follows elsewhere.
+
+        Every index is checked here rather than left to netCDF, whose own
+        complaint is "index exceeds dimension bounds" and names neither the
+        variable, the dimension, the size nor the file.
         """
+        where = f" in {name}" if name else ""
+        sizes = dict(zip(v.dimensions, v.shape, strict=True))
+        unknown = [d for d in pins if d not in sizes]
+        if unknown:
+            raise KeyError(f"{unknown} is not a dimension of {v.name!r}"
+                           f"{where}; it has {list(v.dimensions)}")
         picks = {}
         stack = [d for d in v.dimensions if d != "Time" and d not in SPATIAL_DIMS]
         for dim in v.dimensions:
             if dim == "Time":
                 continue
             if dim in SPATIAL_DIMS:
-                size = v.shape[v.dimensions.index(dim)]
-                if not 0 <= cell < size:
-                    raise IndexError(f"cell {cell} is outside {dim}={size}")
-                picks[dim] = cell
+                idx = cell
             elif dim in pins:
-                picks[dim] = pins[dim]
+                idx = pins[dim]
             else:
                 # the slider drives the first stacking axis; the rest sit at 0,
                 # which is what `Viewer._pins` shows the page
-                picks[dim] = level if dim == stack[0] else 0
+                idx = level if dim == stack[0] else 0
+            if not 0 <= idx < sizes[dim]:
+                what = "cell" if dim in SPATIAL_DIMS else dim
+                raise IndexError(f"{what} {idx} is outside {dim}={sizes[dim]} "
+                                 f"for {v.name!r}{where}")
+            picks[dim] = idx
         return picks
 
     def _remember(self, key: tuple, arr: np.ndarray) -> None:
