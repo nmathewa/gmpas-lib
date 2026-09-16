@@ -320,6 +320,135 @@ def test_a_single_file_is_counted_immediately(tmp_path):
         s.close()
 
 
+# ------------------------------------- counting the steps in worker processes
+
+
+def test_the_parallel_scan_counts_exactly_what_the_serial_one_does(tmp_path,
+                                                                   monkeypatch):
+    """A faster count that is off by one file is a wrong time axis, which is
+    every frame after it attributed to the wrong moment."""
+    from gmpas import series as S
+
+    run = _run_dir(tmp_path, n_files=40, n_times=3)
+
+    monkeypatch.setattr(S, "PARALLEL_MIN_FILES", 4)
+    monkeypatch.setattr(S, "SCAN_PROBE_FILES", 2)
+    monkeypatch.setattr(S.Series, "_worth_a_pool", lambda *a, **k: False)
+    serial = S.Series(run)
+    try:
+        expected_steps, expected_labels = list(serial.steps), list(serial.labels)
+        expected_counts = dict(serial._counts)
+    finally:
+        serial.close()
+
+    monkeypatch.setattr(S.Series, "_worth_a_pool", lambda *a, **k: True)
+    ran = []
+    real = S.Series._scan_parallel
+
+    def spy(self, todo, counts, workers):
+        got = real(self, todo, counts, workers)
+        ran.append(got)
+        return got
+
+    monkeypatch.setattr(S.Series, "_scan_parallel", spy)
+    parallel = S.Series(run)
+    try:
+        # otherwise a silent fallback to serial would make this test agree
+        # with itself and prove nothing
+        assert ran == [True], "the parallel scan did not actually run"
+        assert parallel._counts == expected_counts
+        assert list(parallel.steps) == expected_steps
+        assert list(parallel.labels) == expected_labels
+        assert len(parallel) == 120
+    finally:
+        parallel.close()
+
+
+def test_a_file_the_workers_cannot_read_still_counts_as_one_step(tmp_path,
+                                                                 monkeypatch):
+    """Same forgiveness the serial scan has: one bad file in a run of
+    thousands costs its own steps and no more."""
+    from gmpas import series as S
+
+    run = _run_dir(tmp_path, n_files=40, n_times=3)
+    broken = sorted(run.glob("history.*.nc"))[-1]
+    broken.write_bytes(b"not a netCDF file at all")
+
+    monkeypatch.setattr(S, "PARALLEL_MIN_FILES", 4)
+    monkeypatch.setattr(S, "SCAN_PROBE_FILES", 2)
+    monkeypatch.setattr(S.Series, "_worth_a_pool", lambda *a, **k: True)
+    s = S.Series(run)
+    try:
+        assert s._counts[broken] == 1
+        assert len(s) == 39 * 3 + 1
+    finally:
+        s.close()
+
+
+def test_whether_to_use_workers_is_measured_not_assumed():
+    """The same file count is the right and the wrong answer depending on
+    what an open costs, which differs tenfold between a local disk and a
+    parallel filesystem. So the decision is arithmetic on a measurement."""
+    from gmpas.series import POOL_START_SECONDS, Series
+
+    decide = Series._worth_a_pool.__get__(_FakeSeries(warm=False), Series)
+
+    many = list(range(600))
+    # a local NVMe: ~1.2 ms an open, so 600 files are over before eight
+    # processes have finished starting
+    assert decide(list(range(200)), 0.0012, 8) is False
+    # a parallel filesystem: a metadata round trip an open, and the pool
+    # pays for itself inside forty files
+    assert decide(list(range(40)), 0.020, 8) is True
+    assert decide(many, 0.0012, 8) is True          # enough of them, even so
+    # nothing to divide
+    assert decide(list(range(3)), 0.020, 8) is False
+    assert decide(many, 0.020, 1) is False          # one worker is no pool
+    # already warm: there is nothing left to pay for, so the only question is
+    # whether there is enough work to share
+    warm = Series._worth_a_pool.__get__(_FakeSeries(warm=True), Series)
+    assert warm(list(range(40)), 0.0012, 8) is True
+    assert POOL_START_SECONDS > 0
+
+
+class _FakeSeries:
+    """Just enough Series for `_worth_a_pool`, which reads only this."""
+
+    def __init__(self, warm):
+        self.readers = type("R", (), {"is_warm": warm})()
+
+
+def test_a_warm_pool_is_a_flag_not_a_method(tmp_path):
+    """`ReaderPool.warm(workers)` starts the workers; `is_warm` says whether
+    they are up. They were briefly the same name, and a bound method is
+    always truthy -- which silently told every scan the pool was free."""
+    from gmpas.series import ReaderPool
+
+    pool = ReaderPool(idle=0)
+    assert pool.is_warm is False
+    with pool.lease(2):
+        assert pool.is_warm is True
+    assert pool.is_warm is False
+
+
+def test_a_render_worker_does_not_try_to_spawn_its_own(tmp_path, monkeypatch):
+    """`gmpas plot -j 8` renders in daemonic Pool workers, and a daemonic
+    process may not have children -- it raises rather than running slowly."""
+    import multiprocessing as mp
+
+    from gmpas.series import Series, can_spawn
+
+    assert can_spawn() is True                   # the main process may
+
+    class Daemonic:
+        daemon = True
+
+    monkeypatch.setattr(mp, "current_process", lambda: Daemonic())
+    assert can_spawn() is False
+    decide = Series._worth_a_pool.__get__(_FakeSeries(warm=False), Series)
+    assert decide(list(range(600)), 0.020, 8) is False
+
+
 # ------------------------------------------------- the axis from filenames
 
 
