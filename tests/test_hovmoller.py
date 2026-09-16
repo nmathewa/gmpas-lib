@@ -175,7 +175,7 @@ def test_refused_while_the_time_axis_is_being_counted(waves):
 
 
 def test_a_result_too_big_to_keep_is_refused_up_front(waves):
-    waves._hov_cache.budget = 1024
+    waves._hov_jobs.cache.budget = 1024
     with pytest.raises(ValueError, match="narrow the step or longitude range"):
         waves.hovmoller("t", 0, band=(-10, 10))
 
@@ -253,7 +253,7 @@ def test_stopping_jobs_leaves_nothing_reading(waves, monkeypatch):
     waves.hovmoller_progress("t", 0, {"band": (-10, 10)}, waves.home)
     assert started.wait(5)
     waves.stop_jobs(timeout=5)
-    assert all(job["finished"].is_set() for job in waves._hov_jobs.values())
+    assert waves._hov_jobs.running() == 0
 
 
 def test_an_export_waits_for_the_job(waves):
