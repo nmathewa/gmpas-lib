@@ -17,6 +17,16 @@ TIMES = pd.date_range("2024-01-01", periods=3, freq="6h")
 
 
 def _open(tmp_path, ds, name="f.nc"):
+    """Open strictly: an unreadable grid raises, as it does for `gmpas plot`
+    and the library. The viewer's own lenient path is `_open_asking`."""
+    path = tmp_path / name
+    ds.to_netcdf(path)
+    return GenericViewer(path, strict=True)
+
+
+def _open_asking(tmp_path, ds, name="f.nc"):
+    """Open the way `gmpas view --generic` does: a grid it cannot work out
+    leaves the viewer up and asking, rather than killing the process."""
     path = tmp_path / name
     ds.to_netcdf(path)
     return GenericViewer(path)
@@ -86,6 +96,61 @@ def test_a_curvilinear_grid_is_refused_by_name(tmp_path):
     })
     with pytest.raises(ValueError, match="'XLAT'.*curvilinear"):
         _open(tmp_path, ds)
+
+
+def test_a_strong_2d_coordinate_beats_a_weak_1d_one(tmp_path):
+    """NEMO's shape: correct 2D nav_lat/nav_lon beside bare index axes that
+    carry nothing but `axis: Y`/`axis: X`.
+
+    This asserts the *extent*, not the message. Filtering to 1D candidates
+    before ranking drew this global grid as an 11-degree box off West Africa
+    -- a silently wrong map, which is worse than any refusal.
+    """
+    ds = xr.Dataset({
+        "thetao": (("y", "x"), np.zeros((20, 40))),
+        "nav_lat": (("y", "x"), np.repeat(LAT[:, None], 40, 1),
+                    {"standard_name": "latitude", "units": "degrees_north"}),
+        "nav_lon": (("y", "x"), np.repeat(LON[None, :], 20, 0),
+                    {"standard_name": "longitude", "units": "degrees_east"}),
+    }, coords={"y": ("y", np.arange(20.0), {"axis": "Y"}),
+               "x": ("x", np.arange(40.0), {"axis": "X"})})
+    with pytest.raises(ValueError, match="'nav_lat'.*curvilinear"):
+        _open(tmp_path, ds)
+
+
+def test_a_rotated_pole_without_standard_name_is_not_drawn_as_degrees(tmp_path):
+    """CORDEX with an incomplete attribute set: `rlat` has `axis: Y` and
+    `units: degrees` but no `standard_name`, so `_NOT_GEOGRAPHIC` cannot veto
+    it -- while the real 2D lat/lon sit beside it, correctly attributed.
+
+    Central Europe came out over the Gulf of Guinea, about 45 degrees of
+    latitude wrong. Asserting on numbers because that is what was wrong.
+    """
+    rlat = np.linspace(-11.0, 11.0, 20)          # rotated coordinates
+    rlon = np.linspace(-14.0, 14.0, 40)
+    true_lat = np.repeat(np.linspace(32.6, 57.4, 20)[:, None], 40, 1)
+    true_lon = np.repeat(np.linspace(-4.55, 24.55, 40)[None, :], 20, 0)
+    ds = xr.Dataset({
+        "tas": (("rlat", "rlon"), np.zeros((20, 40))),
+        "lat": (("rlat", "rlon"), true_lat,
+                {"standard_name": "latitude", "units": "degrees_north"}),
+        "lon": (("rlat", "rlon"), true_lon,
+                {"standard_name": "longitude", "units": "degrees_east"}),
+    }, coords={"rlat": ("rlat", rlat, {"units": "degrees", "axis": "Y"}),
+               "rlon": ("rlon", rlon, {"units": "degrees", "axis": "X"})})
+    with pytest.raises(ValueError) as caught:
+        gv = _open(tmp_path, ds)
+        raise AssertionError(
+            f"drew a map at {gv.home}; the file covers 32.6..57.4 N")
+    assert "curvilinear" in str(caught.value)
+
+
+def test_a_refusal_names_the_file_it_read(tmp_path):
+    """One of three thousand files is files[0]; the message has to say which."""
+    ds = xr.Dataset({"v": (("a", "b"), np.zeros((4, 5)))},
+                    coords={"a": np.arange(4.0), "b": np.arange(5.0)})
+    with pytest.raises(ValueError, match="odd_run.nc"):
+        _open(tmp_path, ds, name="odd_run.nc")
 
 
 def test_points_sharing_one_dimension_are_not_a_grid(tmp_path):
@@ -416,6 +481,210 @@ def test_the_plot_route_and_exports_are_served(months):
         gif = urllib.request.urlopen(
             f"{base}/api/export/gif?{q}&kind=map&nx=72&ny=38").read()
         assert gif[:3] == b"GIF"
+    finally:
+        srv.shutdown()
+
+
+# ------------------------------------------- saying which dimension is which
+
+
+def _ioapi(tmp_path):
+    """The IOAPI/CMAQ shape: a time axis gmpas cannot recognise, and a real
+    vertical axis behind it. Values are 100*TSTEP + LAY, so a wrong reading
+    is visible in the numbers."""
+    block = np.array([[[[100 * t + k] * 40] * 20 for k in range(3)] for t in range(6)],
+                     dtype="f8")
+    ds = xr.Dataset({"O3": (("TSTEP", "LAY", "lat", "lon"), block)},
+                    coords={"lat": ("lat", LAT, {"units": "degrees_north"}),
+                            "lon": ("lon", LON, {"units": "degrees_east"})})
+    return _open_asking(tmp_path, ds, name="cmaq.nc")
+
+
+def test_a_grid_it_cannot_work_out_leaves_the_viewer_up_to_ask(tmp_path):
+    """The whole point: the process used to exit before the server started,
+    so the user was left guessing about a file they could not see."""
+    ds = xr.Dataset({
+        "thetao": (("y", "x"), np.zeros((20, 40))),
+        "nav_lat": (("y", "x"), np.repeat(LAT[:, None], 40, 1),
+                    {"standard_name": "latitude", "units": "degrees_north"}),
+        "nav_lon": (("y", "x"), np.repeat(LON[None, :], 20, 0),
+                    {"standard_name": "longitude", "units": "degrees_east"}),
+    }, coords={"y": ("y", np.arange(20.0), {"axis": "Y"}),
+               "x": ("x", np.arange(40.0), {"axis": "X"})})
+    gv = _open_asking(tmp_path, ds)
+    assert gv.needs_setup and "curvilinear" in gv.setup_problem
+    s = gv.setup()
+    assert s["needed"] and set(s["options"]) == {"x", "y", "time", "level"}
+    assert s["dims"] == ["x", "y"]
+    with pytest.raises(ValueError):                 # strict callers still raise
+        _open(tmp_path, ds, name="strict.nc")
+
+
+def test_choosing_the_dimensions_makes_the_hidden_axis_reachable(tmp_path):
+    """TSTEP drove the level slider and LAY could not be reached at all."""
+    gv = _ioapi(tmp_path)
+    before = _row(gv, "O3")
+    assert gv.steps == 1 and before["static"] and before["dim"] == "TSTEP"
+    assert before["pinned"] == ["LAY"]              # 2 of 3 layers unreachable
+
+    gv.configure({"time": "TSTEP", "level": "LAY"})
+
+    after = _row(gv, "O3")
+    assert gv.steps == 6 and not after["static"]
+    assert after["dim"] == "LAY" and after["levels"] == 3 and after["pinned"] == []
+    # and the numbers move on both axes now, which is the actual fix
+    at = lambda t, k: float(np.asarray(
+        gv._read("O3", t).isel(LAY=k).values).ravel()[0])
+    assert (at(0, 0), at(3, 0), at(0, 2)) == (0.0, 300.0, 2.0)
+
+
+def test_a_mapping_that_cannot_work_leaves_the_old_one_alone(tmp_path):
+    """A rejected form must not leave the viewer worse than before it opened."""
+    gv = _ioapi(tmp_path)
+    home, steps = gv.home, gv.steps
+    with pytest.raises(ValueError, match="not a variable"):
+        gv.configure({"y": "no_such_thing"})
+    assert (gv.home, gv.steps) == (home, steps) and not gv.needs_setup
+    with pytest.raises(ValueError, match="not a time dimension"):
+        gv.configure({"time": "nope"})
+    assert (gv.home, gv.steps) == (home, steps)
+
+
+def test_a_hand_picked_axis_is_checked_like_a_detected_one(tmp_path):
+    """Saying "I know what I am doing" cannot make a grid regular."""
+    ds = xr.Dataset({"v": (("a", "b"), np.zeros((6, 5)))},
+                    coords={"a": ("a", np.array([0.0, 5, 1, 9, 2, 7])),
+                            "b": ("b", np.arange(5.0))})
+    gv = _open_asking(tmp_path, ds)
+    with pytest.raises(ValueError, match="not monotonic"):
+        gv.configure({"y": "a", "x": "b"})
+    ds2 = xr.Dataset({"v": (("a", "b"), np.zeros((6, 5)))},
+                     coords={"a": ("a", np.linspace(0, 4e5, 6)),
+                             "b": ("b", np.arange(5.0))})
+    gv2 = _open_asking(tmp_path, ds2, name="metres.nc")
+    with pytest.raises(ValueError, match="cannot exceed 90"):
+        gv2.configure({"y": "a", "x": "b"})
+
+
+def test_a_guess_is_reported_and_a_reading_is_not(tmp_path):
+    """The panel must not nag about files it understood: a warning that fires
+    on everything is a warning nobody reads."""
+    gv = _ioapi(tmp_path)
+    doubts = gv.setup()["doubts"]
+    assert any("no time axis was recognised" in d and "'TSTEP'" in d for d in doubts)
+    # and it says the consequence that actually costs the user data
+    assert any("'LAY' is pinned at 0" in d and "cannot be reached" in d
+               for d in doubts)
+    # it names the dimension the slider really drives, not the first alphabetically
+    assert all("'LAY' drives" not in d for d in doubts)
+
+    clean = _open_asking(tmp_path, xr.Dataset(
+        {"t2m": (("time", "plev", "lat", "lon"), np.zeros((3, 4, 20, 40)))},
+        coords={"time": TIMES, "lat": LAT, "lon": LON,
+                "plev": ("plev", np.array([1000.0, 850, 500, 200]),
+                         {"units": "hPa", "positive": "down"})}), name="clean.nc")
+    assert clean.setup()["doubts"] == []
+
+
+@pytest.mark.parametrize("extra, attrs", [
+    ("sigma", {}),                              # described by whoever wrote it
+    ("ensemble", {}),
+    ("band", {"units": "nm"}),
+])
+def test_an_unrecognised_axis_with_its_own_values_is_left_alone(tmp_path, extra,
+                                                                attrs):
+    """gmpas does not know what `sigma` or `band` are, and does not need to:
+    they carry coordinate values, so someone described them on purpose. Only
+    a *bare* dimension -- no values at all, the shape of a record axis -- has
+    actually been mistaken for a level here, so only that one is remarked on."""
+    ds = xr.Dataset({"v": ((extra, "lat", "lon"), np.zeros((4, 20, 40)))},
+                    coords={extra: (extra, np.arange(4.0), attrs),
+                            "lat": ("lat", LAT), "lon": ("lon", LON)})
+    gv = _open_asking(tmp_path, ds)
+    assert not gv.needs_setup and gv.setup()["doubts"] == []
+
+
+def test_a_plain_lat_lon_is_not_second_guessed(tmp_path):
+    """`lat(lat)` with no attributes scores 1, but someone called it latitude
+    and almost always meant it. A warning that fires on every ordinary file
+    is a warning nobody reads."""
+    ds = xr.Dataset({"v": (("lat", "lon"), np.zeros((20, 40)))},
+                    coords={"lat": ("lat", LAT), "lon": ("lon", LON)})
+    gv = _open_asking(tmp_path, ds)
+    assert not gv.needs_setup and gv.setup()["doubts"] == []
+
+
+def test_an_axis_attribute_on_an_unknown_name_is_flagged(tmp_path):
+    """The rotated-pole shape: nothing but `axis: Y` points at `rlat`, and a
+    projected axis in metres looks identical. It draws -- but it says so."""
+    ds = xr.Dataset({"tas": (("rlat", "rlon"), np.zeros((20, 40)))},
+                    coords={"rlat": ("rlat", np.linspace(-11, 11, 20),
+                                     {"axis": "Y"}),
+                            "rlon": ("rlon", np.linspace(-14, 14, 40),
+                                     {"axis": "X"})})
+    gv = _open_asking(tmp_path, ds)
+    assert not gv.needs_setup
+    assert any("rlat" in d and "rotated or projected" in d
+               for d in gv.setup()["doubts"])
+
+
+def test_the_dims_route_reads_and_writes(tmp_path):
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+
+    from gmpas.viewer import PAGE, _handler, bind
+
+    gv = _ioapi(tmp_path)
+    srv = bind(_handler(gv, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        got = json.loads(urllib.request.urlopen(f"{base}/api/dims").read())
+        assert got["current"]["time"] == "none" and "TSTEP" in got["dims"]
+
+        body = json.dumps({"time": "TSTEP", "level": "LAY"})
+        out = json.loads(urllib.request.urlopen(
+            f"{base}/api/dims?map={urllib.parse.quote(body)}").read())
+        assert out["state"] == "configured" and out["current"]["time"] == "TSTEP"
+        meta = json.loads(urllib.request.urlopen(f"{base}/api/meta").read())
+        assert meta["steps"] == 6
+
+        for bad, why in ((json.dumps({"nope": "TSTEP"}), "unknown role"),
+                         ("{not json", "not valid JSON"),
+                         (json.dumps(["TSTEP"]), "expected an object")):
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(f"{base}/api/dims?map={urllib.parse.quote(bad)}")
+            assert why in caught.value.read().decode()
+    finally:
+        srv.shutdown()
+
+
+def test_nothing_is_drawn_while_the_grid_is_unknown(tmp_path):
+    """A 500 naming the problem, not a picture of the wrong thing."""
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+
+    from gmpas.viewer import PAGE, _handler, bind
+
+    ds = xr.Dataset({"v": (("a", "b"), np.zeros((4, 5)))},
+                    coords={"a": np.arange(4.0), "b": np.arange(5.0)})
+    gv = _open_asking(tmp_path, ds)
+    assert gv.needs_setup
+    srv = bind(_handler(gv, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        # meta and dims still answer -- the page needs them to draw the panel
+        assert json.loads(urllib.request.urlopen(f"{base}/api/meta").read())["setup"]
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(
+                f"{base}/api/frame?var=v&time=0&level=0"
+                f"&extent=0,4,0,3&cmap=viridis")
+        assert "has not been worked out" in caught.value.read().decode()
     finally:
         srv.shutdown()
 

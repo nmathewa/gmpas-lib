@@ -774,6 +774,39 @@ def _point_series(series, var, cell, level, pins, progress, cancel, publish):
                               cancel=cancel, pool=pool)
 
 
+def _serve_dims(handler, viewer, q: dict) -> None:
+    """Read or set which dimension is x, y, time and level.
+
+    The one route in this server that changes anything -- every other one is
+    a pure read. `configure` takes the viewer's setup lock and stops the
+    background scan before it rebuilds, because that scan is reading the very
+    names being replaced.
+    """
+    if not hasattr(viewer, "configure"):
+        raise ValueError("this viewer's dimensions are fixed by its mesh")
+    if not q.get("map"):
+        return handler._send(json.dumps(viewer.setup()).encode(),
+                             "application/json")
+    raw = q["map"]
+    if len(raw) > _colour.MAX_JSON:
+        raise ValueError("dims: that is too large to be a dimension mapping")
+    try:
+        given = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"dims: not valid JSON: {exc}") from None
+    if not isinstance(given, dict):
+        raise ValueError("dims: expected an object of role -> dimension")
+    allowed = viewer.setup()["options"]
+    unknown = sorted(set(given) - set(allowed))
+    if unknown:
+        raise ValueError(f"dims: unknown role(s) {unknown}; "
+                         f"allowed: {sorted(allowed)}")
+    viewer.configure({k: str(v) for k, v in given.items() if v not in (None, "")})
+    return handler._send(json.dumps({"state": "configured",
+                                     **viewer.setup()}).encode(),
+                         "application/json")
+
+
 def _serve_series(handler, viewer, q: dict) -> None:
     """One point's series: 202 with a count while it reads, then the numbers.
 
@@ -866,6 +899,16 @@ def _handler(viewer: Viewer, html: str = ""):
                 if url.path == "/api/meta":
                     return self._send(json.dumps(viewer.describe()).encode(),
                                       "application/json")
+                if url.path == "/api/dims":
+                    return _serve_dims(self, viewer, q)
+                if getattr(viewer, "needs_setup", False):
+                    # No grid yet, so there is nothing honest to draw. Say so
+                    # once, here, rather than letting every route fail its own
+                    # way further down.
+                    raise ValueError(
+                        f"this file's grid has not been worked out yet: "
+                        f"{viewer.setup_problem} Choose the dimensions in the "
+                        f"panel on the right.")
                 if url.path == "/api/frame":
                     extent = [float(v) for v in q["extent"].split(",")]
                     # colour options only for a viewer that has them (--generic);
@@ -1529,6 +1572,14 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
 <div id="right">
   <h1>options</h1>
 
+  <div class="sec" id="dimssec" style="display:none"><label>dimensions</label>
+    <div class="hint" id="dimswhy"></div>
+    <div id="dimsForm"></div>
+    <div class="row" style="margin-top:6px"><button id="dimsApply">apply</button>
+      <button id="dimsAuto">detect again</button></div>
+    <div class="hint" id="dimshint"></div>
+  </div>
+
   <div class="sec" id="layersec" style="display:none"><label>layers</label>
     <div class="row"><select id="lyAddKind" style="flex:1"></select>
       <button id="lyAdd">add</button></div>
@@ -1696,7 +1747,64 @@ async function boot(){
   subtitle(); fillVars();
   if(M.scanning) setTimeout(pollScan, 400);
   renderAnimList();
-  pick(M.variables.find(v=>!v.static)?.name ?? M.variables[0].name);
+  if(await dimsBoot()) return;       // no grid yet: ask, and draw nothing
+  // a file with nothing plottable used to throw here and leave the page on
+  // "loading…" with no explanation
+  const first = M.variables.find(v=>!v.static) ?? M.variables[0];
+  if(!first){ say("this file has no variables to draw"); return; }
+  pick(first.name);
+}
+// ------------------------------------------------------- dimension mapping
+// Which dimension is x, y, time and level. Shown when the server could not
+// work it out, when it had to guess, and on demand -- the guess that draws a
+// plausible wrong map is more dangerous than the file that refuses to open.
+const dimsKey = () => "gmpas.dims."+M.file;
+let DIMS = {};
+async function dimsBoot(){
+  const s = M.setup;
+  if(!s) return false;                       // MPAS: its mesh fixes all this
+  try{ DIMS = JSON.parse(localStorage.getItem(dimsKey()) || "{}"); }catch(e){ DIMS={}; }
+  if(Object.keys(DIMS).length){
+    const ok = await dimsSend(DIMS, true);   // a remembered mapping, reapplied
+    if(ok) return false;
+    DIMS = {};                               // the file changed under it
+  }
+  if(s.needed){ dimsOpen(true); return true; }
+  if(s.doubts.length) dimsNotice(s.doubts);
+  return false;
+}
+function dimsNotice(doubts){
+  $("#dimssec").style.display="";
+  $("#dimswhy").innerHTML = "drawn, but these were guesses:<br>· "+
+                            doubts.map(esc).join("<br>· ");
+  dimsForm();
+}
+function dimsOpen(blocking){
+  const s = M.setup;
+  $("#dimssec").style.display="";
+  $("#dimswhy").textContent = blocking
+    ? "nothing can be drawn until this is answered. "+(s.problem||"")
+    : "which dimension is which";
+  if(blocking){ $("#stage").style.visibility="hidden"; say("choose the dimensions"); }
+  dimsForm();
+}
+function dimsForm(){
+  const host=$("#dimsForm"); host.innerHTML="";
+  const s=M.setup;
+  Object.entries(s.options).forEach(([role, spec])=>{
+    lyField(host, role, spec, DIMS[role] ?? (s.current[role]||""),
+            v=>{ if(v===null) delete DIMS[role]; else DIMS[role]=v; });
+  });
+}
+async function dimsSend(map, quiet){
+  try{
+    const r = await fetch("api/dims?map="+encodeURIComponent(JSON.stringify(map)));
+    const body = await r.json();
+    if(!r.ok){ if(!quiet) $("#dimshint").textContent = body.error; return false; }
+    try{ localStorage.setItem(dimsKey(), JSON.stringify(map)); }catch(e){}
+    M = await (await fetch("api/meta")).json();     // the axes moved: re-read
+    return true;
+  }catch(e){ if(!quiet) $("#dimshint").textContent = String(e); return false; }
 }
 function subtitle(){
   $("#sub").textContent = `${M.cells.toLocaleString()} cells \u00b7 `+
@@ -3150,6 +3258,29 @@ $("#pthead").onpointermove=ev=>{
   box.style.left=x+"px"; box.style.top=y+"px";
 };
 $("#pthead").onpointerup=()=>{ ptDrag=null; };
+
+$("#dimsApply").onclick=async()=>{
+  $("#dimshint").textContent="applying…";
+  if(!await dimsSend(DIMS)) return;           // the hint holds the reason
+  $("#dimshint").textContent="";
+  await dimsAfter();
+};
+$("#dimsAuto").onclick=async()=>{             // forget mine, read the file again
+  DIMS={};
+  try{ localStorage.removeItem(dimsKey()); }catch(e){}
+  if(!await dimsSend({})) return;
+  await dimsAfter();
+};
+async function dimsAfter(){
+  $("#stage").style.visibility="";
+  home=fit(M.home); view={...home}; rendered=null;
+  layout(); subtitle(); fillVars();
+  if(M.setup && M.setup.doubts.length) dimsNotice(M.setup.doubts);
+  else { $("#dimswhy").textContent="which dimension is which"; dimsForm(); }
+  const first=M.variables.find(v=>!v.static) ?? M.variables[0];
+  if(first) pick(first.name);
+}
+const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");
 
 boot();
 </script></body></html>
