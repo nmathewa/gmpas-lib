@@ -25,6 +25,13 @@ hundred with the mesh.
   the round trip to the metadata server rather than any CPU: simulating 5 ms
   per open, 1000 files took 5.2 s serially, 0.7 s with 8 workers and 0.3 s with
   16. Worth leaving alone on a shared login node.
+- `GMPAS_SERIES_POOL_IDLE` — seconds those workers stay alive after a series
+  finishes, so the next point clicked does not pay to start them again.
+  Defaults to 120; `0` shuts them down after every read. Starting eight takes
+  about 490 ms, which was the bulk of every click before they were kept; a
+  second click on a warm pool is ~45 ms. The price is memory — eight idle
+  readers are roughly 500 MB — so set this to `0` under a hard memory cap, and
+  accept the half second.
 
 ## Seeing where the time goes
 

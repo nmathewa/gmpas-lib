@@ -139,6 +139,147 @@ def series_pool(workers: int):
                                mp_context=_pool_context())
 
 
+#: How long a pool of readers waits, with nobody asking, before it gives its
+#: memory back. Long enough to cover a user clicking from point to point;
+#: short enough that a viewer left open overnight is not holding it.
+POOL_IDLE_SECONDS = 120.0
+POOL_IDLE_ENV = "GMPAS_SERIES_POOL_IDLE"
+
+
+def pool_idle() -> float:
+    """Seconds to keep idle readers. 0 tears them down after every read.
+
+    Eight warm workers are around 500 MB resident, which buys a point series
+    at 45 ms instead of 490 ms. That is the right trade at a desk and on a
+    login node with room; somewhere with a hard memory cap it is not, so it
+    can be turned off.
+    """
+    raw = os.environ.get(POOL_IDLE_ENV)
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:                  # unparseable: keep the default
+            pass
+    return POOL_IDLE_SECONDS
+
+
+def _warm_worker(_):
+    """Make a worker do its imports before a real read needs them."""
+    import netCDF4                                       # noqa: F401
+
+    _time.sleep(0.05)      # stay busy, so the next warm task starts a new worker
+    return True
+
+
+class ReaderPool:
+    """Reader processes kept warm between clicks, and released when idle.
+
+    Starting eight of these costs about 460 ms -- each spawns a Python and
+    imports netCDF4 -- and that was being paid on *every* click, because the
+    pool was built for one series and torn down after it. Against a 60-file
+    run whose actual read is 45 ms, nearly all of a click was process
+    startup, and the parallel path was slower than just reading the files
+    here (180 ms).
+
+    Kept forever instead, eight idle workers are ~500 MB of resident memory
+    (~61 MB each, PSS), which is not a thing to hold on a login node shared
+    with everyone else. So the pool is kept only while it is being used and
+    for `POOL_IDLE_SECONDS` after, then let go.
+    """
+
+    def __init__(self, idle: float | None = None):
+        self._idle = pool_idle() if idle is None else idle
+        self._pool = None
+        self._size = 0
+        self._users = 0
+        self._timer = None
+        self._lock = threading.Lock()
+
+    def lease(self, workers: int):
+        """A context manager over the shared pool, kept alive while held."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def held():
+            pool = self._acquire(workers)
+            try:
+                yield pool
+            finally:
+                self._release()
+
+        return held()
+
+    def warm(self, workers: int) -> None:
+        """Start the workers now, in the background, so a click need not.
+
+        Called when the point panel opens: by the time someone has chosen a
+        point to click, the readers are up and the first series costs what
+        the tenth does.
+        """
+        def run():
+            try:
+                with self.lease(workers) as pool:
+                    for fut in [pool.submit(_warm_worker, i) for i in range(workers)]:
+                        fut.result()
+            except Exception:       # a pool that cannot start is the read's
+                pass                # problem to report, not the warmer's
+
+        threading.Thread(target=run, daemon=True, name="gmpas-warm").start()
+
+    def discard(self, pool) -> None:
+        """Throw this pool away -- it broke. Without this a pool that cannot
+        start workers (a script with no `__main__` guard) would be handed to
+        every later read, each one failing and falling back to serial."""
+        with self._lock:
+            if pool is self._pool:
+                self._shut()
+
+    def close(self) -> None:
+        with self._lock:
+            self._cancel_timer()
+            self._shut()
+
+    # -- internals ---------------------------------------------------------
+
+    def _acquire(self, workers: int):
+        with self._lock:
+            self._cancel_timer()
+            if self._pool is None or self._size != workers:
+                self._shut()
+                self._pool = series_pool(workers)
+                self._size = workers
+            self._users += 1
+            return self._pool
+
+    def _release(self) -> None:
+        with self._lock:
+            self._users = max(0, self._users - 1)
+            if self._users or self._pool is None:
+                return
+            if not self._idle:              # keeping none: let go right away
+                return self._shut()
+            self._timer = threading.Timer(self._idle, self._expire)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _expire(self) -> None:
+        with self._lock:
+            self._timer = None
+            if not self._users:
+                self._shut()
+
+    def _cancel_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+    def _shut(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+            self._size = 0
+
+
 def _take(out, got, problems) -> None:
     """Fold one file's answers into the series, keeping any complaint."""
     for index, value in got:
@@ -306,6 +447,10 @@ class Series:
         # netcdf.LOCK.
         self._lock = netcdf.LOCK
 
+        #: Reader processes for point series, shared between reads so that
+        #: starting them is paid once rather than on every click.
+        self.readers = ReaderPool()
+
         with self._lock:
             first = self._open_first()
 
@@ -467,6 +612,7 @@ class Series:
 
     def close(self) -> None:
         self.stop_scan()
+        self.readers.close()
         with self._lock:
             for ds in self._open.values():
                 ds.close()
@@ -625,6 +771,7 @@ class Series:
                 # Worker processes re-import the caller's __main__, which fails
                 # for a script run from stdin, `python -c`, or some notebooks.
                 # The answer matters more than the speed: read it here instead.
+                self.readers.discard(pool)   # broken stays broken; do not keep it
                 print("gmpas: worker processes could not start (is this a "
                       "script without an `if __name__ == \"__main__\"` guard?) "
                       "-- reading the series in one process instead",

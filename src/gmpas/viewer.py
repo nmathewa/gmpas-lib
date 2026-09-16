@@ -28,6 +28,7 @@ import sys
 import threading
 import time as _time
 import webbrowser
+from contextlib import nullcontext as _nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -41,7 +42,7 @@ from . import timing
 from .cache import BuildCache
 from .mesh import MpasMesh
 from .raster import grid_points, target_grid
-from .series import PARALLEL_MIN_FILES, Series, series_pool, series_workers
+from .series import PARALLEL_MIN_FILES, Series, series_workers
 
 #: the matplotlib colormaps offered in the picker, chosen to cover the usual
 #: field kinds. Both viewers now offer the cmocean, Ferret and GrADS palettes
@@ -604,6 +605,19 @@ class Viewer:
             return state
         return {"state": "done", **self._series_body(cell, var, found)}
 
+    def warm_readers(self) -> None:
+        """Start the series readers now, because a point was just clicked.
+
+        Eight worker processes take about half a second to come up, and that
+        used to land on the first series a user asked for. Opening the point
+        panel is the earliest honest signal that one is coming, and the
+        seconds spent reading the value and reaching for the button are
+        enough to have them ready. Costs nothing if no series follows: the
+        pool lets its memory go once it has been idle a while.
+        """
+        if len(self.series) >= PARALLEL_MIN_FILES:
+            self.series.readers.warm(series_workers())
+
     def cancel_series(self, lon, lat, var, level=0) -> bool:
         """Stop the read for this point, if one is going."""
         cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
@@ -728,8 +742,9 @@ def _point_series(series, var, cell, level, pins, progress, cancel, publish):
     """A point's series, drawn coarse first and then in full.
 
     Two passes over one pool of reader processes: a strided preview so the
-    panel has something within a second or so, then every step. Starting the
-    workers costs about 100 ms, paid once here rather than once per pass.
+    panel has something within a second or so, then every step. The pool is
+    the Series' own and outlives this read, so starting the workers -- about
+    460 ms for eight -- is paid once per session rather than once per click.
     """
     import numpy as np
 
@@ -747,8 +762,8 @@ def _point_series(series, var, cell, level, pins, progress, cancel, publish):
     total = len(series.steps)
     workers = series_workers()
     parallel = workers > 1 and total >= PARALLEL_MIN_FILES
-    pool = series_pool(workers) if parallel else None
-    try:
+    held = series.readers.lease(workers) if parallel else _nullcontext(None)
+    with held as pool:
         if parallel and total > PREVIEW_STEPS * 2:
             stride = np.unique(np.linspace(0, total - 1, PREVIEW_STEPS).astype(int))
             coarse = series.at_cell(var, cell, level, pins, steps=stride,
@@ -757,17 +772,20 @@ def _point_series(series, var, cell, level, pins, progress, cancel, publish):
                 publish(coarse)
         return series.at_cell(var, cell, level, pins, progress=progress,
                               cancel=cancel, pool=pool)
-    finally:
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _serve_series(handler, viewer, q: dict) -> None:
     """One point's series: 202 with a count while it reads, then the numbers.
 
     `stop=1` cancels instead of asking, so a panel closed on a three-thousand
-    file run does not leave a pool of readers working for nobody.
+    file run does not leave a pool of readers working for nobody. `warm=1`
+    says a panel just opened and a series is plausible, so the readers may as
+    well start now rather than on the click.
     """
+    if q.get("warm"):
+        if hasattr(viewer, "warm_readers"):
+            viewer.warm_readers()
+        return handler._send(b'{"state":"warming"}', "application/json")
     if q.get("stop") and hasattr(viewer, "cancel_series"):
         stopped = viewer.cancel_series(float(q["lon"]), float(q["lat"]),
                                        q["var"], int(q.get("level", 0)))
@@ -2782,6 +2800,18 @@ function ptOpen(lon, lat, d){
   if(!moved) ptPlace(lon, lat);
   ptClamp();
   ptMark();
+  ptWarm();
+}
+// The reader processes take about half a second to start, and that used to
+// land on the first series asked for. The panel being open is the earliest
+// honest sign one is coming; starting them now spends that half second while
+// the user is reading the value instead. Debounced: dragging the point across
+// the map is one intent, not thirty.
+let ptWarmTimer=null;
+function ptWarm(){
+  if(!caps().probe) return;
+  clearTimeout(ptWarmTimer);
+  ptWarmTimer=setTimeout(()=>{ fetch("api/series?warm=1").catch(()=>{}); }, 250);
 }
 // Beside the point, on whichever side has room -- never on top of the cross
 // it just drew, and never parked in a corner over the data.
@@ -2900,7 +2930,10 @@ async function ptSeries(){
         if(PT && ptKey()===key) ptSeries();
         else if(PT){ $("#ptgo").disabled=false;   // the point or field moved
                      $("#ptstop").style.display="none"; }
-      }, body.values ? 500 : 150);
+      // A warm pool reads sixty files in ~45 ms, so a 150 ms first poll was
+      // most of the wait for a short run. Ask again almost at once, then back
+      // off once it is clear this is a long read.
+      }, body.values ? 500 : (done ? 150 : 60));
       return;
     }
     if(!r.ok){

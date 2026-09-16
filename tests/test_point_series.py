@@ -413,6 +413,102 @@ def test_the_page_is_given_the_preview_to_draw(long_run, monkeypatch):
         == "done"
 
 
+# ---------------------------------------- keeping the readers between clicks
+
+
+def test_the_readers_are_started_once_and_reused(long_run):
+    """The whole reason a second click is 45 ms and not 490: the same worker
+    processes answer it. Building a pool per read was nearly all of a click."""
+    import gmpas.viewer as V
+
+    pools = []
+    real = long_run.series.at_cell
+
+    def watch(*a, **k):
+        pools.append(k.get("pool"))
+        return real(*a, **k)
+
+    long_run.series.at_cell = watch
+    for cell in (0, 1, 0):
+        V._point_series(long_run.series, "theta", cell, 0, {}, None, None, None)
+    assert pools and all(p is not None for p in pools)
+    assert len({id(p) for p in pools}) == 1, "a pool per read is the bug"
+
+
+def test_idle_readers_give_their_memory_back(long_run):
+    """Eight warm workers are ~500 MB. That is the right trade while someone
+    is clicking about and the wrong one for a viewer left open all afternoon."""
+    from gmpas.series import ReaderPool
+
+    long_run.series.readers = pool = ReaderPool(idle=0.2)
+    with pool.lease(2) as first:
+        assert first is not None
+    assert pool._pool is first                    # still warm, just released
+    threading.Event().wait(0.6)
+    assert pool._pool is None, "idle readers should have been let go"
+    with pool.lease(2) as second:
+        assert second is not first                # rebuilt, not resurrected
+
+
+def test_readers_can_be_told_not_to_linger(monkeypatch):
+    """A memory-capped node can turn the whole trade off."""
+    from gmpas import series as S
+
+    monkeypatch.setenv(S.POOL_IDLE_ENV, "0")
+    assert S.pool_idle() == 0.0
+    pool = S.ReaderPool()
+    with pool.lease(2) as got:
+        assert got is not None
+    assert pool._pool is None, "idle=0 means gone as soon as the read is done"
+    monkeypatch.setenv(S.POOL_IDLE_ENV, "nonsense")
+    assert S.pool_idle() == S.POOL_IDLE_SECONDS
+
+
+def test_closing_the_series_takes_the_readers_with_it(long_run):
+    """A pool outliving its viewer keeps eight processes and their file
+    handles alive for nobody."""
+    from gmpas.series import ReaderPool
+
+    long_run.series.readers = pool = ReaderPool(idle=600)
+    with pool.lease(2):
+        pass
+    assert pool._pool is not None
+    long_run.series.close()
+    assert pool._pool is None
+
+
+def test_a_pool_that_cannot_start_is_not_handed_out_again(run):
+    """Without this, a script with no __main__ guard breaks the pool once and
+    then pays the broken-pool timeout on every later read before falling back."""
+    from gmpas.series import ReaderPool
+
+    pool = ReaderPool(idle=600)
+    with pool.lease(2) as got:
+        pass
+    pool.discard(got)
+    assert pool._pool is None
+    pool.discard(got)                  # discarding a stranger changes nothing
+    assert pool._pool is None
+
+
+def test_warming_starts_the_readers_before_a_series_is_asked_for(long_run):
+    """Opening the panel is the earliest honest sign a series is coming."""
+    long_run.warm_readers()
+    for _ in range(200):
+        if long_run.series.readers._pool is not None:
+            break
+        threading.Event().wait(0.02)
+    warmed = long_run.series.readers._pool
+    assert warmed is not None, "warming should have started a pool"
+    import gmpas.viewer as V
+    seen = []
+    real = long_run.series.at_cell
+    long_run.series.at_cell = lambda *a, **k: (seen.append(k.get("pool")),
+                                               real(*a, **k))[1]
+    V._point_series(long_run.series, "theta", 0, 0, {}, None, None, None)
+    assert seen[0] is warmed, "the read should use the pool warming started"
+
+
 # ------------------------------------- what the I/O review found, pinned down
 
 
