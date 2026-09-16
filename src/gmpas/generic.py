@@ -30,13 +30,14 @@ from pathlib import Path
 
 import numpy as np
 
+from . import colour as _colour
 from . import data as _data
 from . import layers as _layers
 from . import netcdf, palettes, timing
 from .cache import BuildCache, view_budget
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
-from .viewer import _overlay, _png, ramp
+from .viewer import _overlay, _png
 
 # How each axis is recognised, strongest evidence first. These are the CF
 # conventions' own markers, the same ones cf_xarray keys on -- `standard_name`,
@@ -227,32 +228,11 @@ KIND_CAPS = {
 #: a non-map variable is read whole to plot it; past this it is refused
 PLOT_READ_BYTES = 256 * 1024 * 1024
 
-#: the fast map's colour options: the layer colour-scale options that make
-#: sense for a raster, checked by the same code as a layer's
-COLOUR_OPTIONS = {
-    **{k: _layers._COLOUR_SCALE[k] for k in ("reverse", "norm", "gamma", "linthresh",
-                                             "extend", "under_color", "over_color")},
-    "bands": {**_layers._RASTER_COLOUR["bands"], "max": 252},   # 252 data palette entries
-    "missing_color": _layers._RASTER_COLOUR["missing_color"],
-}
-
-
-def clean_colour(colour) -> dict:
-    """A fast-map colour option set from the page, checked, or {} for none."""
-    import json
-
-    if colour in (None, "", {}):
-        return {}
-    if isinstance(colour, (str, bytes)):
-        if len(colour) > 4000:
-            raise ValueError("colour options are too large")
-        try:
-            colour = json.loads(colour)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"colour options are not valid JSON: {exc}") from None
-    opts = _layers._clean_options(colour, COLOUR_OPTIONS, "colour: ")
-    _layers._check_colour_options(opts, "colour: ")
-    return opts
+#: the fast map's colour options and their checking live in `gmpas.colour`,
+#: the one place both viewers get their colours from; these names stay because
+#: the page handler duck-types on `clean_colour` and callers import them
+COLOUR_OPTIONS = _colour.OPTIONS
+clean_colour = _colour.clean
 
 #: a figure-per-frame GIF renders each step through matplotlib (~0.3 s each)
 GIF_FIGURE_FRAMES = 1000
@@ -727,11 +707,7 @@ class GenericViewer:
             "home": list(self.home),
             "nx": self.nx,
             "ny": self.ny,
-            "cmaps": [n for names in self._palette_groups().values() for n in names],
-            "ramps": {n: ramp(n) for names in self._palette_groups().values()
-                      for n in names},
-            "palettes": self._palette_groups(),
-            "colour_options": COLOUR_OPTIONS,
+            **_colour.describe(),
             "kind_labels": KIND_LABELS,
             "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),
@@ -762,11 +738,6 @@ class GenericViewer:
     def clean_colour(colour) -> dict:
         """The fast map's colour options, checked (see `clean_colour`)."""
         return clean_colour(colour)
-
-    def _palette_groups(self) -> dict:
-        if not hasattr(self, "_groups"):
-            self._groups = palettes.groups()
-        return self._groups
 
     def _raster(self, var, step, level, extent, nx, ny) -> np.ndarray:
         return self._raster_masked(var, step, level, extent, nx, ny)[0]
@@ -813,20 +784,16 @@ class GenericViewer:
             # no colour range for a plain plot; 0..1 is an unused placeholder
             return self.plot(var, time, level, "auto", extent, nx, ny), 0.0, 1.0
 
-        opts = clean_colour(colour)
-        if not opts:
+        if not clean_colour(colour):
+            # the plain path does not need the mask, so it does not build one
             img = self._raster(var, time, level, extent, nx, ny)
             lo, hi = self._range(img, vmin, vmax)
             return _png(img, cmap, lo, hi, compress), lo, hi
-        from .palettes import encode
 
         img, on_grid = self._raster_masked(var, time, level, extent, nx, ny)
         lo, hi = self._range(img, vmin, vmax)
-        png, spec = encode.png(img, {**opts, "cmap": cmap or "viridis"}, lo, hi, compress,
-                               outside=~on_grid)
-        if meta is not None:
-            meta["colorbar"] = spec
-        return png, lo, hi
+        return _colour.frame_png(img, cmap, lo, hi, compress, colour,
+                                 outside=~on_grid, meta=meta), lo, hi
 
     @staticmethod
     def _range(img, vmin, vmax) -> tuple[float, float]:
