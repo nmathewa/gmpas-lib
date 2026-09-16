@@ -156,3 +156,21 @@ def test_explicit_method_overrides_the_threshold(simple_mesh):
 def test_unknown_method_is_rejected(simple_mesh):
     with pytest.raises(ValueError, match="auto"):
         should_raster(simple_mesh, "polygons")
+
+
+def test_grid_points_is_the_meshgrid_form_to_the_bit():
+    """The separable build is an optimisation, not an approximation: the same
+    products of the same doubles, so a view index cannot shift by a pixel."""
+    import numpy as np
+
+    from gmpas.raster import grid_points, target_grid
+
+    for extent, nx, ny in [((-40.0, 40.0, -30.0, 30.0), 137, 91),
+                           ((0.0, 360.0, -90.0, 90.0), 200, 100),
+                           ((-180.0, 180.0, -89.5, 89.5), 64, 33)]:
+        lon, lat = target_grid(extent, nx, ny)
+        lon2, lat2 = np.meshgrid(np.radians(lon), np.radians(lat))
+        want = np.stack([np.cos(lat2) * np.cos(lon2),
+                         np.cos(lat2) * np.sin(lon2),
+                         np.sin(lat2)], axis=-1).reshape(-1, 3)
+        assert np.array_equal(grid_points(extent, nx, ny), want)

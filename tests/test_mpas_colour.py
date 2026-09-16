@@ -238,3 +238,20 @@ def test_the_prep_pages_still_draw_their_own_single_colormap(tmp_path):
     assert "palettes" not in meta and "colour_options" not in meta
     png, lo, hi = mv.frame(meta["fields"][0]["name"], mv.home, 40, 30, 1)
     assert png[:4] == b"\x89PNG" and hi >= lo
+
+
+def test_the_colour_description_is_built_once(viewer):
+    """Sixty-three colormaps sampled at thirty-two stops cost ~100 ms, and
+    /api/meta was paying it on every call -- more than a whole first frame."""
+    from gmpas import colour
+
+    colour.describe.cache_clear()
+    first = colour.description()
+    assert colour.describe.cache_info().misses == 1
+    for _ in range(5):
+        colour.description()
+    assert colour.describe.cache_info().misses == 1
+    # and a caller mutating what it got cannot poison the next one
+    first["cmaps"].append("nonsense")
+    assert "nonsense" not in colour.description()["cmaps"]
+    assert viewer.describe()["cmaps"] == colour.description()["cmaps"]
