@@ -1,4 +1,8 @@
-# gmpas
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo/gmpas-dark.svg">
+  <img src="docs/logo/gmpas.svg" alt="gmpas" height="64">
+</picture>
+
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22003177.svg)](https://doi.org/10.5281/zenodo.22003177)
 [![tests](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml/badge.svg)](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/gmpas)](https://pypi.org/project/gmpas/)
