@@ -165,6 +165,11 @@ them with `ffmpeg` or similar.
 
 ### `gmpas view` — the interactive browser viewer
 
+There is a **[live demo](https://nmathewa.github.io/gmpas-lib/)** if you want
+to see it before installing anything: the same page this command serves, on a
+real MPAS run, rendering in your browser. See [demo/README](demo/README.md)
+for how it works and what it leaves out.
+
 ```bash
 gmpas view run/
 ```

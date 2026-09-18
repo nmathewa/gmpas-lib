@@ -51,6 +51,14 @@ Issues = "https://github.com/nmathewa/gmpas-lib/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/gmpas"]
 
+[tool.hatch.build.targets.sdist]
+# The web demo's dataset and its baked output are for GitHub Pages, not for
+# anyone installing the package: together they would take the sdist from
+# 3.2 MB to about 8, downloaded by every `pip install` that builds from
+# source. The scripts that make them stay in, so the demo is still readable
+# from a release tarball.
+exclude = ["docs/demo/data", "docs/demo/site"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = [

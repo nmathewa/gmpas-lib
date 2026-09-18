@@ -23,8 +23,17 @@ venv/
 *.npz
 *.png
 
+# ...with one deliberate exception: the web demo has to have something to
+# show, and CI has to be able to rebuild it without a secret or a download.
+# This is a reduced extract (see docs/demo/make_data.py), cleared for
+# publication, and it is kept out of the sdist by pyproject.toml.
+!docs/demo/data/demo.nc
+
 # ESMF_RegridWeightGen writes these into its cwd on every run
 PET*.RegridWeightGen.Log
 
 # OS
 .DS_Store
+
+# the web demo is baked from docs/demo/data by bake.py, not committed
+docs/demo/site/
