@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gmpas"
-version = "0.5.5"
+version = "0.5.6"
 description = "Fast plotting of MPAS output on its own native variable-resolution mesh"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -57,10 +57,18 @@ packages = ["src/gmpas"]
 # 3.2 MB to about 8, downloaded by every `pip install` that builds from
 # source. The scripts that make them stay in, so the demo is still readable
 # from a release tarball.
-exclude = ["docs/demo/data", "docs/demo/site"]
+# The trailing /** matters: a bare directory path here matches nothing, and
+# the exclude silently does not apply. Checked by tests/test_packaging.py,
+# because the failure is invisible until someone downloads the sdist.
+exclude = ["docs/demo/data/**", "docs/demo/site/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # builds a wheel and an sdist, which is about a minute. Run by default
+    # because what ships is worth checking; `-m "not slow"` to skip.
+    "slow: builds distributions or otherwise takes real time",
+]
 filterwarnings = [
     # a silent nan/overflow in geometry or masking is a bug, not a warning
     "error::RuntimeWarning",

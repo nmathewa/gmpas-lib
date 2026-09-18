@@ -1,6 +1,6 @@
 # Status
 
-As of 0.5.5, gmpas covers the pipeline from both ends.
+As of 0.5.6, gmpas covers the pipeline from both ends.
 
 **Postprocessing** — plotting, the interactive viewer, and conservative
 remapping — is implemented. `gmpas remap` writes the grid files ESMF needs,
@@ -22,6 +22,11 @@ and the GrADS tables, with discrete bands, out-of-range and missing colours,
 reverse and a power scale, and a colorbar drawn from the very colours the
 image was drawn with. Clicking the map opens that point's value and, on
 request, its time series through every file of the run.
+
+**There is a live demo** at <https://nmathewa.github.io/gmpas-lib/> — the
+viewer's own page on a real MPAS run, rendering in the browser with no server
+behind it, so the interface can be tried before anything is installed. See
+[demo/README](demo/README.md) for what it leaves out.
 
 **When `--generic` cannot work a file out** it does not guess and draw. The
 viewer starts, nothing is drawn, and a panel asks which variable is x and y
