@@ -1440,7 +1440,11 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #wrap{position:relative;line-height:0;box-shadow:0 0 0 1px var(--line);overflow:hidden;
       cursor:grab}
 #wrap.drag{cursor:grabbing}
-#wrap img{display:block;width:100%;height:100%;transform-origin:0 0;will-change:transform}
+/* -webkit-user-drag as well as the draggable attribute: without both, a drag
+   begun on the map becomes the browser's own image drag, which fires
+   pointercancel mid-gesture and leaves the pan half-finished. */
+#wrap img{display:block;width:100%;height:100%;transform-origin:0 0;will-change:transform;
+          -webkit-user-drag:none;user-select:none}
 #over{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 #scale{position:absolute;left:14px;bottom:14px;color:#fff;font-size:11px;
        text-shadow:0 0 3px #000,0 0 6px #000;pointer-events:none}
@@ -1536,7 +1540,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
     <div id="frame">
       <div id="latax"></div>
       <div id="wrap">
-        <img id="data"><img id="over">
+        <img id="data" draggable="false" alt=""><img id="over" draggable="false" alt="">
         <div id="grat"></div>
         <div id="ptmark"><i></i><i></i></div>
         <div id="scale"><span id="scaletext"></span><div id="scalebar"></div></div>
@@ -2834,13 +2838,32 @@ $("#wrap").onwheel = ev=>{
 };
 
 let drag=null;
+// Letting go of a drag has to be handled everywhere it can happen, not just
+// on pointerup. A drag begun on the map used to become the browser's own
+// image drag: that fires pointercancel instead of pointerup, so `drag` was
+// never cleared and the map then followed the cursor around the screen with
+// no button held. The images are `draggable="false"` now so it should not
+// arise -- and this still ends the drag if anything else takes the pointer.
+function endDrag(){
+  const moved = drag && drag.moved;
+  drag = null;
+  $("#wrap").classList.remove("drag");
+  return moved;
+}
 $("#wrap").onpointerdown = ev=>{
+  if(ev.button !== 0) return;         // right/middle: not a pan, and the
+                                      // context menu would swallow the up
+  ev.preventDefault();                // no text selection, no image drag
   drag={x:ev.clientX, y:ev.clientY, clon:view.clon, clat:view.clat, moved:false};
   try{ $("#wrap").setPointerCapture(ev.pointerId); }catch(e){}   // may refuse
   $("#wrap").classList.add("drag");
 };
 $("#wrap").onpointermove = ev=>{
   if(!drag) return;
+  // The button was released somewhere we never heard about -- a pointerup
+  // outside the window, a capture lost to something else. Stop, rather than
+  // panning for the rest of the session.
+  if(ev.buttons === 0){ if(endDrag()) schedule(0); return; }
   const r=$("#wrap").getBoundingClientRect(), b=boxOf(view);
   const dx=(ev.clientX-drag.x)/r.width*(b[1]-b[0]);
   const dy=(ev.clientY-drag.y)/r.height*(b[3]-b[2]);
@@ -2849,9 +2872,10 @@ $("#wrap").onpointermove = ev=>{
   clamp(); preview(); scalebar(); graticule(); ptMark();
   if(!covers(rendered, boxOf(view))) schedule(90);   // ran past the margin
 };
+$("#wrap").onpointercancel = ()=>{ if(endDrag()) schedule(0); };
+$("#wrap").ondragstart = ev=>ev.preventDefault();
 $("#wrap").onpointerup = async ev=>{
-  const moved=drag&&drag.moved; drag=null;
-  $("#wrap").classList.remove("drag");
+  const moved=endDrag();
   if(moved){ schedule(0); return; }
   if(!cur) return;
   const r=$("#wrap").getBoundingClientRect(), b=boxOf(view);
