@@ -49,15 +49,30 @@ A concave region (or one spanning a pole or a large longitude range on a
 downstream interpolation, not of this cropping step, but worth keeping in
 mind when drawing `--polygon`. Prefer a convex boundary, or subset a
 `static.nc` (post-interpolation) instead.
+
+`region_from_pts` reads a `.pts` region-specification file -- the format
+MPAS-Limited-Area's `create_region` script uses (see its README) -- and
+resolves it to the boundary/interior point `create_region` itself needs.
+`custom` (an explicit polygon) is a direct translation; `circle`/`ellipse`
+are generated as N-point rings via `circle_boundary`/`ellipse_boundary`
+(rotation about the region centre, a standard technique). Independent
+parser and geometry, written from the documented format, not adapted from
+the reference tool's own parser -- same licensing reason as the rest of
+this module. `channel` (a band between two latitudes spanning all
+longitudes) isn't supported -- it needs multiple disjoint boundaries, which
+`create_region`'s single-polygon interface doesn't -- see gmpas-lib#56.
 """
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
 
+from ..mesh import EARTH_RADIUS
 from ..paths import resolve_path
 from .scale import great_circle_distance, lonlat_to_xyz, xyz_to_lonlat
 
@@ -445,3 +460,166 @@ def plot_region(regional_mesh_path: str | Path, out_png: str | Path) -> Path:
         title=f"{mesh.n_cells:,} cells, {N_BDY_LAYERS} relaxation rings",
     )
     return save_figure(fig, out_png)
+
+
+# ----------------------------------------------------------------- .pts specs
+
+def _local_north(center: np.ndarray) -> np.ndarray:
+    """Unit tangent vector pointing north at `center` (a unit-sphere xyz
+    point) -- the north pole direction, projected onto the tangent plane
+    there. The reference direction `circle_boundary`/`ellipse_boundary`
+    measure their angles from, so a boundary ring's first point (and an
+    ellipse's `orientation_deg = 0`) sits due north of the centre.
+    """
+    north_pole = np.array([0.0, 0.0, 1.0])
+    tangent = north_pole - center * np.dot(north_pole, center)
+    norm = np.linalg.norm(tangent)
+    if norm < 1e-9:
+        # centre is (numerically) a pole -- any tangent direction is as good
+        # as any other, so fall back to an arbitrary one
+        probe = np.array([1.0, 0.0, 0.0])
+        fallback = np.cross(center, probe)
+        return fallback / np.linalg.norm(fallback)
+    return tangent / norm
+
+
+def _rotate_about_axis(point: np.ndarray, axis: np.ndarray, theta: float) -> np.ndarray:
+    """Rotate `point` (unit-sphere xyz) by `theta` radians about `axis`
+    (xyz, need not be unit length) -- Rodrigues' rotation formula, the
+    standard closed-form rotation about an arbitrary axis."""
+    k = axis / np.linalg.norm(axis)
+    return (point * math.cos(theta) + np.cross(k, point) * math.sin(theta)
+           + k * np.dot(k, point) * (1.0 - math.cos(theta)))
+
+
+def circle_boundary(center_lat_deg: float, center_lon_deg: float,
+                    radius_m: float, n: int = 100) -> tuple[np.ndarray, np.ndarray]:
+    """`n` points around a circle of `radius_m` centred at (`center_lat_deg`,
+    `center_lon_deg`) -- a closed ring in the (`boundary_lat_deg`,
+    `boundary_lon_deg`) shape `create_region` takes directly.
+
+    Constructed in two steps: first move the centre point the circle's
+    angular radius toward north -- `center` and `_local_north(center)` are
+    orthonormal, so `cos(r)*center + sin(r)*north` is exactly the point `r`
+    radians from centre in that direction, still on the unit sphere -- then
+    sweep that point all the way around the centre's own axis. (Rotating
+    `center` *about* the north axis, instead, moves it east-west, not
+    north-south -- easy to reach for by analogy with the sweep step below,
+    but a different operation.)
+    """
+    center = lonlat_to_xyz(math.radians(center_lon_deg), math.radians(center_lat_deg))
+    angular_radius = radius_m / EARTH_RADIUS
+    north = _local_north(center)
+    start = center * math.cos(angular_radius) + north * math.sin(angular_radius)
+
+    angles = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+    points = np.stack([_rotate_about_axis(start, center, a) for a in angles])
+    lon, lat = xyz_to_lonlat(points)
+    return np.degrees(lat), np.degrees(lon)
+
+
+def ellipse_boundary(center_lat_deg: float, center_lon_deg: float,
+                     semi_major_m: float, semi_minor_m: float,
+                     orientation_deg: float, n: int = 100) -> tuple[np.ndarray, np.ndarray]:
+    """`n` points around an ellipse centred at (`center_lat_deg`,
+    `center_lon_deg`), with semi-major/semi-minor axes in meters and
+    `orientation_deg` the clockwise rotation of the semi-major axis from
+    due north -- same parametrization `circle_boundary` builds on, with the
+    angular radius varying per angle instead of constant.
+    """
+    center = lonlat_to_xyz(math.radians(center_lon_deg), math.radians(center_lat_deg))
+    north = _local_north(center)
+    semi_major = semi_major_m / EARTH_RADIUS
+    semi_minor = semi_minor_m / EARTH_RADIUS
+    orientation = math.radians(orientation_deg)
+
+    points = []
+    for r in np.linspace(0.0, 2.0 * math.pi, n, endpoint=False):
+        radius = math.hypot(semi_major * math.cos(r), semi_minor * math.sin(r))
+        # see circle_boundary's docstring: this is a move toward north, not
+        # a rotation about the north axis
+        p0 = center * math.cos(radius) + north * math.sin(radius)
+        bearing = math.atan2(semi_minor * math.sin(r), semi_major * math.cos(r))
+        # rotating the whole ellipse clockwise by `orientation` increases
+        # every point's compass bearing by `orientation`; and since a
+        # geographic bearing increases clockwise while _rotate_about_axis's
+        # positive angle is the standard right-hand-rule sense about
+        # `center` (counterclockwise as seen from outside the sphere), the
+        # angle that actually achieves that bearing is its negation
+        points.append(_rotate_about_axis(p0, center, -(bearing + orientation)))
+
+    lon, lat = xyz_to_lonlat(np.stack(points))
+    return np.degrees(lat), np.degrees(lon)
+
+
+@dataclass
+class PtsRegion:
+    """A resolved `.pts` region spec, ready for `create_region`."""
+
+    name: str
+    boundary_lat_deg: np.ndarray
+    boundary_lon_deg: np.ndarray
+    point_lat_deg: float
+    point_lon_deg: float
+
+
+def region_from_pts(path: str | Path) -> PtsRegion:
+    """Parse a `.pts` region-specification file and resolve it to a
+    boundary/interior point ready for `create_region`. See the module
+    docstring for the supported `Type:`s and what isn't (yet) supported.
+    """
+    text_path = Path(path)
+    fields: dict[str, str] = {}
+    coords: list[tuple[float, float]] = []
+    for raw_line in text_path.read_text().splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if ":" in line:
+            key, _, value = line.partition(":")
+            fields[key.strip().lower()] = value.strip()
+        elif "," in line:
+            lat_str, lon_str = line.split(",", 1)
+            coords.append((float(lat_str), float(lon_str)))
+
+    if "point" not in fields:
+        raise ValueError(f"{path}: missing a required 'Point:' field")
+    point_lat_deg, point_lon_deg = (float(v) for v in fields["point"].split(","))
+    name = fields.get("name", text_path.stem)
+    region_type = fields.get("type", "").lower()
+
+    if region_type == "custom":
+        if not coords:
+            raise ValueError(
+                f"{path}: a 'custom' region needs boundary coordinate "
+                f"lines (lat, lon) after its 'Point:' line"
+            )
+        boundary_lat_deg = np.array([c[0] for c in coords])
+        boundary_lon_deg = np.array([c[1] for c in coords])
+    elif region_type == "circle":
+        if "radius" not in fields:
+            raise ValueError(f"{path}: a 'circle' region needs a 'Radius:' field")
+        boundary_lat_deg, boundary_lon_deg = circle_boundary(
+            point_lat_deg, point_lon_deg, float(fields["radius"]))
+    elif region_type == "ellipse":
+        required = ("semi-major-axis", "semi-minor-axis", "orientation-angle")
+        missing = [k for k in required if k not in fields]
+        if missing:
+            raise ValueError(f"{path}: an 'ellipse' region needs {missing}")
+        boundary_lat_deg, boundary_lon_deg = ellipse_boundary(
+            point_lat_deg, point_lon_deg, float(fields["semi-major-axis"]),
+            float(fields["semi-minor-axis"]), float(fields["orientation-angle"]))
+    elif region_type == "channel":
+        raise ValueError(
+            f"{path}: 'channel' regions (a band between two latitudes, not "
+            f"a single closed boundary) aren't supported yet -- see "
+            f"gmpas-lib#56."
+        )
+    else:
+        raise ValueError(
+            f"{path}: unknown region Type {fields.get('type')!r}; expected "
+            f"custom, circle, or ellipse"
+        )
+
+    return PtsRegion(name, boundary_lat_deg, boundary_lon_deg,
+                     point_lat_deg, point_lon_deg)
