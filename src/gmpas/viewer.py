@@ -1354,14 +1354,24 @@ def serve(data_path, mesh_path="", port=8765, nx=1200, ny=700, open_browser=Fals
 
 PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>gmpas view</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20112%20112%22%20width%3D%22112%22%20height%3D%22112%22%20role%3D%22img%22%20aria-label%3D%22gmpas%22%3E%3CclipPath%20id%3D%22m565649%22%3E%3Cpath%20d%3D%22M105.28%2C56.00%20L80.64%2C98.68%20L31.36%2C98.68%20L6.72%2C56.00%20L31.36%2C13.32%20L80.64%2C13.32%20Z%22%2F%3E%3C%2FclipPath%3E%3Cg%20clip-path%3D%22url%28%23m565649%29%22%3E%3Cpath%20d%3D%22M43.14%2C37.44%20L33.50%2C54.14%20L14.22%2C54.14%20L4.58%2C37.44%20L14.22%2C20.74%20L33.50%2C20.74%20Z%22%20fill%3D%22%234a90d9%22%20opacity%3D%220.53%22%2F%3E%3Cpath%20d%3D%22M43.14%2C74.56%20L33.50%2C91.26%20L14.22%2C91.26%20L4.58%2C74.56%20L14.22%2C57.86%20L33.50%2C57.86%20Z%22%20fill%3D%22%234a90d9%22%20opacity%3D%220.53%22%2F%3E%3Cpath%20d%3D%22M75.28%2C18.89%20L65.64%2C35.59%20L46.36%2C35.59%20L36.72%2C18.89%20L46.36%2C2.19%20L65.64%2C2.19%20Z%22%20fill%3D%22%234a90d9%22%20opacity%3D%220.53%22%2F%3E%3Cpath%20d%3D%22M75.28%2C56.00%20L65.64%2C72.70%20L46.36%2C72.70%20L36.72%2C56.00%20L46.36%2C39.30%20L65.64%2C39.30%20Z%22%20fill%3D%22%234a90d9%22%20opacity%3D%221.00%22%2F%3E%3Cpath%20d%3D%22M75.28%2C93.11%20L65.64%2C109.81%20L46.36%2C109.81%20L36.72%2C93.11%20L46.36%2C76.41%20L65.64%2C76.41%20Z%22%20fill%3D%22%234a90d9%22%20opacity%3D%220.53%22%2F%3E%3Cpath%20d%3D%22M107.42%2C37.44%20L97.78%2C54.14%20L78.50%2C54.14%20L68.86%2C37.44%20L78.50%2C20.74%20L97.78%2C20.74%20Z%22%20fill%3D%22%234a90d9%22%20opacity%3D%220.53%22%2F%3E%3Cpath%20d%3D%22M107.42%2C74.56%20L97.78%2C91.26%20L78.50%2C91.26%20L68.86%2C74.56%20L78.50%2C57.86%20L97.78%2C57.86%20Z%22%20fill%3D%22%234a90d9%22%20opacity%3D%220.53%22%2F%3E%3C%2Fg%3E%3Cpath%20d%3D%22M105.28%2C56.00%20L80.64%2C98.68%20L31.36%2C98.68%20L6.72%2C56.00%20L31.36%2C13.32%20L80.64%2C13.32%20Z%22%20fill%3D%22none%22%20stroke%3D%22%234a90d9%22%20stroke-width%3D%224.2%22%2F%3E%3C%2Fsvg%3E">
 <style>
-:root{--bg:#16181c;--panel:#1e2127;--line:#2c313a;--fg:#e6e8ec;--dim:#9aa3b0;--accent:#5dcaa5}
+/* --brand is the logo blue, for light backgrounds. --accent is the same
+   blue lifted for this dark one: the brand blue itself has a contrast
+   ratio of 3.28 against the page and looks muddy, where this is 5.32.
+   Text sitting *on* the accent is near-black (5.64), not white (3.34). */
+:root{--bg:#16181c;--panel:#1e2127;--line:#2c313a;--fg:#e6e8ec;--dim:#9aa3b0;
+      --brand:#2b6cb0;--accent:#4a90d9;--on-accent:#08121c}
 *{box-sizing:border-box}
 body{margin:0;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
      background:var(--bg);color:var(--fg);display:flex;height:100vh;overflow:hidden}
 #side{width:250px;flex:none;background:var(--panel);border-right:1px solid var(--line);
       display:flex;flex-direction:column;overflow:hidden}
 #side h1{font-size:13px;font-weight:500;margin:0;padding:12px 14px;border-bottom:1px solid var(--line)}
+/* The wordmark is generated: docs/logo/make_logo.py writes it, and it is
+   inlined here so the page stays one self-contained file with no extra
+   request -- which is also what lets the static demo serve it. */
+#side h1 .logo{display:block;height:22px;width:auto;margin-bottom:9px}
 #side h1 small{display:block;color:var(--dim);font-weight:400;margin-top:2px}
 .sec{padding:10px 14px;border-bottom:1px solid var(--line);flex:none}
 .sec label{display:block;color:var(--dim);font-size:11px;letter-spacing:.04em;
@@ -1372,7 +1382,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 #vars{flex:1;overflow-y:auto;padding:6px 0;min-height:60px}
 #vars div{padding:4px 14px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #vars div:hover{background:#252932}
-#vars div.on{background:var(--accent);color:#08201a}
+#vars div.on{background:var(--accent);color:var(--on-accent)}
 #vars div.static{color:var(--dim);font-style:italic}
 #main{flex:1;display:flex;flex-direction:column;min-width:0}
 #right{width:220px;flex:none;background:var(--panel);border-left:1px solid var(--line);
@@ -1495,7 +1505,7 @@ button{background:#252932;color:var(--fg);border:1px solid var(--line);border-ra
        padding:5px 9px;font:inherit;cursor:pointer}
 button:hover{border-color:var(--accent)}
 button:disabled{opacity:.5;cursor:default;border-color:var(--line)}
-button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
+button.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
 #animstate{font-variant-numeric:tabular-nums}
 #fps{width:80px}
 .animrow{display:flex;align-items:center;gap:6px;padding:4px 0;
@@ -1510,7 +1520,7 @@ button.on{background:var(--accent);color:#08201a;border-color:var(--accent)}
 .animrow-play:hover,.animrow-clear:hover{color:var(--accent)}
 </style></head><body>
 <div id="side">
-  <h1><span id="title">loading…</span><small id="sub"></small></h1>
+  <h1><svg class="logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 528 180" width="528" role="img" aria-label="gmpas"><clipPath id="m669052"><path d="M118.00,90.00 L92.00,135.03 L40.00,135.03 L14.00,90.00 L40.00,44.97 L92.00,44.97 Z"/></clipPath><g clip-path="url(#m669052)"><path d="M52.43,70.42 L42.26,88.04 L21.91,88.04 L11.74,70.42 L21.91,52.80 L42.26,52.80 Z" fill="#4a90d9" opacity="0.53"/><path d="M52.43,109.58 L42.26,127.20 L21.91,127.20 L11.74,109.58 L21.91,91.96 L42.26,91.96 Z" fill="#4a90d9" opacity="0.53"/><path d="M86.35,50.84 L76.17,68.46 L55.83,68.46 L45.65,50.84 L55.83,33.22 L76.17,33.22 Z" fill="#4a90d9" opacity="0.53"/><path d="M86.35,90.00 L76.17,107.62 L55.83,107.62 L45.65,90.00 L55.83,72.38 L76.17,72.38 Z" fill="#4a90d9" opacity="1.00"/><path d="M86.35,129.16 L76.17,146.78 L55.83,146.78 L45.65,129.16 L55.83,111.54 L76.17,111.54 Z" fill="#4a90d9" opacity="0.53"/><path d="M120.26,70.42 L110.09,88.04 L89.74,88.04 L79.57,70.42 L89.74,52.80 L110.09,52.80 Z" fill="#4a90d9" opacity="0.53"/><path d="M120.26,109.58 L110.09,127.20 L89.74,127.20 L79.57,109.58 L89.74,91.96 L110.09,91.96 Z" fill="#4a90d9" opacity="0.53"/></g><path d="M118.00,90.00 L92.00,135.03 L40.00,135.03 L14.00,90.00 L40.00,44.97 L92.00,44.97 Z" fill="none" stroke="#4a90d9" stroke-width="4.4"/><g transform="translate(144.0,126.0)"><path d="M45.6,-9.3 Q42.0,-4.5 37.6,-2.2 Q33.3,-0.0 27.6,-0.0 Q17.6,-0.0 11.0,-7.9 Q4.5,-15.8 4.5,-28.0 Q4.5,-40.2 11.0,-48.1 Q17.6,-55.9 27.6,-55.9 Q33.3,-55.9 37.6,-53.7 Q42.0,-51.4 45.6,-46.6 L45.6,-54.7 L63.2,-54.7 L63.2,-5.5 Q63.2,7.7 54.9,14.6 Q46.5,21.6 30.7,21.6 Q25.6,21.6 20.8,20.8 Q16.0,20.0 11.2,18.4 L11.2,4.8 Q15.8,7.4 20.2,8.7 Q24.6,10.0 29.0,10.0 Q37.6,10.0 41.6,6.2 Q45.6,2.5 45.6,-5.5 L45.6,-9.3 Z M34.1,-43.3 Q28.7,-43.3 25.6,-39.3 Q22.6,-35.3 22.6,-28.0 Q22.6,-20.5 25.5,-16.6 Q28.5,-12.7 34.1,-12.7 Q39.5,-12.7 42.6,-16.7 Q45.6,-20.7 45.6,-28.0 Q45.6,-35.3 42.6,-39.3 Q39.5,-43.3 34.1,-43.3 Z M130.7,-45.6 Q134.0,-50.7 138.5,-53.3 Q143.1,-56.0 148.6,-56.0 Q158.0,-56.0 162.9,-50.2 Q167.9,-44.4 167.9,-33.3 L167.9,-0.0 L150.3,-0.0 L150.3,-28.5 Q150.3,-29.2 150.4,-29.8 Q150.4,-30.5 150.4,-31.8 Q150.4,-37.6 148.7,-40.2 Q147.0,-42.8 143.2,-42.8 Q138.2,-42.8 135.5,-38.7 Q132.8,-34.6 132.7,-26.9 L132.7,-0.0 L115.1,-0.0 L115.1,-28.5 Q115.1,-37.6 113.5,-40.2 Q112.0,-42.8 108.0,-42.8 Q102.9,-42.8 100.2,-38.7 Q97.5,-34.6 97.5,-26.9 L97.5,-0.0 L79.9,-0.0 L79.9,-54.7 L97.5,-54.7 L97.5,-46.7 Q100.7,-51.3 104.9,-53.7 Q109.0,-56.0 114.1,-56.0 Q119.7,-56.0 124.1,-53.3 Q128.4,-50.5 130.7,-45.6 Z M201.7,-7.9 L201.7,20.8 L184.2,20.8 L184.2,-54.7 L201.7,-54.7 L201.7,-46.7 Q205.3,-51.5 209.7,-53.7 Q214.1,-56.0 219.8,-56.0 Q229.9,-56.0 236.4,-48.0 Q242.9,-39.9 242.9,-27.3 Q242.9,-14.7 236.4,-6.6 Q229.9,1.4 219.8,1.4 Q214.1,1.4 209.7,-0.8 Q205.3,-3.1 201.7,-7.9 Z M213.3,-43.3 Q207.7,-43.3 204.7,-39.2 Q201.7,-35.1 201.7,-27.3 Q201.7,-19.5 204.7,-15.4 Q207.7,-11.3 213.3,-11.3 Q218.9,-11.3 221.8,-15.4 Q224.8,-19.5 224.8,-27.3 Q224.8,-35.1 221.8,-39.2 Q218.9,-43.3 213.3,-43.3 Z M280.3,-24.6 Q274.8,-24.6 272.0,-22.8 Q269.3,-20.9 269.3,-17.3 Q269.3,-14.0 271.5,-12.1 Q273.7,-10.2 277.7,-10.2 Q282.6,-10.2 286.0,-13.7 Q289.4,-17.3 289.4,-22.6 L289.4,-24.6 L280.3,-24.6 Z M307.0,-31.2 L307.0,-0.0 L289.4,-0.0 L289.4,-8.1 Q285.8,-3.1 281.4,-0.8 Q277.0,1.4 270.8,1.4 Q262.2,1.4 257.0,-3.5 Q251.7,-8.5 251.7,-16.4 Q251.7,-26.0 258.3,-30.5 Q264.9,-35.0 279.0,-35.0 L289.4,-35.0 L289.4,-36.4 Q289.4,-40.5 286.1,-42.5 Q282.8,-44.4 275.9,-44.4 Q270.3,-44.4 265.4,-43.3 Q260.6,-42.1 256.4,-39.9 L256.4,-53.2 Q262.1,-54.6 267.7,-55.3 Q273.4,-56.0 279.0,-56.0 Q293.8,-56.0 300.4,-50.2 Q307.0,-44.3 307.0,-31.2 Z M366.0,-53.0 L366.0,-39.7 Q360.4,-42.0 355.1,-43.2 Q349.9,-44.4 345.3,-44.4 Q340.3,-44.4 337.9,-43.1 Q335.5,-41.9 335.5,-39.3 Q335.5,-37.2 337.3,-36.1 Q339.1,-35.0 343.8,-34.4 L346.9,-34.0 Q360.4,-32.3 365.0,-28.4 Q369.6,-24.5 369.6,-16.1 Q369.6,-7.4 363.2,-3.0 Q356.7,1.4 344.0,1.4 Q338.5,1.4 332.7,0.6 Q327.0,-0.3 320.8,-2.0 L320.8,-15.3 Q326.1,-12.8 331.6,-11.5 Q337.1,-10.2 342.7,-10.2 Q347.9,-10.2 350.4,-11.6 Q353.0,-13.0 353.0,-15.8 Q353.0,-18.2 351.2,-19.3 Q349.5,-20.5 344.1,-21.1 L341.1,-21.5 Q329.4,-23.0 324.7,-26.9 Q320.0,-30.9 320.0,-38.9 Q320.0,-47.6 326.0,-51.8 Q331.9,-56.0 344.2,-56.0 Q349.1,-56.0 354.4,-55.3 Q359.7,-54.5 366.0,-53.0 Z" fill="#e6e8ec"/></g></svg><span id="title">loading…</span><small id="sub"></small></h1>
   <div class="sec"><label style="margin:0"><input type="checkbox" id="showstatic"
     style="width:auto;vertical-align:-1px"> show mesh &amp; static arrays</label></div>
   <div id="vars"></div>
