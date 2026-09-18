@@ -153,6 +153,19 @@ def _esmf_supports_mpi(tool: str) -> bool | None:
     """
     import os
 
+    comm = _esmf_comm(tool)
+    return None if comm is None else comm != "mpiuni"
+
+
+def _esmf_comm(tool: str) -> str | None:
+    """Which MPI this ESMF was built against: `openmpi`, `mpich`, `mpiuni`...
+
+    Read from ESMF's own `esmf.mk`. Knowing the name, not merely whether it
+    is `mpiuni`, is what lets the right launcher be chosen -- see
+    `_mpi_launch_prefix`. `None` means it could not be determined.
+    """
+    import os
+
     candidates = [Path(tool).resolve().parent.parent / "lib" / "esmf.mk"]
     mkfile = os.environ.get("ESMFMKFILE")
     if mkfile:
@@ -171,7 +184,7 @@ def _esmf_supports_mpi(tool: str) -> bool | None:
             if not value:
                 _, _, value = stripped.partition(":")
             if value.strip():
-                return value.strip() != "mpiuni"
+                return value.strip().lower()
     return None
 
 
@@ -205,15 +218,99 @@ def _mpi_launch_prefix(ranks: int, tool: str) -> tuple[list[str], str | None]:
 
     import os
 
+    # An Open MPI build launched by srun is the failure this exists to avoid.
+    # srun bootstraps ranks through PMI/PMIx; unless this Open MPI was built
+    # against the PMI Slurm offers, every task comes up as its own
+    # MPI_COMM_WORLD of size one. Nothing announces that -- the ranks simply
+    # never find each other, all of them write the same output file, and they
+    # abort over the wreckage. Observed exactly so: three different Open MPI
+    # job families, every one of them reporting itself rank 0.
+    #
+    # Open MPI's own mpirun reads the Slurm allocation and forms one
+    # communicator across it, so for that build it is the right launcher even
+    # where srun exists. MPICH and Intel MPI derivatives speak Slurm's PMI2
+    # and are fine under srun.
+    comm = _esmf_comm(tool)
+    mpirun = shutil.which("mpirun") or shutil.which("mpiexec")
+    if comm == "openmpi" and mpirun:
+        return [mpirun, "-np", str(ranks)], (
+            "this ESMF is built against Open MPI, which srun cannot always "
+            f"bootstrap -- launching with {Path(mpirun).name} instead, so the "
+            f"ranks share one communicator rather than starting as {ranks} "
+            f"separate single-rank runs"
+        )
+
     srun = shutil.which("srun") if os.environ.get("SLURM_JOB_ID") else None
     if srun:
-        return [srun, "-n", str(ranks)], None
+        return _srun_prefix(srun, ranks)
 
-    launcher = shutil.which("mpirun") or shutil.which("mpiexec")
-    if launcher:
-        return [launcher, "-np", str(ranks)], None
+    if mpirun:
+        return [mpirun, "-np", str(ranks)], None
 
     return [], "no srun/mpirun/mpiexec on PATH -- running single-rank"
+
+
+def _slurm_int(name: str) -> int | None:
+    import os
+
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw.isdigit() and int(raw) > 0 else None
+
+
+def _srun_prefix(srun: str, ranks: int) -> tuple[list[str], str | None]:
+    """`srun -n` for `ranks`, but never more tasks than the job actually has.
+
+    `-n` counts TASKS. `ranks` reaches here from `detect_cores`, which counts
+    CPUs. Those are different numbers, and on Slurm the difference is fatal
+    rather than merely wasteful: `--ntasks=4 --cpus-per-task=24` grants 96
+    CPUs but only 4 tasks, and a step asking for 96 can never be created out
+    of it -- srun sits printing "Job step creation temporarily disabled",
+    waiting for resources this allocation will never have.
+
+    PBS sites never see it. There `mpirun -np` maps processes onto the slots
+    the job already holds instead of negotiating a step, so the same request
+    that hangs under Slurm simply runs. That is why remapping works on one
+    cluster and stalls on another with no change to gmpas.
+
+    Being already inside a step is worth saying too: `srun` from within an
+    interactive `srun --pty` shell is a *nested* step, and the outer one
+    holds the resources the inner one wants. `salloc` does not have that
+    problem, and `--overlap` excuses it.
+    """
+    import os
+
+    notes: list[str] = []
+
+    granted = _slurm_int("SLURM_NTASKS") or _slurm_int("SLURM_NPROCS")
+    if granted is not None and ranks > granted:
+        notes.append(
+            f"this allocation grants {granted} task(s), so asking srun for "
+            f"{granted} rather than {ranks} -- srun -n counts tasks, not "
+            f"cores; raise --ntasks to give ESMF more"
+        )
+        ranks = granted
+
+    # Nested step: the shell this is running in is itself holding the nodes.
+    # Capping the task count above is not enough on its own -- even a
+    # correctly sized step contends with the outer one for the very same
+    # resources, and Slurm answers "step creation temporarily disabled,
+    # retrying (Requested nodes are busy)" indefinitely rather than failing.
+    # --overlap is the sanctioned way to say "share them": the outer step is
+    # an idle bash prompt, so there is nothing to be crowded out of.
+    extra: list[str] = []
+    if os.environ.get("SLURM_STEP_ID") is not None:
+        extra.append("--overlap")
+        notes.append(
+            "already inside a job step (an interactive `srun --pty` shell "
+            "does this), so passing --overlap to let this one share its "
+            "nodes -- `salloc` allocates without a step and avoids the "
+            "question entirely"
+        )
+
+    note = "; ".join(notes) or None
+    if ranks <= 1:
+        return [], note or "one task in this allocation -- running single-rank"
+    return [srun, "-n", str(ranks), *extra], note
 
 
 #: lines of a failed run's output to quote back in the error
@@ -313,15 +410,18 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
                     "-w", weights.name, "-m", method]
     if not src_is_global:
         cmd.append("--src_regional")
-    cmd += ["--dst_regional", "--ignore_unmapped",
-                    # ESMF's own default logs every message from every rank,
-                    # and warns that this "may cause slowdown in performance"
-                    # -- real cost under -np 64+ on a shared/parallel
-                    # filesystem, not just noise. gmpas's own error handling
-                    # only reads captured stdout/stderr (below), never these
-                    # per-PET log files, so there is nothing here that relies
-                    # on them existing.
-                    "--no_log"]
+    cmd += ["--dst_regional", "--ignore_unmapped"]
+    # ESMF's own default logs every message from every rank, and warns that
+    # this "may cause slowdown in performance" -- real cost under -np 64+ on
+    # a shared/parallel filesystem, not just noise. So logging stays off
+    # while things are going well.
+    #
+    # It goes back on for the last attempt. ESMF's failures say "Please see
+    # the PET*.RegridWeightGen.Log files for a traceback", and with --no_log
+    # those files do not exist -- the one message pointing at the traceback
+    # is also the reason there isn't one. Better to pay for logs on the run
+    # that is about to be reported as a failure.
+    quiet_cmd = cmd + ["--no_log"]
     if not quiet:
         if note:
             print(f"  {note}")
@@ -335,10 +435,14 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
     t0 = time.perf_counter()
     for attempt in range(1, WEIGHT_ATTEMPTS + 1):
         weights.unlink(missing_ok=True)
-        code, tail = _run_streaming(cmd, out_dir, quiet)
+        last = attempt == WEIGHT_ATTEMPTS
+        if last and not quiet:
+            print("    last attempt — leaving ESMF's PET logs on, since a "
+                  "failure will point at them")
+        code, tail = _run_streaming(cmd if last else quiet_cmd, out_dir, quiet)
         if code == 0 and weights.exists():
             break
-        if attempt < WEIGHT_ATTEMPTS and not quiet:
+        if not last and not quiet:
             print(f"    attempt {attempt} failed (exit {code}), retrying")
     else:
         crash = " — it segfaulted" if code < 0 else ""
@@ -346,6 +450,7 @@ def ensure_weights(mesh_path, domain: TargetDomain, out_dir,
             f"ESMF_RegridWeightGen failed {WEIGHT_ATTEMPTS} times "
             f"(exit {code}){crash}.\n"
             + "\n".join(f"    {line}" for line in tail)
+            + f"\n    ESMF's own traceback is in {out_dir}/PET*.RegridWeightGen.Log"
         )
     if not quiet:
         note = f" after {attempt} attempts" if attempt > 1 else ""
