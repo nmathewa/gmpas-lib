@@ -63,6 +63,13 @@ def mesh_arrays(mesh) -> dict[str, np.ndarray]:
     }
 
 
+#: Coastlines, kept beside the dataset. Cartopy fetches Natural Earth from
+#: the network the first time it is asked, which is a download this build
+#: does not need and cannot rely on -- a demo that publishes without
+#: coastlines because a third-party host was down is a bad trade for 10 KB.
+COAST_CACHE = HERE / "data" / "coast.json"
+
+
 def coastlines(extent, margin: float = 5.0) -> list[list[list[float]]]:
     """Coastline polylines for the region, as plain [lon, lat] pairs.
 
@@ -70,9 +77,17 @@ def coastlines(extent, margin: float = 5.0) -> list[list[list[float]]]:
     itself far more cheaply, because a plate carree map is a linear mapping
     and the same polyline reprojects on every zoom for free. Clipped to the
     region so the demo does not carry the whole world's coastline.
+
+    Regenerated from cartopy when it can be, and otherwise read from the
+    copy committed beside the data. Delete that file to force a refresh.
     """
-    import cartopy.feature as cfeature
-    from shapely.geometry import box
+    if COAST_CACHE.exists():
+        return json.loads(COAST_CACHE.read_text())
+    try:
+        import cartopy.feature as cfeature
+        from shapely.geometry import box
+    except ImportError as exc:                 # cartopy is an optional extra
+        raise SystemExit(f"bake: no {COAST_CACHE.name} and no cartopy ({exc})")
 
     lon0, lon1, lat0, lat1 = extent
     clip = box(lon0 - margin, lat0 - margin, lon1 + margin, lat1 + margin)
@@ -87,6 +102,8 @@ def coastlines(extent, margin: float = 5.0) -> list[list[list[float]]]:
             if len(coords) > 1:
                 out.append([[round(float(x), 4), round(float(y), 4)]
                             for x, y in coords])
+    COAST_CACHE.write_text(json.dumps(out))
+    print(f"  wrote {COAST_CACHE} ({len(out)} polylines) -- commit it")
     return out
 
 
