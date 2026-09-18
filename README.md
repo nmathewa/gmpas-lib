@@ -5,6 +5,9 @@
 [![python](https://img.shields.io/badge/python-3.10%2B-blue)](docs/installation.md)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+**[Try the viewer in your browser](https://nmathewa.github.io/gmpas-lib/)** —
+the real interface on a real MPAS run, with nothing to install.
+
 
 ```python
 import gmpas

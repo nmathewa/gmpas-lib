@@ -1,0 +1,64 @@
+name: demo
+
+# Rebuild the GitHub Pages demo whenever the viewer it demonstrates changes.
+# The published page is viewer.PAGE itself, so a page edited without rebaking
+# would leave the demo showing a version of the interface that no longer
+# exists.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/gmpas/**"
+      - "docs/demo/**"
+      - ".github/workflows/demo.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never two deploys at once; let a newer commit supersede an in-flight one,
+# but do not cancel a deploy half way through.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[plot,test]"
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: bake
+        run: python docs/demo/bake.py
+
+      # The JavaScript rasterizer is a second implementation of the render
+      # path; this is what stops it drifting from the Python one unnoticed.
+      - name: check the browser draws what the server would
+        run: python -m pytest tests/test_demo.py -q
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/demo/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
