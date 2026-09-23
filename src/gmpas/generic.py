@@ -32,6 +32,7 @@ import numpy as np
 
 from . import colour as _colour
 from . import data as _data
+from . import derive as _derive
 from . import jobs as _jobs
 from . import layers as _layers
 from . import netcdf, palettes, timing
@@ -1072,6 +1073,10 @@ class GenericViewer:
         own order, then gathers -- a zoomed view of a global grid does not
         read the globe.
         """
+        if var not in self.ds.data_vars:
+            plan = _derive.parse(var, self._spatial_vars())
+            return _derive.evaluate(
+                plan, step, lambda name, s: self._gather(name, s, level, rows, cols))
         frow = (self.lat.size - 1 - rows) if self._lat_flip else rows
         fcol = (self.lon.size - 1 - cols) if self._lon_flip else cols
         r0, r1 = int(frow.min()), int(frow.max()) + 1
@@ -1129,9 +1134,12 @@ class GenericViewer:
         byte; with them, `palettes.encode`, and `meta["colorbar"]` describes
         the bar the page should draw beside it."""
         nx, ny = nx or self.nx, ny or self.ny
-        if var not in self._spatial_vars():
+        if var in self.ds.variables and var not in self._spatial_vars():
             # no colour range for a plain plot; 0..1 is an unused placeholder
             return self.plot(var, time, level, "auto", extent, nx, ny), 0.0, 1.0
+        if var not in self.ds.variables:
+            # a derive-box expression; one it cannot read says which forms it can
+            _derive.parse(var, self._spatial_vars())
 
         if not clean_colour(colour):
             # the plain path does not need the mask, so it does not build one

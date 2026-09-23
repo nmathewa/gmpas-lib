@@ -172,3 +172,15 @@ def test_the_right_button_does_not_start_a_pan(page):
     page.mouse.up(button="right")
     after = page.evaluate("() => ({...view})")
     assert after["clon"] == pytest.approx(before["clon"], abs=1e-9)
+
+
+def test_the_derive_box_draws_a_scalar_expression_and_finds_a_name_in_any_case(page):
+    """`theta * 2` was read as two field names; `THETA` missed `theta`."""
+    page.fill("#deriveExpr", "THETA")
+    page.click("#deriveBtn")
+    assert page.evaluate("() => cur.name") == "theta"          # the field itself
+    with page.expect_response(lambda r: "api/frame" in r.url) as resp:
+        page.fill("#deriveExpr", "theta * 2")
+        page.click("#deriveBtn")
+    assert resp.value.ok
+    assert page.evaluate("() => cur.name") == "theta * 2"

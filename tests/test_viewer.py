@@ -855,3 +855,12 @@ def test_nothing_launches_a_browser_behind_the_guards():
     assert users == ["viewer.py"]
 
     assert "webbrowser.open(" not in (root / "viewer.py").read_text()
+
+
+def test_the_derive_box_takes_a_number_and_any_case(small_viewer):
+    """`mslp + 1` read `1` as a field name, and `Q2` missed `q2`."""
+    v = small_viewer
+    base = v.values("areaCell", 0, 0)
+    np.testing.assert_allclose(v.values("areaCell / 100", 0, 0), base / 100)
+    np.testing.assert_allclose(v.values("2*AREACELL", 0, 0), 2 * base)
+    np.testing.assert_array_equal(v.values("AreaCell", 0, 0), base)
