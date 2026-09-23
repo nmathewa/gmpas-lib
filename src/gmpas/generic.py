@@ -263,6 +263,18 @@ def _is_time(ds, dim: str) -> bool:
             or dim.lower() in _TIME_NAMES)
 
 
+def _nc_is_time(nc, dim: str) -> bool:
+    """`_is_time` for a raw netCDF4 dataset, which the scan reads undecoded."""
+    if dim not in nc.variables:
+        return dim.lower() in _TIME_NAMES
+    var = nc.variables[dim]
+    return (str(getattr(var, "standard_name", "")).lower() == "time"
+            or str(getattr(var, "axis", "")).upper() == "T"
+            or str(getattr(var, "_CoordinateAxisType", "")).lower() == "time"
+            or " since " in str(getattr(var, "units", ""))
+            or dim.lower() in _TIME_NAMES)
+
+
 def _is_vertical(ds, dim: str) -> bool:
     if dim not in ds.variables:
         return dim.lower() in _VERTICAL_NAMES
@@ -771,14 +783,56 @@ class GenericViewer:
                                          if self.lat_name in ds.variables else None,
                                          ds[self.lon_name].values
                                          if self.lon_name in ds.variables else None)
+            tname = self.time_name
+            if not problem:
+                # xarray has decoded the time, so the units the scan saw are in
+                # `encoding` now; both must accept the same axis
+                tname, problem = self._time_in(
+                    {str(d) for da in ds.data_vars.values()
+                     if {self.lat_dim, self.lon_dim} <= set(da.dims) for d in da.dims},
+                    lambda d: _is_time(ds, d) or (d in ds.variables and " since "
+                                                  in str(ds[d].encoding.get("units", ""))),
+                    ds.variables)
             if problem:
                 ds.close()
                 raise ValueError(f"{path.name}: {problem}")
+            if tname != self.time_name:
+                ds = ds.rename({tname: self.time_name})
         self._open[path] = ds
         while len(self._open) > LRU_SIZE:
             _, old = self._open.popitem(last=False)
             old.close()
         return ds
+
+    def _time_in(self, dims, is_time, names=()) -> tuple[str | None, str]:
+        """This file's time dimension, and a problem if it has none.
+
+        Resolved per file, not taken from the first: across the ERA5/CDS
+        changeover one glob holds files stepping along `time` and files
+        stepping along `valid_time`, and a file read by the first one's name
+        was counted as a single step -- its other steps silently gone. A
+        file with no recognisable time axis, or more than one candidate, is
+        reported rather than guessed at.
+
+        `dims` are the dimensions of the file's gridded variables only: a
+        `time` that nothing on the grid steps along is not this file's time
+        axis. `names` are all its variables, to catch a rename that would
+        collide.
+        """
+        if self.time_name is None or self.time_name in dims:
+            return self.time_name, ""
+        found = [d for d in sorted(dims)
+                 if d not in (self.lat_dim, self.lon_dim) and is_time(d)]
+        if len(found) == 1:
+            if self.time_name in names:
+                return None, (f"steps along {found[0]!r}, but also has a variable "
+                              f"named {self.time_name!r}")
+            return found[0], ""
+        if not found:
+            return None, (f"no time dimension, where {self.path.name} steps "
+                          f"along {self.time_name!r}")
+        return None, (f"no {self.time_name!r} dimension, and more than one "
+                      f"that could be time: {found}")
 
     def _grid_problem(self, sizes, lat, lon) -> str:
         if lat is None or lon is None:
@@ -850,9 +904,17 @@ class GenericViewer:
                     if problem:
                         dropped.append(f"  {path.name}: {problem}")
                         continue
-                    counts[path] = sizes.get(self.time_name, 1) if self.time_name else 1
-                    if self.time_name in nc.variables and self.time_name in sizes:
-                        tv = nc[self.time_name]
+                    tname, problem = self._time_in(
+                        {d for v in nc.variables.values()
+                         if {self.lat_dim, self.lon_dim} <= set(v.dimensions)
+                         for d in v.dimensions},
+                        lambda d: _nc_is_time(nc, d), nc.variables)
+                    if problem:
+                        dropped.append(f"  {path.name}: {problem}")
+                        continue
+                    counts[path] = sizes[tname] if tname else 1
+                    if tname in nc.variables:
+                        tv = nc[tname]
                         units = getattr(tv, "units", "")
                         if " since " in units:
                             dates = cftime.num2date(tv[:], units,
