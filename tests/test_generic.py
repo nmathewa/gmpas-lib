@@ -337,6 +337,67 @@ def test_files_without_a_time_axis_are_one_step_each(tmp_path):
     assert gv.steps == 2 and gv.labels == ["2024-01-01 00:00", "2024-01-02 00:00"]
 
 
+def _write_changeover(tmp_path, later="valid_time"):
+    """Four files of two steps: the first two step along `time`, the last two
+    along `later` -- ERA5/CDS's `valid_time`, or a noleap `record` axis that
+    only its units say is time."""
+    truth = []
+    for k, (tname, day, base) in enumerate(
+            [("time", "2022-12-31", 290), ("time", "2023-01-01", 290),
+             (later, "2023-01-02", 340), (later, "2023-01-03", 340)]):
+        vals = np.stack([np.full((20, 40), base + 10.0 * s) for s in range(2)])
+        truth += [base, base + 10]
+        t = pd.date_range(day, periods=2, freq="12h")
+        if tname == "record":
+            t = ("record", [0.0, 0.5], {"units": f"days since {day}", "calendar": "noleap"})
+        xr.Dataset({"t2m": ((tname, "lat", "lon"), vals)},
+                   coords={tname: t, "lat": LAT, "lon": LON}).to_netcdf(tmp_path / f"era_{k}.nc")
+    return truth
+
+
+@pytest.mark.parametrize("later", ["valid_time", "record"])
+def test_files_that_name_their_time_axis_differently_keep_every_step(tmp_path, capsys, later):
+    truth = _write_changeover(tmp_path, later)
+    gv = GenericViewer(str(tmp_path / "era_*.nc"), strict=True)
+
+    assert gv.steps == 8
+    assert [gv.probe(10.0, 0.0, "t2m", i, 0)["value"] for i in range(8)] == truth
+    assert gv.labels[4:6] == ["2023-01-02 00:00", "2023-01-02 12:00"]
+    assert gv._series_values("t2m", 10.0, 0.0).tolist() == truth
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("extra, why", [
+    ({}, "no time dimension"),
+    # a time axis nothing on the grid steps along is not the file's
+    ({"valid_time": pd.date_range("2023-01-05", periods=3)}, "no time dimension"),
+])
+def test_a_file_with_no_time_axis_in_a_timed_glob_is_left_out_by_name(tmp_path, capsys,
+                                                                       extra, why):
+    _write_changeover(tmp_path)
+    xr.Dataset({"t2m": (("lat", "lon"), np.zeros((20, 40)))},
+               coords={"lat": LAT, "lon": LON, **extra}).to_netcdf(tmp_path / "era_9.nc")
+    gv = GenericViewer(str(tmp_path / "era_*.nc"), strict=True)
+
+    assert gv.steps == 8
+    assert "era_9.nc" not in [f.name for f in gv.files]
+    assert f"era_9.nc: {why}" in capsys.readouterr().err
+
+
+def test_a_time_axis_that_cannot_be_renamed_is_left_out_by_name(tmp_path, capsys):
+    """`valid_time` steps, but a `time` variable is already there: counting the
+    file and then failing every read of it is the worst of both."""
+    _write_changeover(tmp_path)
+    with xr.open_dataset(tmp_path / "era_3.nc") as ds:
+        ds = ds.load().assign(time=((), 0.0))
+    ds.to_netcdf(tmp_path / "era_3.nc")
+    gv = GenericViewer(str(tmp_path / "era_*.nc"), strict=True)
+
+    assert gv.steps == 6
+    assert "era_3.nc: steps along 'valid_time', but also has a variable named 'time'" \
+        in capsys.readouterr().err
+
+
 # ------------------------------------------------------ where the map lands
 
 
