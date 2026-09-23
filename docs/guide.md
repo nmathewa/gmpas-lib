@@ -224,8 +224,14 @@ fields:
 | Expression | Meaning |
 |---|---|
 | `a + b`, `a - b`, `a * b`, `a / b` | elementwise arithmetic on two fields |
+| `q * 1000`, `t2m - 273.15`, `2 * a` | the same with a number on either side |
 | `hypot(a, b)` | √(a²+b²) — vector magnitude, e.g. wind speed |
 | `diff(a)` | this timestep minus the previous one — a tendency |
+
+Names match regardless of case (`Q` finds `q`) unless the file has two fields
+that differ only in case. The box works the same under `view --generic`. The
+level slider follows the fields in the expression when they share one level
+axis.
 
 For wind speed you want the **cell-centred** components, not the raw edge
 wind: `hypot(uReconstructZonal, uReconstructMeridional)`.

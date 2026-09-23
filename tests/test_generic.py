@@ -396,6 +396,24 @@ def test_a_time_axis_that_cannot_be_renamed_is_left_out_by_name(tmp_path, capsys
     assert gv.steps == 6
     assert "era_3.nc: steps along 'valid_time', but also has a variable named 'time'" \
         in capsys.readouterr().err
+def test_the_derive_box_works_on_a_generic_file(tmp_path):
+    """--generic offered the derive box and evaluated none of it: every
+    expression, `q - q` included, fell through to a plain plot of a variable
+    named "q - q" and failed. Numbers, and the level, are the point here."""
+    q = (np.arange(3)[:, None, None, None] * 10 + np.arange(2)[None, :, None, None]
+         + np.zeros((3, 2, 20, 40))).astype("f4") / 1000
+    gv = _open(tmp_path, xr.Dataset(
+        {"q": (("valid_time", "pressure_level", "lat", "lon"), q)},
+        coords={"valid_time": TIMES, "lat": LAT, "lon": LON,
+                "pressure_level": ("pressure_level", [1000.0, 500.0], {"units": "hPa"})}))
+    at = lambda e: gv.probe(10.0, 0.0, e, 2, 1)["value"]           # noqa: E731
+    assert at("q") == pytest.approx(0.021)
+    assert at("Q") == at("q")
+    assert at("Q * 1000") == pytest.approx(21.0)
+    assert at("q - q") == 0.0
+    assert at("diff(q)") == pytest.approx(0.010)
+    png, lo, hi = gv.frame("q * 1000", 2, 1, gv.home, "viridis", None, None)
+    assert png[:4] == b"\x89PNG" and lo == pytest.approx(21.0)
 
 
 # ------------------------------------------------------ where the map lands

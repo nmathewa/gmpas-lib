@@ -38,6 +38,7 @@ import numpy as np
 from . import colour as _colour
 from . import jobs as _jobs
 from . import data as _data
+from . import derive as _derive
 from . import timing
 from .cache import BuildCache
 from .mesh import MpasMesh
@@ -62,17 +63,6 @@ MAX_SERIES_STEPS = 20000
 #: twelve of them is ~178 MB at 1200x700 and ~1.1 GB at 3840x2160. Kept as a
 #: name so anything importing it still resolves.
 VIEW_LRU_SIZE = 12
-
-#: derived-variable grammar: a fixed, small set of patterns, each mapped to
-#: one specific numpy op -- never eval()/exec() on the query string, since
-#: `var` is untrusted input reachable over the network once --host 0.0.0.0
-#: is in play for an HPC tunnel. Operands are plain field names (\w+), so
-#: these never nest into each other.
-_DIFF_EXPR = re.compile(r"^\s*diff\(\s*(\w+)\s*\)\s*$")         # np.diff along time
-_HYPOT_EXPR = re.compile(r"^\s*hypot\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*$")
-_BINARY_EXPR = re.compile(r"^\s*(\w+)\s*([+\-*/])\s*(\w+)\s*$")
-_BINARY_OPS = {"+": np.add, "-": np.subtract, "*": np.multiply, "/": np.divide}
-
 
 def ramp(name: str, n: int = 32) -> list[str]:
     """Hex stops for a colormap, so the browser's bar matches the image."""
@@ -371,34 +361,14 @@ class Viewer:
         return self._derived(var, time, level)
 
     def _derived(self, expr: str, time: int, level: int) -> np.ndarray:
-        """Evaluate a derived-variable expression against a fixed grammar.
+        """Evaluate a derived-variable expression against the fixed grammar
+        in `derive` -- never eval()/exec(). Every field operand is read
+        through `Series.values()`, as a real name would be."""
+        def read(name: str, step: int) -> np.ndarray:
+            return self.series.values(name, level=level, sel=self._pins(name), step=step)
 
-        Deliberately not eval()/exec(): `expr` is untrusted input, reachable
-        over the network once --host 0.0.0.0 is in play for an HPC tunnel.
-        Every operand is matched as a plain field name and read through
-        `Series.values()` directly, which raises its own clear KeyError for
-        an unknown one -- nothing here runs an arbitrary expression.
-        """
-        def read(name: str, step: int | None = None) -> np.ndarray:
-            return self.series.values(name, level=level, sel=self._pins(name),
-                                      step=time if step is None else step)
-
-        if m := _DIFF_EXPR.match(expr):
-            (name,) = m.groups()
-            cur = read(name)
-            if time == 0:
-                return np.full_like(cur, np.nan)   # no previous step to diff against
-            return cur - read(name, time - 1)
-        if m := _HYPOT_EXPR.match(expr):
-            a, b = m.groups()
-            return np.hypot(read(a), read(b))
-        if m := _BINARY_EXPR.match(expr):
-            a, op, b = m.groups()
-            return _BINARY_OPS[op](read(a), read(b))
-        raise KeyError(
-            f"{expr!r} is not a known variable, and not a recognised derived "
-            f"expression (a + b, a - b, a * b, a / b, hypot(a, b), or diff(a))"
-        )
+        plan = _derive.parse(expr, self.plottable_cell_vars())
+        return _derive.evaluate(plan, time, read)
 
     #: the handler forwards a colour parameter only to a viewer that has this,
     #: and returns the bar it produces as the X-Colorbar header
@@ -1527,7 +1497,7 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
   <div class="sec">
     <label>derive</label>
     <div style="display:flex;gap:6px">
-      <input type="text" id="deriveExpr" placeholder="a - b, hypot(a,b), diff(a)">
+      <input type="text" id="deriveExpr" placeholder="a - b, q * 1000, hypot(a,b), diff(a)">
       <button id="deriveBtn">show</button>
     </div>
   </div>
@@ -1921,19 +1891,33 @@ function exportModes(){
   off("#expnc", c.data ? "" : "netCDF export is for the map and the Hovmöller");
 }
 let probePt=null;       // last clicked map point: where series and profiles are taken
-// A derived expression ("a - b", "hypot(a,b)", "diff(a)") isn't in
+// A field by name as the server resolves it (gmpas/derive.py): the exact
+// spelling, else its one case-insensitive match -- ERA5 writes `q`, people type Q.
+function varNamed(n){
+  const exact=M.variables.find(v=>v.name===n);
+  if(exact) return exact;
+  const hits=M.variables.filter(v=>v.name.toLowerCase()===n.toLowerCase());
+  return hits.length===1 ? hits[0] : null;
+}
+// A derived expression ("a - b", "q * 1000", "hypot(a,b)", "diff(a)") isn't in
 // M.variables -- it's evaluated server-side against real fields, see
-// Viewer._derived -- so `cur` is built by hand rather than looked up.
-// No vertical level of its own: combining two fields' levels is ambiguous,
-// so this always shows level 0 of whatever the expression names.
+// gmpas/derive.py -- so `cur` is built by hand rather than looked up. A bare
+// name in the wrong case is just that field, with everything a field has.
+// The level slider follows the operands when they all share one level axis;
+// otherwise it stays at 0, since combining different axes' levels is ambiguous.
 function pickDerived(expr){
   if(!expr) return;
+  const same=varNamed(expr);
+  if(same){ pick(same.name); return; }
   stopPlayback();
-  cur = {name: expr, label: expr, static: false, levels: 1};
+  const ops=(expr.match(/\\w+/g)||[]).map(varNamed).filter(Boolean);
+  const lv=ops.length && ops.every(v=>v.levels===ops[0].levels && v.dim===ops[0].dim)
+    ? ops[0] : null;
+  cur = {name: expr, label: expr, static: false, levels: lv ? lv.levels : 1};
   [...$("#vars").children].forEach(d=>d.classList.remove("on"));
   $("#time").max=M.steps-1; $("#tlab").textContent=M.labels[$("#time").value|0];
-  $("#level").max=0; $("#level").value=0; $("#llab").textContent=0;
-  $("#lname").textContent="level"; $("#lpin").textContent="";
+  $("#level").max=cur.levels-1; $("#level").value=0; $("#llab").textContent=0;
+  $("#lname").textContent=(lv && lv.dim) || "level"; $("#lpin").textContent="";
   fillKinds();
   ptRefresh();
   overlay(); draw();
