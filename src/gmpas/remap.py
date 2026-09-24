@@ -23,6 +23,7 @@ import numpy as np
 import xarray as xr
 
 from .config import TargetDomain
+from .data import is_time_dim
 from .mesh import GLOBAL_COVERAGE
 from .scrip import coverage_of, write_scrip
 from .series import parse_time
@@ -719,11 +720,18 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
 
     with xr.open_dataset(path, decode_timedelta=False, engine="netcdf4") as ds:
         keep, skip = remappable(ds, fields)
-        n_time = int(ds.sizes.get("Time", 1))
-        has_source_time = "Time" in ds.dims
+        # The source's time axis is whatever it is called -- `Time` from the
+        # model core, or `time`/`valid_time` from ncrcat/CDO/xarray. Output
+        # is always written as `Time`, MPAS's own convention, whatever the
+        # source spelled it.
+        t_axis = next((str(d) for d in ds.dims
+                       if any(is_time_dim(ds[v], str(d))
+                              for v in ds.data_vars if d in ds[v].dims)), None)
+        n_time = int(ds.sizes[t_axis]) if t_axis is not None else 1
+        has_source_time = t_axis is not None
         times = valid_times(ds, path, n_time) if has_source_time else None
         xtime = (np.array(ds["xtime"].values)
-                if has_source_time and "xtime" in ds.variables else None)
+                 if has_source_time and "xtime" in ds.variables else None)
         calendar = ds.attrs.get("config_calendar_type") or "gregorian"
 
         for name in keep:
@@ -735,7 +743,7 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
 
             lev = level_dim(da)
             n_lev = int(da.sizes[lev]) if lev else 1
-            has_time = "Time" in da.dims
+            has_time = t_axis is not None and t_axis in da.dims
 
             # Keep the source dimension name. Calling every vertical axis
             # "lev" makes xarray try to align nVertLevels (55) against
@@ -753,7 +761,7 @@ def remap_file(path, weights: Weights, domain: TargetDomain, fields,
             block = np.empty(shape, dtype=np.float32)
 
             for t in range(n_time if has_time else 1):
-                slice_t = da.isel(Time=t) if has_time else da
+                slice_t = da.isel({t_axis: t}) if has_time else da
                 for k in range(n_lev):
                     src = (slice_t.isel({lev: k}) if lev else slice_t).values
                     dst = weights.apply(src)
