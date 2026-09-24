@@ -5,7 +5,7 @@ type: software
 authors:
   - given-names: Nirmal Mathew
     family-names: Alex
-version: 0.5.6
+version: 0.5.7
 date-released: "2026-09-18"
 repository-code: "https://github.com/nmathewa/gmpas-lib"
 url: "https://github.com/nmathewa/gmpas-lib"
