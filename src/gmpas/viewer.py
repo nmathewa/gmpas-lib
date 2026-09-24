@@ -284,9 +284,10 @@ class Viewer:
                 "label": _data.field_label(da),
                 # A history file carries the mesh alongside the fields, so
                 # latCell, edgesOnCell, meshDensity and friends all live on
-                # nCells too. Carrying a Time dimension is what separates a
-                # model field from mesh furniture.
-                "static": "Time" not in da.dims,
+                # nCells too. Carrying a time dimension is what separates a
+                # model field from mesh furniture -- found by CF evidence,
+                # not the literal spelling, so `time` from ncrcat/CDO counts.
+                "static": _data.time_axis(da) is None,
                 # The slider drives one axis. A field with several -- ozone
                 # by level and by month -- gets the first, and `_pins` holds
                 # the rest at 0, so the browser shows a defined slice rather

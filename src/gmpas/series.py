@@ -334,13 +334,55 @@ def _point_in(nc, name: str, var: str, cell: int, level: int, pins: dict,
     if var not in nc.variables:
         raise KeyError(f"{var!r} not in {name}")
     v = nc.variables[var]
-    picks = Series._cell_index(v, cell, level, pins, name)
+    t_axis = _nc_time_axis(v)
+    picks = Series._cell_index(v, cell, level, pins, name, t_axis=t_axis)
     out = []
     for index, local in wanted:
-        take = tuple(local if d == "Time" else picks[d] for d in v.dimensions)
+        take = tuple(local if d == t_axis else picks[d] for d in v.dimensions)
         raw = np.ma.asarray(v[take]).astype(np.float64)
         out.append((index, float(np.ma.filled(raw, np.nan).reshape(-1)[0])))
     return out
+
+
+def _nc_time_axis(v) -> str | None:
+    """Which of a raw netCDF4 variable's dimensions is its time axis, or None.
+
+    The raw read paths (`_point_in`, the scan) see undecoded netCDF4, where
+    attributes are read straight off the variables. Same evidence as
+    `data.is_time_dim`, minus what needs decoding (a datetime dtype): name,
+    CF attributes, and a `<unit> since <date>` units string. The exact
+    spelling `Time` is MPAS's own convention and is accepted as it always
+    was; anything else must be lower-case in `data.TIME_NAMES`.
+
+    The variable's own group's variables are consulted, so a dimension
+    carrying a coordinate can be judged by its attributes and not just its
+    name.
+    """
+    from .data import TIME_NAMES
+
+    def judge(d: str, coord) -> bool:
+        if d == "Time":
+            return True
+        if coord is None:
+            return d in TIME_NAMES
+        attrs = {a: getattr(coord, a) for a in coord.ncattrs()
+                 if not a.startswith("_")}
+        if str(attrs.get("standard_name", "")).lower() == "time":
+            return True
+        if str(attrs.get("axis", "")).upper() == "T":
+            return True
+        if str(attrs.get("_CoordinateAxisType", "")).lower() == "time":
+            return True
+        if " since " in str(attrs.get("units", "")):
+            return True
+        return d in TIME_NAMES
+
+    lookup = getattr(v, "group", None)
+    variables = lookup().variables if callable(lookup) else {}
+    for d in v.dimensions:
+        if judge(d, variables.get(d)):
+            return d
+    return None
 
 
 def _count_steps(path: str) -> tuple[str, int]:
@@ -354,10 +396,73 @@ def _count_steps(path: str) -> tuple[str, int]:
 
     try:
         with netCDF4.Dataset(path) as nc:
-            dim = nc.dimensions.get("Time")
+            # The time dimension is whatever this file names it -- `Time`
+            # from the model core, or `time`/`valid_time` from ncrcat/CDO.
+            # Judge it the way `_point_in` judges it, so the count and the
+            # reads agree on which axis the steps walk.
+            t_axis = _count_time_axis(nc)
+            dim = nc.dimensions.get(t_axis) if t_axis else None
             return path, len(dim) if dim is not None else 1
     except Exception:
         return path, 1                    # unreadable: leave it as one step
+
+
+def _count_time_axis(nc) -> str | None:
+    """A raw file's time dimension, judged like `_nc_time_axis`.
+
+    One dimension length has to be read here -- cheap as it is -- so the
+    evidence is kept to what the header carries: names and attributes, no
+    coordinate values.
+    """
+    from .data import TIME_NAMES
+
+    # An exact `Time` dimension is the model core's own and wins outright.
+    if "Time" in nc.dimensions:
+        return "Time"
+    for d, _ in nc.dimensions.items():
+        if d not in TIME_NAMES:
+            continue
+        coord = nc.variables.get(d)
+        if coord is None:
+            return d
+        attrs = {a: getattr(coord, a) for a in coord.ncattrs()
+                 if not a.startswith("_")}
+        if (str(attrs.get("standard_name", "")).lower() == "time"
+                or str(attrs.get("axis", "")).upper() == "T"
+                or str(attrs.get("_CoordinateAxisType", "")).lower() == "time"
+                or " since " in str(attrs.get("units", ""))):
+            return d
+        return d                        # name says time, no contrary evidence
+    return None
+
+
+def _first_time_axis(ds) -> str | None:
+    """The xarray dataset's time dimension, judged like `data.is_time_dim`.
+
+    One question, asked the same way everywhere: the initial count in
+    `__init__`, the scan, and `values()` all have to agree which axis the
+    steps walk, or a multi-step file is counted along one axis and read
+    along another.
+    """
+    from .data import TIME_NAMES
+
+    if "Time" in ds.sizes:
+        return "Time"
+    for d in ds.sizes:
+        if d not in TIME_NAMES:
+            continue
+        coord = ds.variables.get(d)
+        if coord is None:
+            return d
+        attrs = coord.attrs
+        if (str(attrs.get("standard_name", "")).lower() == "time"
+                or str(attrs.get("axis", "")).upper() == "T"
+                or str(attrs.get("_CoordinateAxisType", "")).lower() == "time"
+                or " since " in str(attrs.get("units", ""))
+                or np.issubdtype(coord.dtype, np.datetime64)):
+            return d
+        return d                        # name says time, no contrary evidence
+    return None
 
 
 def _read_point(job) -> list:
@@ -528,7 +633,12 @@ class Series:
         # maps to (file i, 0), which is a genuine timestep whatever the true
         # count turns out to be. Scrubbing during the scan shows real data,
         # never the wrong frame -- only fewer frames than there will be.
-        self._counts = {self.files[0]: int(first.sizes.get("Time", 1))}
+        # The first file's time axis is whatever it names it -- xarray has
+        # decoded it here, so `_is_time_dim` (the xarray-side check) judges
+        # it, and the scan must agree with this initial count.
+        first_t = _first_time_axis(first)
+        self._counts = {self.files[0]: int(first.sizes.get(first_t, 1))
+                        if first_t else 1}
         self.steps, self.labels = self._axis()
         self.scanning = False
 
@@ -683,7 +793,8 @@ class Series:
                 return False
             try:
                 with self._lock, netCDF4.Dataset(path) as nc:
-                    dim = nc.dimensions.get("Time")
+                    t_axis = _count_time_axis(nc)
+                    dim = nc.dimensions.get(t_axis) if t_axis else None
                     counts[path] = len(dim) if dim is not None else 1
             except Exception:
                 counts[path] = 1          # unreadable: leave it as one step
@@ -968,13 +1079,19 @@ class Series:
         return out
 
     @staticmethod
-    def _cell_index(v, cell: int, level: int, pins: dict, name: str = "") -> dict:
+    def _cell_index(v, cell: int, level: int, pins: dict, name: str = "",
+                    t_axis: str | None = None) -> dict:
         """Which index each of a variable's dimensions takes for one cell.
 
         The mesh dimension takes `cell`; a stacking axis takes `level`, or
         whatever `sel` pins it to. Named by dimension rather than by position
         because a diagnostic writes its levels wherever it likes -- the
         `nIsoLevels` convention this package already follows elsewhere.
+
+        `t_axis` names the variable's time dimension, from `_nc_time_axis`;
+        passing it here rather than re-detecting per call keeps the pick and
+        the hyperslab in `_point_in` reading the same axis. None means the
+        variable has none.
 
         Every index is checked here rather than left to netCDF, whose own
         complaint is "index exceeds dimension bounds" and names neither the
@@ -987,9 +1104,10 @@ class Series:
             raise KeyError(f"{unknown} is not a dimension of {v.name!r}"
                            f"{where}; it has {list(v.dimensions)}")
         picks = {}
-        stack = [d for d in v.dimensions if d != "Time" and d not in SPATIAL_DIMS]
+        stack = [d for d in v.dimensions
+                 if d != t_axis and d not in SPATIAL_DIMS]
         for dim in v.dimensions:
-            if dim == "Time":
+            if dim == t_axis:
                 continue
             if dim in SPATIAL_DIMS:
                 idx = cell
