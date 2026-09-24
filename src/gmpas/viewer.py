@@ -1331,7 +1331,8 @@ PAGE = """<!doctype html>
    ratio of 3.28 against the page and looks muddy, where this is 5.32.
    Text sitting *on* the accent is near-black (5.64), not white (3.34). */
 :root{--bg:#16181c;--panel:#1e2127;--line:#2c313a;--fg:#e6e8ec;--dim:#9aa3b0;
-      --brand:#2b6cb0;--accent:#4a90d9;--on-accent:#08121c}
+      --brand:#2b6cb0;--accent:#4a90d9;--on-accent:#08121c;--field:#14161a;
+      color-scheme:dark}       /* native parts -- pickers, spinners, scrollbars -- dark too */
 *{box-sizing:border-box}
 body{margin:0;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
      background:var(--bg);color:var(--fg);display:flex;height:100vh;overflow:hidden}
@@ -1346,8 +1347,12 @@ body{margin:0;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-ser
 .sec{padding:10px 14px;border-bottom:1px solid var(--line);flex:none}
 .sec label{display:block;color:var(--dim);font-size:11px;letter-spacing:.04em;
            text-transform:uppercase;margin-bottom:6px}
-select,input[type=text]{width:100%;background:#14161a;color:var(--fg);
+/* every field, not only type=text: number inputs, the JSON box, and inputs the
+   page creates without a type attribute were all left browser-white */
+select,textarea,input:not([type=range]):not([type=checkbox]):not([type=color]){
+  width:100%;background:var(--field);color:var(--fg);
   border:1px solid var(--line);border-radius:4px;padding:5px 6px;font:inherit}
+input[type=color]{background:var(--field);border:1px solid var(--line);border-radius:4px}
 input[type=range]{width:100%;accent-color:var(--accent)}
 #vars{flex:1;overflow-y:auto;padding:6px 0;min-height:60px}
 #vars div{padding:4px 14px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
