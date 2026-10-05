@@ -848,6 +848,30 @@ def _serve_hovmoller(handler, viewer, q: dict, extent) -> None:
     handler.wfile.write(png)
 
 
+def _serve_bind(handler, viewer, q: dict):
+    """Fit a saved layer preset to this file, or say which variables it lacks.
+
+    200 with the renamed stack; 400 with `missing` and `choices` when the
+    preset names variables this file does not have, so the page can ask for
+    each one instead of drawing a stack with a hole in it.
+    """
+    from .layers import MissingVariables
+
+    try:
+        mapping = json.loads(q.get("map") or "{}")
+        if not isinstance(mapping, dict):
+            raise ValueError("map must be a JSON object")
+        body = {"stack": viewer.bind_preset(q.get("stack", ""), mapping)}
+        status = 200
+    except MissingVariables as exc:
+        body = {"error": str(exc), "missing": exc.missing, "choices": exc.choices}
+        status = 400
+    except (ValueError, json.JSONDecodeError) as exc:
+        body = {"error": str(exc)}
+        status = 400
+    return handler._send(json.dumps(body).encode(), "application/json", status)
+
+
 def _handler(viewer: Viewer, html: str = ""):
     """Routes for one run. `html` overrides the page, which is how the
     dashboard splices its source switcher in without forking `PAGE`."""
@@ -872,6 +896,8 @@ def _handler(viewer: Viewer, html: str = ""):
                                       "application/json")
                 if url.path == "/api/dims":
                     return _serve_dims(self, viewer, q)
+                if url.path == "/api/layers/bind" and hasattr(viewer, "bind_preset"):
+                    return _serve_bind(self, viewer, q)
                 if getattr(viewer, "needs_setup", False):
                     # No grid yet, so there is nothing honest to draw. Say so
                     # once, here, rather than letting every route fail its own
@@ -1585,6 +1611,15 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
     <textarea id="lyJsonBox" style="display:none" spellcheck="false"></textarea>
     <div class="row" id="lyJsonRow" style="display:none;margin-top:4px">
       <button id="lyJsonApply" style="flex:1">apply JSON</button></div>
+    <div class="kv" style="margin-top:10px"><span>presets</span></div>
+    <div class="row"><select id="lyPreset" style="flex:1"></select>
+      <button id="lyPresetApply">apply</button></div>
+    <div class="row" style="margin-top:4px"><button id="lyPresetSave" style="flex:1">save as</button>
+      <button id="lyPresetRename">rename</button><button id="lyPresetDel">delete</button></div>
+    <div class="row" style="margin-top:4px"><button id="lyPresetExport" style="flex:1">export</button>
+      <button id="lyPresetImport" style="flex:1">import</button>
+      <input type="file" id="lyPresetFile" accept=".json,application/json" style="display:none"></div>
+    <div id="lyPresetMap"></div>
     <div class="hint" id="lyhint"></div>
   </div>
 
@@ -2382,6 +2417,105 @@ $("#lyJsonApply").onclick=()=>{
     $("#lyhint").textContent="";
   }catch(e){ $("#lyhint").textContent="JSON: "+e.message; }
 };
+// ------------------------------------------------------------ presets
+// A preset is a named stack kept for every file, not one: saved in the
+// browser, exported and imported as JSON. Applying one goes through the
+// server (layers.bind), which keeps each variable this file has, matches the
+// rest case-insensitively, and names whatever is still missing -- the page
+// then asks for each of those instead of drawing a stack with a hole in it.
+const PZ_KEY="gmpas.layer-presets";
+function pzLoad(){
+  try{ const p=JSON.parse(localStorage.getItem(PZ_KEY)||"{}");
+       return (p && typeof p==="object" && !Array.isArray(p)) ? p : {}; }
+  catch(e){ return {}; }
+}
+function pzStore(p){
+  try{ localStorage.setItem(PZ_KEY, JSON.stringify(p)); return true; }
+  catch(e){ $("#lyhint").textContent="presets: browser storage is not available"; return false; }
+}
+function pzRender(keep){
+  const sel=$("#lyPreset"), names=Object.keys(pzLoad()).sort();
+  sel.innerHTML="";
+  if(!names.length){ const o=document.createElement("option"); o.value="";
+    o.textContent="(none saved)"; sel.append(o); }
+  names.forEach(n=>{ const o=document.createElement("option"); o.value=n;
+    o.textContent=n; sel.append(o); });
+  if(keep && names.includes(keep)) sel.value=keep;
+}
+async function pzApply(stack, map){
+  $("#lyPresetMap").innerHTML="";
+  const r=await fetch("api/layers/bind?"+new URLSearchParams(
+    {stack:JSON.stringify(stack), map:JSON.stringify(map||{})}));
+  const d=await r.json();
+  if(r.ok){
+    LY=d.stack; lySel=Math.max(0, LY.layers.length-1); lyRender(); lyChanged(true);
+    $("#lyhint").textContent=""; return;
+  }
+  $("#lyhint").textContent="preset: "+d.error;
+  if(!d.missing) return;
+  // one choice per missing variable, then the same preset again with the map
+  const box=$("#lyPresetMap");
+  d.missing.forEach(name=>{
+    const row=document.createElement("div"); row.className="f";
+    const lab=document.createElement("span"); lab.textContent=name+" \u2192";
+    const sel=document.createElement("select"); sel.dataset.from=name;
+    d.choices.forEach(c=>{ const o=document.createElement("option"); o.value=c;
+      o.textContent=c; sel.append(o); });
+    row.append(lab, sel); box.append(row);
+  });
+  const go=document.createElement("button"); go.textContent="apply with these";
+  go.onclick=()=>{ const m={...(map||{})};
+    box.querySelectorAll("select").forEach(s=>{ m[s.dataset.from]=s.value; });
+    pzApply(stack, m); };
+  box.append(go);
+}
+$("#lyPresetApply").onclick=()=>{
+  const p=pzLoad(), n=$("#lyPreset").value;
+  if(p[n]) pzApply(p[n], {});
+};
+$("#lyPresetSave").onclick=()=>{
+  const n=(prompt("save the current layers as preset:", $("#lyPreset").value||"")||"").trim();
+  if(!n) return;
+  const p=pzLoad(); p[n]=JSON.parse(JSON.stringify(LY));
+  if(pzStore(p)) pzRender(n);
+};
+$("#lyPresetRename").onclick=()=>{
+  const p=pzLoad(), old=$("#lyPreset").value;
+  if(!p[old]) return;
+  const n=(prompt("rename preset:", old)||"").trim();
+  if(!n || n===old) return;
+  p[n]=p[old]; delete p[old];
+  if(pzStore(p)) pzRender(n);
+};
+$("#lyPresetDel").onclick=()=>{
+  const p=pzLoad(), n=$("#lyPreset").value;
+  if(!p[n] || !confirm(`delete preset "${n}"?`)) return;
+  delete p[n]; if(pzStore(p)) pzRender();
+};
+$("#lyPresetExport").onclick=()=>{
+  const blob=new Blob([JSON.stringify({gmpas_layer_presets:1, presets:pzLoad()}, null, 1)],
+                      {type:"application/json"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+  a.download="gmpas-layer-presets.json"; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+};
+$("#lyPresetImport").onclick=()=>$("#lyPresetFile").click();
+$("#lyPresetFile").onchange=async ()=>{
+  const f=$("#lyPresetFile").files[0]; $("#lyPresetFile").value="";
+  if(!f) return;
+  try{
+    const d=JSON.parse(await f.text()), got=(d && d.presets) || {};
+    const p=pzLoad(), bad=[];
+    let n=0;
+    for(const [name, st] of Object.entries(got)){
+      if(st && Array.isArray(st.layers)){ p[name]=st; n++; } else bad.push(name);
+    }
+    if(pzStore(p)) pzRender();
+    $("#lyhint").textContent=`imported ${n} preset(s)`+
+      (bad.length ? `; skipped ${bad.join(", ")} (not a layer stack)` : "");
+  }catch(e){ $("#lyhint").textContent="import: "+e.message; }
+};
+pzRender();
 // ------------------------------------------------------------- Hovmöller
 // Nothing is read until "compute": a year of hourly files is minutes of I/O,
 // and switching the plot menu must not start that. The server answers 202

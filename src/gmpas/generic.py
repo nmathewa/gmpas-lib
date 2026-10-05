@@ -1853,12 +1853,21 @@ class GenericViewer:
             return stack
         if stack is None or stack == "":
             stack = _layers.default_stack(var)
-        spatial = self._spatial_vars()
+        return _layers.clean(stack, self._spatial_vars(), self._level_counts())
+
+    def _level_counts(self) -> dict[str, int]:
+        """Each map variable's level-axis length, for checking pinned levels."""
         counts = {}
-        for name in spatial:
+        for name in self._spatial_vars():
             dims = self._stack_dims(self.ds[name])
             counts[name] = int(self.ds[name].sizes[dims[0]]) if dims else 1
-        return _layers.clean(stack, spatial, counts)
+        return counts
+
+    def bind_preset(self, stack, mapping: dict | None = None) -> dict:
+        """A saved layer preset fitted to this file -- see `layers.bind`."""
+        mapped, _ = _layers.bind(stack, self._spatial_vars(), self._level_counts(),
+                                 mapping)
+        return mapped
 
     def _centre(self, extent) -> tuple[float, float]:
         return (0.5 * (extent[0] + extent[1]), 0.5 * (extent[2] + extent[3]))

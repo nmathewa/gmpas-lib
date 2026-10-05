@@ -24,6 +24,7 @@ import re
 import numpy as np
 
 from . import data as _data
+from . import derive as _derive
 from . import palettes
 
 MAX_LAYERS = 24
@@ -490,6 +491,66 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
             clean_layer["name"] = layer["name"][:MAX_TEXT]
         out["layers"].append(clean_layer)
     return out
+
+
+class MissingVariables(ValueError):
+    """A preset names variables this file does not have.
+
+    `missing` lists every one of them, not only the first, so the page can
+    ask for all the replacements at once; `choices` are the file's map
+    variables to pick them from.
+    """
+
+    def __init__(self, missing: list[str], choices: list[str]):
+        self.missing, self.choices = missing, choices
+        super().__init__(f"this file has no variable(s) {missing}; map each to one "
+                         f"of {choices}")
+
+
+def bind(stack, spatial_vars, level_counts: dict[str, int],
+         mapping: dict | None = None) -> tuple[dict, Stack]:
+    """Fit a saved preset to this file: `(stack, cleaned)`.
+
+    Each variable a layer names is kept when the file has it, taken from
+    `mapping` (the preset's name -> this file's name) when given, or matched
+    case-insensitively as the derive box does (`T` finds `t`). Anything left
+    raises MissingVariables naming all of it, rather than drawing a stack
+    with a hole in it. The renamed stack is returned as the page holds it,
+    together with what `clean` makes of it -- so a preset is validated by
+    exactly the rules a hand-built stack is. Names only: no option, level or
+    colour in the preset is altered.
+    """
+    if isinstance(stack, (str, bytes)):
+        try:
+            stack = json.loads(stack)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"preset is not valid JSON: {exc}") from None
+    if not isinstance(stack, dict) or not isinstance(stack.get("layers"), list):
+        raise ValueError('a preset is a layer stack: {"figure": {...}, "layers": [...]}')
+    spatial = list(spatial_vars)
+    mapping = mapping or {}
+    out = {**stack, "layers": []}
+    missing: list[str] = []
+    for layer in stack["layers"]:
+        if not isinstance(layer, dict):
+            out["layers"].append(layer)            # clean says what is wrong with it
+            continue
+        layer = dict(layer)
+        for need in LAYER_KINDS.get(layer.get("kind"), {}).get("needs", []):
+            name = layer.get(need)
+            if not isinstance(name, str):
+                continue
+            to = mapping.get(name)
+            real = to if to in spatial else _derive.resolve(name, spatial)
+            if real is None:
+                if name not in missing:
+                    missing.append(name)
+            else:
+                layer[need] = real
+        out["layers"].append(layer)
+    if missing:
+        raise MissingVariables(missing, sorted(spatial))
+    return out, clean(out, spatial, level_counts)
 
 
 def _check_contour_options(opts: dict, where: str) -> None:
