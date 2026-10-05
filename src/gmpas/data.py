@@ -14,6 +14,14 @@ from .paths import resolve_path
 #: MPAS spatial dimensions, in the order tools care about
 SPATIAL_DIMS = ("nCells", "nEdges", "nVertices")
 
+#: names a time dimension has carried in files seen in practice, used only
+#: when the dimension carries no coordinate whose attributes say what it is.
+#: `Time` is MPAS's own; `time`, `valid_time` and `xtime` are what ncrcat,
+#: CDO and an xarray round-trip produce. `t` is deliberately NOT here: it is
+#: a plausible variable-specific axis, and the name fallback exists for bare
+#: record dimensions where there is nothing else to go on.
+TIME_NAMES = {"time", "times", "valid_time", "xtime"}
+
 
 def open_data(data_path: str | Path,
               mesh_path: str | Path = "") -> tuple[xr.Dataset, MpasMesh]:
@@ -98,8 +106,22 @@ def spatial_dim(da: xr.DataArray) -> str:
     )
 
 
+def time_axis(da: xr.DataArray) -> str | None:
+    """The field's time dimension, or None when it has one.
+
+    The first of its dimensions `is_time_dim` accepts. At most one is ever
+    recognised: a field with two time-like axes is not something this has
+    seen, and picking between them by anything other than position would be
+    a guess dressed as detection.
+    """
+    for d in da.dims:
+        if is_time_dim(da, str(d)):
+            return str(d)
+    return None
+
+
 def level_dims(da: xr.DataArray) -> list[str]:
-    """The stacking axes of a field: whatever is left once Time and the mesh go.
+    """The stacking axes of a field: whatever is left once time and the mesh go.
 
     Defined by exclusion rather than by a list of known names. The vertical
     dimension is whatever the person who wrote the diagnostic called it --
@@ -108,12 +130,59 @@ def level_dims(da: xr.DataArray) -> list[str]:
     that writes its own -- and a name list silently mis-plots every convention
     it has not been told about.
     """
-    return [str(d) for d in da.dims if d != "Time" and d not in SPATIAL_DIMS]
+    return [str(d) for d in da.dims
+            if d not in SPATIAL_DIMS and not is_time_dim(da, d)]
+
+
+def is_time_dim(da: xr.DataArray, dim: str) -> bool:
+    """Whether `dim` is a field's time axis, by CF evidence, then by name.
+
+    The attributes of the dimension's own coordinate variable are the
+    evidence: `standard_name: time`, `axis: T`, a `units` of the
+    `<unit> since <date>` shape, a datetime dtype. That is how the --generic
+    path already recognises time (generic._is_time), and it reads the file
+    rather than trusting a spelling.
+
+    The name is the fallback, for the bare record dimension MPAS history
+    output usually is -- `Time` with no coordinate at all. The exact
+    spelling `Time` is accepted whatever else, because that is the model
+    core's own convention; anything else must be lower-case in TIME_NAMES.
+    Case matters there: `TIME` is also plausible as a vertical axis spelled
+    in caps, and a name-only guess at that spelling is exactly how issue 123
+    misread `time` -- a time axis -- as a level, pinning the real vertical
+    axis out of reach.
+    """
+    if dim == "Time":
+        return True
+    if dim not in da.dims:
+        return dim in TIME_NAMES
+    # The dimension's own coordinate is the evidence, and a DataArray carries
+    # it on .coords whether attached to a dataset or not. Without one -- the
+    # bare record dimension MPAS history output usually is -- only the name
+    # can speak.
+    if dim not in da.coords:
+        return dim in TIME_NAMES
+    coord = da.coords[dim]
+    attrs = coord.attrs
+    if str(attrs.get("standard_name", "")).lower() == "time":
+        return True
+    if str(attrs.get("axis", "")).upper() == "T":
+        return True
+    if str(attrs.get("_CoordinateAxisType", "")).lower() == "time":
+        return True
+    if " since " in str(attrs.get("units", "")):
+        return True
+    if np.issubdtype(coord.dtype, np.datetime64):
+        return True
+    return dim in TIME_NAMES
 
 
 def select(da: xr.DataArray, time: int = 0, level: int = 0,
            sel: dict[str, int] | None = None) -> np.ndarray:
     """Reduce a field to one value per mesh element.
+
+    `time` indexes the field's time axis -- found by `is_time_dim`, which
+    reads CF attributes and so accepts `time` as well as MPAS's own `Time`.
 
     `level` indexes the field's stacking axis. Some fields have more than one
     -- `o3clim(nCells, nOznLevels, nMonths)` is ozone by level *and* by month
@@ -135,6 +204,13 @@ def select(da: xr.DataArray, time: int = 0, level: int = 0,
             f"selects nothing."
         )
 
+    # The time axis is indexed by `time`, not `sel`: naming it there would be
+    # a second way to say the same thing, and the two disagreeing is a silent
+    # wrong frame.
+    t_axis = time_axis(da)
+    if t_axis is not None:
+        sel.pop(t_axis, None)
+
     free = [d for d in level_dims(da) if d not in sel]
     if len(free) > 1:
         raise ValueError(
@@ -143,7 +219,8 @@ def select(da: xr.DataArray, time: int = 0, level: int = 0,
             f"Pin all but the one you want to vary, e.g. sel={{{free[0]!r}: 0}}."
         )
 
-    picks = {"Time": time, **sel, **{d: level for d in free}}
+    picks = {**({t_axis: time} if t_axis is not None else {}),
+             **sel, **{d: level for d in free}}
     for dim, idx in picks.items():
         if dim in da.dims:
             n = da.sizes[dim]

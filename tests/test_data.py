@@ -91,6 +91,83 @@ def test_out_of_range_index_names_the_dimension_and_size(diag_beside_mesh):
     ds.close()
 
 
+def test_a_time_dimension_not_named_Time_is_still_time(tmp_path):
+    """Issue 123: `time` from ncrcat/CDO/xarray was read as a stacking axis.
+
+    The consequence was quiet: the field sorted as mesh furniture, the level
+    slider drove the time axis, and the real vertical axis sat pinned at 0
+    with no way to reach it. The axis is recognised the way the --generic
+    path already recognises one -- CF attributes where there is a coordinate,
+    the name where there is not -- so every read path sees a time axis here.
+    """
+    vals = np.arange(2 * 4 * 5, dtype="f4").reshape(2, 4, 5)
+    ds = xr.Dataset({
+        "theta": (("time", "nCells", "nVertLevels"), vals),
+        "time": (("time",), np.array(["2020-01-01", "2020-01-02"],
+                                     dtype="datetime64[ns]")),
+    })
+
+    from gmpas.data import level_dims, time_axis
+
+    assert time_axis(ds.theta) == "time"
+    assert level_dims(ds.theta) == ["nVertLevels"]
+    # `time` is indexed by the `time` argument, `level` drives the vertical
+    assert select(ds.theta, time=1, level=2) == pytest.approx(vals[1, :, 2])
+
+
+def test_a_time_dimension_with_units_since_is_time_without_a_datetime_dtype():
+    """`hours since 2020-01-01` is how ncrcat writes it: numeric values, the
+    time declared in the coordinate's units string."""
+    ds = xr.Dataset({
+        "theta": (("time", "nCells"), np.zeros((3, 4), "f4")),
+        "time": (("time",), np.array([0., 6., 12.]),
+                 {"units": "hours since 2020-01-01"}),
+    })
+
+    from gmpas.data import time_axis
+
+    assert time_axis(ds.theta) == "time"
+
+
+def test_a_bare_lowercase_time_record_dimension_is_time():
+    """MPAS history output has no time coordinate at all -- the name is all
+    there is, and `time` is one of the spellings that means it."""
+    da = xr.DataArray(np.zeros((3, 4)), dims=("time", "nCells"), name="fld")
+
+    from gmpas.data import time_axis
+
+    assert time_axis(da) == "time"
+    assert time_axis(xr.DataArray(np.zeros((3, 4)), dims=("Time", "nCells"))) \
+        == "Time"
+
+
+def test_a_dimension_named_t_is_not_taken_for_time():
+    """`t` is a plausible variable-specific axis, and a name list that grabs
+    it is exactly what the level_dims docstring warns against. `TIME` in
+    caps is likewise left as a stacking axis: case matters in the fallback,
+    because a guess at that spelling is how `time` was once misread."""
+    from gmpas.data import time_axis
+
+    for spelling in ("t", "TIME", "Temp"):
+        da = xr.DataArray(np.zeros((3, 4)), dims=(spelling, "nCells"),
+                          name="fld")
+        assert time_axis(da) is None, spelling
+
+
+def test_time_argument_takes_the_time_axis_not_sel(tmp_path):
+    """`sel` naming the time axis is dropped rather than honoured twice.
+
+    After the fix a lowercase-time field could have its time axis named in
+    `sel`, which would have meant two ways to say one index -- and the two
+    disagreeing is a silent wrong frame. `time` is the only way.
+    """
+    vals = np.arange(2 * 4, dtype="f4").reshape(2, 4)
+    ds = xr.Dataset({"fld": (("time", "nCells"), vals)})
+
+    # sel={"time": 1} is ignored: time=0 wins, the first step is returned
+    assert select(ds.fld, time=0, sel={"time": 1}) == pytest.approx(vals[0])
+
+
 def test_a_custom_vertical_dimension_is_indexed_like_any_other(tmp_path):
     """A build writing temperature_isobaric(Time, nCells, nIsoLevels).
 

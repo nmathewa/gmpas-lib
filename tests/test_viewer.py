@@ -136,6 +136,49 @@ def small_viewer(tmp_path):
     v.series.close()
 
 
+def test_a_lowercase_time_dimension_drives_time_not_the_slider(tmp_path):
+    """Issue 123, at the surface the user meets.
+
+    `theta(time, nCells, nVertLevels)` across two files: before the fix
+    `describe` reported the field static (mesh furniture), the slider drove
+    `time` with one position, and `nVertLevels` was pinned out of reach.
+    After it, the field is a model field, the slider drives the vertical,
+    and the time axis the steps walk is `time`.
+    """
+    import xarray as xr
+
+    from conftest import write_mesh
+    from gmpas.viewer import Viewer
+
+    run = tmp_path / "run"
+    run.mkdir()
+    mesh = write_mesh(tmp_path / "m.nc", [(0.0, 0.0), (10.0, 0.0)])
+    for i in range(2):
+        vals = np.arange(3 * 2 * 4, dtype="f4").reshape(3, 2, 4) + i
+        xr.Dataset({
+            "theta": (("time", "nCells", "nVertLevels"), vals),
+        }).to_netcdf(
+            run / f"history.2012-02-25_{i:02d}.00.00.nc")
+
+    v = Viewer(run, mesh_path=str(mesh), nx=20, ny=20)
+    try:
+        row = next(r for r in v.describe()["variables"] if r["name"] == "theta")
+        assert row["static"] is False
+        assert row["dim"] == "nVertLevels"
+        assert row["levels"] == 4
+        assert row["pinned"] == []
+
+        assert len(v.series) == 6              # 3 steps in each of 2 files
+        # step 5 = file 1, local time 2, level 0 -- the whole point: the
+        # step walks the time axis the file spells `time`. File i's fields
+        # carry +i, so file 1's last step is `vals` itself (the loop's last
+        # write) and file 0's first step is that minus one.
+        assert v.values("theta", 5, 0) == pytest.approx(vals[2, :, 0])
+        assert v.values("theta", 0, 0) == pytest.approx(vals[0, :, 0] - 1.0)
+    finally:
+        v.series.close()
+
+
 def test_a_second_stacking_axis_is_pinned_rather_than_dropped(tmp_path):
     """`select` refuses two free axes; a browser cannot show an exception.
 
