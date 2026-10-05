@@ -54,7 +54,6 @@ _PRESSURE_UNITS = {"pa", "hpa", "kpa", "mbar", "millibar", "millibars", "mb", "b
 
 _LAT_NAMES = {"lat", "latitude", "lats", "nav_lat", "xlat", "glat"}
 _LON_NAMES = {"lon", "longitude", "lons", "long", "nav_lon", "xlong", "xlon", "glon"}
-_TIME_NAMES = {"time", "t", "times", "valid_time", "xtime"}
 _VERTICAL_NAMES = {"plev", "lev", "level", "levels", "isobaric", "pressure",
                    "height", "depth", "altitude", "z", "nisolevels"}
 _VERTICAL_STANDARD_NAMES = {"air_pressure", "altitude", "height", "depth",
@@ -252,28 +251,20 @@ def _pick_role(chosen, dims, where: str, role: str, detect=None):
 
 
 def _is_time(ds, dim: str) -> bool:
+    """`data.is_time_coord` -- the MPAS reader's rule, so a file reads the same
+    with and without --generic."""
     if dim not in ds.variables:                 # a bare dimension, no coordinate
-        return dim.lower() in _TIME_NAMES
+        return _data.is_time_name(dim)
     var = ds[dim]
-    return (np.issubdtype(var.dtype, np.datetime64)
-            or var.dtype == object and dim.lower() in _TIME_NAMES     # cftime
-            or str(var.attrs.get("standard_name", "")).lower() == "time"
-            or str(var.attrs.get("axis", "")).upper() == "T"
-            or str(var.attrs.get("_CoordinateAxisType", "")).lower() == "time"
-            or " since " in str(var.attrs.get("units", ""))
-            or dim.lower() in _TIME_NAMES)
+    return _data.is_time_coord(dim, var.attrs, var.dtype, var.encoding)
 
 
 def _nc_is_time(nc, dim: str) -> bool:
     """`_is_time` for a raw netCDF4 dataset, which the scan reads undecoded."""
     if dim not in nc.variables:
-        return dim.lower() in _TIME_NAMES
+        return _data.is_time_name(dim)
     var = nc.variables[dim]
-    return (str(getattr(var, "standard_name", "")).lower() == "time"
-            or str(getattr(var, "axis", "")).upper() == "T"
-            or str(getattr(var, "_CoordinateAxisType", "")).lower() == "time"
-            or " since " in str(getattr(var, "units", ""))
-            or dim.lower() in _TIME_NAMES)
+    return _data.is_time_coord(dim, {k: var.getncattr(k) for k in var.ncattrs()})
 
 
 def _is_vertical(ds, dim: str) -> bool:
@@ -786,14 +777,10 @@ class GenericViewer:
                                          if self.lon_name in ds.variables else None)
             tname = self.time_name
             if not problem:
-                # xarray has decoded the time, so the units the scan saw are in
-                # `encoding` now; both must accept the same axis
                 tname, problem = self._time_in(
                     {str(d) for da in ds.data_vars.values()
                      if {self.lat_dim, self.lon_dim} <= set(da.dims) for d in da.dims},
-                    lambda d: _is_time(ds, d) or (d in ds.variables and " since "
-                                                  in str(ds[d].encoding.get("units", ""))),
-                    ds.variables)
+                    lambda d: _is_time(ds, d), ds.variables)
             if problem:
                 ds.close()
                 raise ValueError(f"{path.name}: {problem}")

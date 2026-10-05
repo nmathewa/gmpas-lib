@@ -155,26 +155,49 @@ def is_time_dim(da: xr.DataArray, dim: str) -> bool:
     if dim == "Time":
         return True
     if dim not in da.dims:
-        return dim in TIME_NAMES
+        return is_time_name(dim)
     # The dimension's own coordinate is the evidence, and a DataArray carries
     # it on .coords whether attached to a dataset or not. Without one -- the
     # bare record dimension MPAS history output usually is -- only the name
     # can speak.
     if dim not in da.coords:
-        return dim in TIME_NAMES
+        return is_time_name(dim)
     coord = da.coords[dim]
-    attrs = coord.attrs
+    return is_time_coord(dim, coord.attrs, coord.dtype, coord.encoding)
+
+
+def is_time_name(dim: str) -> bool:
+    """Whether a dimension with no coordinate is time: by name alone.
+
+    The exact spelling `Time`, or one of TIME_NAMES in lower case. Shared by
+    the MPAS reader and `--generic`, so a file reads the same in both.
+    """
+    return dim == "Time" or dim in TIME_NAMES
+
+
+def is_time_coord(dim: str, attrs, dtype=None, encoding=None) -> bool:
+    """Whether a dimension whose coordinate carries `attrs` is time.
+
+    The CF evidence `is_time_dim` describes, then the name. `encoding` is
+    where xarray moves `units` once it has decoded the values -- a noleap or
+    360_day axis decodes to cftime objects, not datetime64, and its
+    `<unit> since <date>` would otherwise be missed. `attrs` may be any
+    mapping, so a raw netCDF4 variable's attributes do as well as xarray's.
+    """
+    if dim == "Time":
+        return True
     if str(attrs.get("standard_name", "")).lower() == "time":
         return True
     if str(attrs.get("axis", "")).upper() == "T":
         return True
     if str(attrs.get("_CoordinateAxisType", "")).lower() == "time":
         return True
-    if " since " in str(attrs.get("units", "")):
+    if " since " in str(attrs.get("units", "")) \
+            or " since " in str((encoding or {}).get("units", "")):
         return True
-    if np.issubdtype(coord.dtype, np.datetime64):
+    if dtype is not None and np.issubdtype(dtype, np.datetime64):
         return True
-    return dim in TIME_NAMES
+    return is_time_name(dim)
 
 
 def select(da: xr.DataArray, time: int = 0, level: int = 0,
