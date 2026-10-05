@@ -319,6 +319,16 @@ def test_a_file_on_another_grid_is_left_out_by_name(tmp_path, capsys):
     assert "era5_2024-04.nc" in capsys.readouterr().err
 
 
+def test_configuring_a_multi_file_run_keeps_every_step(tmp_path):
+    """`configure` stops the scan, and a synchronous rescan used to see the stop
+    flag still set and return at once: 6 steps became 4."""
+    gv = GenericViewer(_write_months(tmp_path), strict=True)
+    assert gv.steps == 6
+    gv.configure({"time": "valid_time"})
+    assert gv.steps == 6
+    assert gv._slice("t", 3, 1, gv.home) == pytest.approx(np.full((19, 36), 111.0))
+
+
 def test_the_background_scan_starts_small_and_completes(tmp_path):
     import time
 

@@ -701,6 +701,10 @@ class GenericViewer:
             self._scan_thread = threading.Thread(target=self._scan, daemon=True)
             self._scan_thread.start()
         elif len(self.files) > 1:
+            # `configure` stopped the old scan by setting this; left set, the
+            # new scan returns at once and every file but the first counts
+            # as one step
+            self._stop_scan.clear()
             self._scan()
 
     def stop_scan(self, timeout: float = 30.0) -> None:
