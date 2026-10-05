@@ -907,3 +907,43 @@ def test_the_derive_box_takes_a_number_and_any_case(small_viewer):
     np.testing.assert_allclose(v.values("areaCell / 100", 0, 0), base / 100)
     np.testing.assert_allclose(v.values("2*AREACELL", 0, 0), 2 * base)
     np.testing.assert_array_equal(v.values("AreaCell", 0, 0), base)
+
+
+def test_text_responses_are_gzipped_only_for_a_client_that_asks(small_viewer):
+    """The page and /api/meta are ~140 KiB of text, and on a cluster every byte
+    crosses an SSH tunnel (issue 132). gzip when asked; never for PNG frames,
+    never for a client that did not ask or refused with q=0."""
+    import gzip
+    import threading
+    import urllib.request
+
+    from gmpas.viewer import PAGE, _handler, bind
+
+    srv = bind(_handler(small_viewer, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def get(path, accept=None):
+        req = urllib.request.Request(base + path,
+                                     headers={"Accept-Encoding": accept} if accept else {})
+        with urllib.request.urlopen(req) as r:
+            return r.headers, r.read()
+
+    try:
+        h, body = get("/", "gzip, deflate")
+        assert h["Content-Encoding"] == "gzip" and int(h["Content-Length"]) == len(body)
+        assert gzip.decompress(body) == PAGE.encode()
+        assert "Accept-Encoding" in h["Vary"]
+        h, meta = get("/api/meta", "gzip")
+        assert h["Content-Encoding"] == "gzip" and gzip.decompress(meta).startswith(b"{")
+
+        for accept in (None, "identity", "gzip;q=0"):
+            h, body = get("/", accept)
+            assert h["Content-Encoding"] is None and body == PAGE.encode()
+
+        frame = ("/api/frame?var=areaCell&time=0&level=0&extent=-20,30,-10,10"
+                 "&cmap=viridis&nx=40&ny=20")
+        h, png = get(frame, "gzip")
+        assert h["Content-Encoding"] is None and png[:4] == b"\x89PNG"
+    finally:
+        srv.shutdown()
