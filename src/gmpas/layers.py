@@ -29,6 +29,8 @@ from . import palettes
 MAX_LAYERS = 24
 MAX_LEVELS = 256
 MAX_TEXT = 200
+#: default cap on printed grid values: past it the text is unreadable anyway
+MAX_GRID_VALUES = 600
 
 # ------------------------------------------------------------------ schema
 #
@@ -147,6 +149,19 @@ LAYER_KINDS: dict[str, dict] = {
         "options": {**_COLOUR_SCALE, **_RASTER_COLOUR,
                     "interpolation": {"type": "choice", "default": "nearest",
                                       "choices": ["nearest", "bilinear", "bicubic"]}},
+    },
+    "gridvalues": {
+        "label": "grid values (text)", "group": "field", "needs": ["var"],
+        "options": {"stride": {"type": "int", "default": 0, "min": 0,
+                               "help": "every Nth cell both ways; 0 picks ~20 across"},
+                    "fmt": {"type": "fmt", "default": "%g",
+                            "help": "printf number format, e.g. %.1f"},
+                    "fontsize": {"type": "float", "default": 7.0, "min": 1.0, "max": 72.0},
+                    "color": {"type": "color", "default": "black"},
+                    "max_labels": {"type": "int", "default": MAX_GRID_VALUES, "min": 1,
+                                   "max": 5000,
+                                   "help": "draw none past this many; zoom in or raise "
+                                           "the stride"}},
     },
     # -- vectors -----------------------------------------------------------
     "quiver": {
@@ -795,6 +810,52 @@ def _stride(n: int, target: int, given: int) -> int:
     return given if given and given > 0 else max(1, math.ceil(n / target))
 
 
+def _grid_index(cells: np.ndarray, grid: np.ndarray, period: float | None) -> np.ndarray:
+    """Each of `cells`' position on the file's own `grid` axis.
+
+    A crop starts wherever the view does, so a stride counted from the crop
+    would move every label as the map pans; counted on the whole grid, each
+    label stays on its cell. `period` matches longitudes across the seam.
+    """
+    diff = cells[:, None] - grid[None, :]
+    if period:
+        diff = (diff + 0.5 * period) % period - 0.5 * period
+    return np.abs(diff).argmin(axis=1)
+
+
+def _grid_values(ax, viewer, da, shifted, opts: dict, crs, alpha: float, z: int) -> int:
+    """Every Nth cell's own value, printed at the cell centre. Returns how many.
+
+    Display only: the text is the value read from the file, formatted, never
+    interpolated -- the point of the layer is checking the numbers. Past
+    `max_labels` nothing is printed and the map says why.
+    """
+    values = np.asarray(shifted.transpose(viewer.lat_dim, viewer.lon_dim).values, float)
+    lon = np.asarray(shifted[viewer.lon_name].values, float)
+    lat = np.asarray(shifted[viewer.lat_name].values, float)
+    if lon.size == da.sizes[viewer.lon_dim] + 1:      # _in_frame's seam-closing column
+        lon, values = lon[:-1], values[:, :-1]
+    file_lon = np.asarray(da[viewer.lon_name].values, float)[:lon.size]
+    step = opts["stride"] or max(1, math.ceil(lat.size / 15), math.ceil(lon.size / 20))
+    rows = _grid_index(lat, viewer._lat_file, None) % step == 0
+    cols = _grid_index(file_lon, viewer._lon_file, 360.0) % step == 0
+    sub = values[np.ix_(rows, cols)]
+    keep = np.isfinite(sub)
+    count = int(keep.sum())
+    if count > opts["max_labels"]:
+        ax.text(0.5, 0.5, f"{count} grid values is past the limit of "
+                f"{opts['max_labels']}: zoom in or raise the stride",
+                transform=ax.transAxes, ha="center", va="center", fontsize=9,
+                zorder=z, bbox=dict(facecolor="white", edgecolor="none", alpha=0.85))
+        return 0
+    X, Y = np.meshgrid(lon[cols], lat[rows])
+    for x, y, value in zip(X[keep], Y[keep], sub[keep], strict=True):
+        ax.text(x, y, opts["fmt"] % value, transform=crs, ha="center", va="center",
+                fontsize=opts["fontsize"], color=opts["color"], alpha=alpha,
+                zorder=z, clip_on=True)
+    return count
+
+
 def _speed_units(viewer, name: str) -> str:
     return str(viewer.ds[name].attrs.get("units", ""))
 
@@ -843,6 +904,11 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
         if spec["group"] == "field":
             da = layer_data(viewer, layer, time, level, data_extent)
             shifted = _in_frame(viewer, da, data_central)
+            if kind == "gridvalues":
+                _grid_values(ax, viewer, da, shifted, opts, data_crs, alpha, z)
+                described.append(f"{spec['label']} {layer['var']}"
+                                 + _level_text(viewer, layer["var"], lvl))
+                continue
             common = dict(ax=ax, x=viewer.lon_name, y=viewer.lat_name, transform=data_crs,
                           add_colorbar=False, add_labels=False, alpha=alpha, zorder=z)
             if kind == "contour":

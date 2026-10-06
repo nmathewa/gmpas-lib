@@ -244,6 +244,69 @@ def test_a_missing_natural_earth_layer_is_a_message(gv, monkeypatch):
                 layers={"layers": [{"kind": "borders"}]})
 
 
+# ------------------------------------------------------------ grid values
+
+
+def _printed(ax):
+    """(lon, lat, text) of every grid value on the map, and any note. Labels sit
+    in the map's own longitude frame, so its central longitude is added back."""
+    central = ax.projection.proj4_params.get("lon_0", 0.0)
+    values = [(t.get_position()[0] + central, t.get_position()[1], t.get_text())
+              for t in ax.texts if t.get_transform() is not ax.transAxes]
+    notes = [t.get_text() for t in ax.texts if t.get_transform() is ax.transAxes]
+    return values, notes
+
+
+def _draw_values(gv, extent, **options):
+    import matplotlib.pyplot as plt
+
+    stack = gv.layer_stack({"layers": [{"kind": "gridvalues", "var": "t", "level": 1,
+                                        "options": options}]}, "t")
+    fig = plt.figure()
+    try:
+        return _printed(L.draw(gv, fig, stack, 1, 0, extent))
+    finally:
+        plt.close(fig)
+
+
+def test_grid_values_are_the_files_own_numbers(gv, tmp_path):
+    """Display only: each label is the value at that cell, never interpolated."""
+    with xr.open_dataset(tmp_path / "era5_2024-01.nc") as ds:
+        truth = ds["t"].isel(valid_time=1, pressure_level=1).load()
+    printed, notes = _draw_values(gv, (20.0, 80.0, -30.0, 30.0), stride=2, fmt="%.6g")
+    assert printed and not notes
+    for lon, lat, text in printed:
+        cell = truth.sel(longitude=lon % 360, latitude=lat)        # exact, not nearest
+        assert text == f"{float(cell):.6g}"
+
+
+def test_grid_values_stop_at_the_cap_and_say_why(gv):
+    printed, notes = _draw_values(gv, gv.home, stride=1, max_labels=10)
+    assert printed == []
+    assert "past the limit of 10" in notes[0]
+
+
+def test_grid_values_work_across_the_seam(gv):
+    """A view from 340 to 20 degrees takes cells from both ends of the file."""
+    printed, _ = _draw_values(gv, (340.0, 380.0, -20.0, 20.0), stride=1)
+    lons = {round(lon % 360) for lon, _, _ in printed}
+    assert {340, 355, 0, 20} <= lons and not lons & {180}
+
+
+def test_grid_value_labels_stay_on_their_cells_as_the_map_pans(gv):
+    a, _ = _draw_values(gv, (0.0, 60.0, -30.0, 30.0), stride=3)
+    b, _ = _draw_values(gv, (5.0, 65.0, -30.0, 30.0), stride=3)
+    cells = lambda printed: {(round(x % 360), round(y)) for x, y, _ in printed  # noqa: E731
+                             if 10 <= x % 360 <= 50}
+    assert cells(a) == cells(b)
+
+
+def test_a_grid_value_format_is_checked(gv):
+    with pytest.raises(ValueError, match="printf number format"):
+        gv.layer_stack({"layers": [{"kind": "gridvalues", "var": "t",
+                                    "options": {"fmt": "%s"}}]}, "t")
+
+
 # ------------------------------------------------------ figures and GIFs
 
 
