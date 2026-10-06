@@ -757,3 +757,32 @@ def test_every_series_shares_one_netcdf_lock(tmp_path):
     finally:
         a.close()
         b.close()
+
+
+@pytest.mark.parametrize("dim, coord, is_time", [
+    ("Time", None, True),
+    ("time", None, True),
+    ("valid_time", None, True),
+    ("t", None, False),                     # a bare t, T or TIME is not guessed at
+    ("T", None, False),
+    ("TIME", None, False),
+    ("record", None, False),
+    ("t", {"units": "hours since 2000-01-01"}, True),           # evidence beats the name
+    ("record", {"units": "days since 2000-01-01", "calendar": "noleap"}, True),
+    ("lev", {"axis": "Z"}, False),
+])
+def test_both_viewers_agree_on_which_dimension_is_time(tmp_path, dim, coord, is_time):
+    """The MPAS reader and --generic had two definitions; `t` was time in one
+    and a level in the other, so one file read two ways."""
+    from gmpas import data, generic
+
+    coords = {} if coord is None else {dim: (dim, [0.0, 1.0, 2.0], coord)}
+    ds = xr.Dataset({"v": ((dim, "x"), np.zeros((3, 2)))}, coords=coords)
+    ds.to_netcdf(tmp_path / "f.nc")
+    with xr.open_dataset(tmp_path / "f.nc") as ds:
+        mpas = data.is_time_dim(ds["v"], dim)
+        gen = generic._is_time(ds, dim)
+    import netCDF4
+    with netCDF4.Dataset(tmp_path / "f.nc") as nc:
+        scan = generic._nc_is_time(nc, dim)
+    assert (mpas, gen, scan) == (is_time,) * 3
