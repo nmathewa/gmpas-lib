@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import getpass
 import functools
+import gzip
 import io
 import json
 import math
@@ -642,12 +643,45 @@ class PageHandler(BaseHTTPRequestHandler):
         pass
 
     def _send(self, body: bytes, ctype: str, status: int = 200):
+        compress = _gzip_wanted(self.headers.get("Accept-Encoding", ""), ctype, len(body))
+        if compress:
+            body = gzip.compress(body, compresslevel=6, mtime=0)
         self.send_response(status)
         self.send_header("Content-Type", ctype)
+        if compress:
+            self.send_header("Content-Encoding", "gzip")
+        if _compressible(ctype):
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+
+#: Text responses smaller than this go out as they are: the gzip header and
+#: the CPU are not worth it for a status poll of a few hundred bytes.
+GZIP_MIN_BYTES = 1024
+
+
+def _compressible(ctype: str) -> bool:
+    """Text and JSON shrink well. PNG frames are already deflate-compressed,
+    and gzip on top would cost CPU on every frame for nothing."""
+    ctype = ctype.split(";")[0].strip().lower()
+    return ctype.startswith("text/") or ctype == "application/json"
+
+
+def _gzip_wanted(accept: str, ctype: str, size: int) -> bool:
+    """Whether to gzip this response. The page and /api/meta are ~140 KiB of
+    text and every byte crosses the SSH tunnel on a cluster (issue 132), but
+    only a client that asked for gzip gets it -- and `gzip;q=0` is a refusal."""
+    if size < GZIP_MIN_BYTES or not _compressible(ctype):
+        return False
+    for part in accept.split(","):
+        name, _, params = part.strip().partition(";")
+        if name.strip().lower() in ("gzip", "*"):
+            q = params.strip()
+            return not (q.startswith("q=") and float(q[2:] or 0) == 0)
+    return False
 
 
 def _plot_extras(q: dict) -> dict:
