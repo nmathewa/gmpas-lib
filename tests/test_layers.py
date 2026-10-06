@@ -484,3 +484,34 @@ def test_every_plot_kind_declares_what_its_controls_can_do(gv):
     assert [k for k, c in KIND_CAPS.items() if c["data"]] == ["hovmoller"]
     for kind in ("layers", "hovmoller", "series"):
         assert not KIND_CAPS[kind]["options"], kind
+
+
+@pytest.mark.parametrize("stride, points, expect", [
+    (0, 24, (10, 19)),           # default: ~STREAM_POINTS along the long axis
+    (2, 24, (19, 37)),           # an explicit stride wins
+    (1, 24, (37, 73)),           # 1 is the full grid (73: the seam column is closed)
+])
+def test_streamlines_are_integrated_on_a_strided_field(gv, monkeypatch, stride, points,
+                                                        expect):
+    """The full 361x720 grid made one streamplot take ~11 s (#125); the input is
+    now strided like quiver and barbs. Pins the shape actually handed over."""
+    import matplotlib.pyplot as plt
+    from cartopy.mpl.geoaxes import GeoAxes
+
+    monkeypatch.setattr(L, "STREAM_POINTS", points)
+    seen = []
+    real = GeoAxes.streamplot
+
+    def spy(self, x, y, u, v, **kw):
+        seen.append(np.shape(u))
+        return real(self, x, y, u, v, **kw)
+
+    monkeypatch.setattr(GeoAxes, "streamplot", spy)
+    stack = gv.layer_stack({"layers": [{"kind": "streamplot", "u": "u", "v": "v",
+                                        "options": {"stride": stride}}]}, "u")
+    fig = plt.figure(figsize=(6, 4), dpi=50)
+    try:
+        L.draw(gv, fig, stack, 0, 0, gv.home)
+    finally:
+        plt.close(fig)
+    assert seen == [expect]

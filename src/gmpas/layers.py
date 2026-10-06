@@ -191,7 +191,11 @@ LAYER_KINDS: dict[str, dict] = {
     },
     "streamplot": {
         "label": "streamlines", "group": "vector", "needs": ["u", "v"],
-        "options": {"density": {"type": "float", "default": 1.5, "min": 0.1, "max": 8.0},
+        "options": {"stride": {"type": "int", "default": 0, "min": 0,
+                               "help": "every Nth point; 0 picks ~150 along the long "
+                                       "axis. Streamlines are integrated from this "
+                                       "field, so 1 draws the full grid, slowly"},
+                    "density": {"type": "float", "default": 1.5, "min": 0.1, "max": 8.0},
                     "color": {"type": "color", "default": "black"},
                     "colorize": {"type": "bool", "default": False},
                     "cmap": {"type": "cmap", "default": "viridis"},
@@ -867,6 +871,10 @@ def _field_label(viewer, layer, da, lvl: int) -> str:
     return text
 
 
+#: points along the long axis a streamplot is integrated on by default (#125)
+STREAM_POINTS = 150
+
+
 def _stride(n: int, target: int, given: int) -> int:
     return given if given and given > 0 else max(1, math.ceil(n / target))
 
@@ -1047,6 +1055,11 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
             uu = np.asarray(u.transpose(viewer.lat_dim, viewer.lon_dim).values, float)
             vv = np.asarray(v.transpose(viewer.lat_dim, viewer.lon_dim).values, float)
             if kind == "streamplot":
+                # integration cost grows with the input grid, not the seed count:
+                # a 361x720 field took ~6 s on its own. One stride on both axes
+                # keeps the cells square; #125 has the timings.
+                st = _stride(max(lat.size, lon.size), STREAM_POINTS, opts["stride"])
+                lat, lon, uu, vv = lat[::st], lon[::st], uu[::st, ::st], vv[::st, ::st]
                 order = np.argsort(lat)
                 lat, uu, vv = lat[order], uu[order], vv[order]
                 speed = np.hypot(uu, vv)
