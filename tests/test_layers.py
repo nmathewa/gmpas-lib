@@ -381,6 +381,75 @@ def test_the_stack_travels_over_http(gv):
         srv.shutdown()
 
 
+# ------------------------------------------------------------ presets
+
+PRESET = {"figure": {"title": "winds"},
+          "layers": [{"kind": "contourf", "var": "t", "level": 1,
+                      "options": {"cmap": "RdBu_r", "interval": 2}},
+                     {"kind": "quiver", "u": "u", "v": "v"},
+                     {"kind": "coastlines"}]}
+
+
+def test_a_preset_applies_unchanged_to_a_file_with_the_same_variables(gv):
+    assert gv.bind_preset(json.dumps(PRESET)) == PRESET
+
+
+def test_a_preset_is_renamed_only_where_it_must_be(gv):
+    upper = json.loads(json.dumps(PRESET).replace('"t"', '"T"'))     # T finds t
+    got = gv.bind_preset(upper, {"u": "v", "v": "u"})                 # a mapping wins
+    assert [got["layers"][0]["var"], got["layers"][1]["u"], got["layers"][1]["v"]] == \
+        ["t", "v", "u"]
+    assert got["layers"][0]["options"] == PRESET["layers"][0]["options"]
+    assert got["figure"] == PRESET["figure"]
+
+
+def test_a_preset_names_every_variable_the_file_lacks(gv):
+    from gmpas.layers import MissingVariables
+
+    alien = json.loads(json.dumps(PRESET))
+    alien["layers"][0]["var"], alien["layers"][1]["u"] = "z500", "uwnd"
+    with pytest.raises(MissingVariables) as err:
+        gv.bind_preset(alien)
+    assert err.value.missing == ["z500", "uwnd"]
+    assert set(err.value.choices) >= {"t", "u", "v"}
+
+
+def test_a_preset_goes_through_the_same_validation_as_a_stack(gv):
+    bad = json.loads(json.dumps(PRESET))
+    bad["layers"][0]["options"]["alpha"] = 0.5
+    with pytest.raises(ValueError, match="unknown option"):
+        gv.bind_preset(bad)
+    bad = json.loads(json.dumps(PRESET))
+    bad["layers"][0]["level"] = 99
+    with pytest.raises(ValueError, match="level 99 is out of range"):
+        gv.bind_preset(bad)
+
+
+def test_a_preset_is_bound_over_http(gv):
+    import threading
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    from gmpas.viewer import PAGE, _handler, bind
+
+    srv = bind(_handler(gv, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}/api/layers/bind?"
+    try:
+        q = urllib.parse.urlencode({"stack": json.dumps(PRESET)})
+        assert json.loads(urllib.request.urlopen(base + q).read())["stack"] == PRESET
+        alien = json.dumps(PRESET).replace('"t"', '"z500"')
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(base + urllib.parse.urlencode({"stack": alien}))
+        body = json.loads(err.value.read())
+        assert err.value.code == 400 and body["missing"] == ["z500"]
+        q = urllib.parse.urlencode({"stack": alien, "map": json.dumps({"z500": "t"})})
+        assert json.loads(urllib.request.urlopen(base + q).read())["stack"] == PRESET
+    finally:
+        srv.shutdown()
+
+
 def test_the_mpas_viewer_is_untouched(tmp_path):
     from gmpas.viewer import Viewer
 
