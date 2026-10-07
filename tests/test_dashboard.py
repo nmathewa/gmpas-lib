@@ -211,3 +211,111 @@ def test_one_source_gets_no_switcher(solo):
 
 def test_one_source_is_also_reachable_under_its_slug(solo):
     assert json.loads(get(solo, "/mesh/api/meta")[1])["cells"] == 12
+
+
+# ------------------------------------------------- preparing in the background
+
+
+def _serve(sources):
+    srv = bind(router(sources), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def _get(url):
+    try:
+        r = urllib.request.urlopen(url, timeout=10)
+        return r.status, r.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+def test_the_page_is_served_while_the_mesh_is_still_being_built(tmp_path, monkeypatch):
+    """A 42M-cell mesh took 230 s to build its cache; the page must not wait
+    for it. Here the build is held open on purpose until the test lets go."""
+    import gmpas.viewer
+    from conftest import write_mesh
+
+    write_mesh(tmp_path / "history.2012-01-01_00.00.00.nc", [(0.0, 0.0), (10.0, 0.0)])
+    go = threading.Event()
+    real = gmpas.viewer.Viewer
+
+    class Slow(real):
+        def __init__(self, *a, **k):
+            assert go.wait(10)
+            super().__init__(*a, **k)
+
+    monkeypatch.setattr(gmpas.viewer, "Viewer", Slow)
+    sources, banner = build(str(tmp_path), nx=40, ny=30, background=True)
+    srv, base = _serve(sources)
+    try:
+        assert "background" in banner
+        code, page = _get(base + "/run/")
+        assert code == 200 and b"preparing" in page
+        state = json.loads(_get(base + "/run/api/warm")[1])
+        assert state["ready"] is False
+        code, body = _get(base + "/run/api/meta")              # nothing hangs
+        assert code == 503 and b"still preparing" in body
+        assert _get(base + "/mesh/api/meta")[0] == 503         # the mesh waits too
+        assert b"preparing" in _get(base + "/")[1]
+
+        go.set()
+        for _ in range(200):
+            if json.loads(_get(base + "/run/api/warm")[1])["ready"]:
+                break
+            threading.Event().wait(0.05)
+        code, meta = _get(base + "/run/api/meta")
+        assert code == 200 and json.loads(meta)["cells"] == 2
+        assert _get(base + "/mesh/")[0] == 200
+        assert b"2 cells" in _get(base + "/")[1]
+    finally:
+        go.set()
+        srv.shutdown()
+
+
+def test_a_failed_build_says_why_on_the_page(tmp_path, monkeypatch):
+    import gmpas.viewer
+    from conftest import write_mesh
+
+    write_mesh(tmp_path / "history.2012-01-01_00.00.00.nc", [(0.0, 0.0), (10.0, 0.0)])
+
+    def broken(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gmpas.viewer, "Viewer", broken)
+    sources, _ = build(str(tmp_path), nx=40, ny=30, background=True)
+    srv, base = _serve(sources)
+    try:
+        for _ in range(200):
+            state = json.loads(_get(base + "/run/api/warm")[1])
+            if state["error"]:
+                break
+            threading.Event().wait(0.05)
+        assert "disk full" in state["error"] and not state["ready"]
+        code, body = _get(base + "/run/api/meta")
+        assert code == 503 and b"disk full" in body
+    finally:
+        srv.shutdown()
+
+
+def test_a_missing_path_still_fails_before_binding(tmp_path):
+    with pytest.raises(FileNotFoundError, match="no files matched"):
+        build(str(tmp_path / "nothing_here*.nc"), background=True)
+
+
+def test_the_build_progress_reaches_the_page():
+    """The terminal bar's counter is what the page shows."""
+    from gmpas.dashboard import Warmup
+    from gmpas.timing import Progress
+
+    warm = Warmup("x")
+    Progress.listener = warm.progress
+    try:
+        bar = Progress(10, unit="block")
+        for _ in range(4):
+            bar.advance()
+    finally:
+        Progress.listener = None
+    state = warm.state()
+    assert (state["done"], state["total"]) == (4, 10)
+    assert "mesh cache" in state["phase"] and "4/10 blocks" in state["detail"]

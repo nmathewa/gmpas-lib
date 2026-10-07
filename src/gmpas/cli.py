@@ -562,7 +562,7 @@ def _dashboard(args, data_path=None, mesh_path="", hfun_path="") -> int:
     from .dashboard import build, serve
 
     sources, banner = build(data_path, mesh_path, hfun_path,
-                            nx=args.width, ny=args.height)
+                            nx=args.width, ny=args.height, background=True)
     # `--port` defaults to None rather than DEFAULT_PORT so that asking for a
     # port explicitly is distinguishable from not asking. Comparing the value
     # to DEFAULT_PORT instead meant `--port 8765` -- the natural thing to type
