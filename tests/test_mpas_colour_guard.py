@@ -76,8 +76,9 @@ GOLDEN = {
 
 
 def test_the_mpas_viewer_still_describes_its_own_shape(tmp_path):
-    """The colour keys grew (see test_mpas_colour.py); nothing else did, and
-    no plot kinds or layer schema leak onto the MPAS page."""
+    """The colour keys grew (see test_mpas_colour.py), and the native Hovmöller
+    added two plot kinds (#111); nothing else did, and no other --generic kind
+    or the layer schema leaks onto the MPAS page."""
     from conftest import write_mesh
     from gmpas.viewer import Viewer
 
@@ -91,8 +92,10 @@ def test_the_mpas_viewer_still_describes_its_own_shape(tmp_path):
         v.series.close()
     assert set(meta) == {"file", "mesh", "cells", "regional", "coverage", "files", "steps",
                          "labels", "scanning", "home", "nx", "ny", "cmaps", "ramps",
-                         "palettes", "colour_options", "variables"}
-    assert "kind_labels" not in meta and "layer_schema" not in meta
+                         "palettes", "colour_options", "kind_labels", "kind_caps",
+                         "native", "variables"}
+    assert set(meta["kind_labels"]) == set(meta["kind_caps"]) == {"map", "hovmoller"}
+    assert "layer_schema" not in meta
     assert meta["cmaps"][:len(CMAPS)] == CMAPS          # matplotlib first, in order
     assert set(meta["variables"][0]) == {"name", "label", "static", "levels", "dim",
                                          "pinned"}
