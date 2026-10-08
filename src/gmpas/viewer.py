@@ -75,6 +75,10 @@ KIND_CAPS = {
 }
 
 
+#: largest coastline overlay, in pixels per side, a request may ask for
+OVERLAY_MAX_PX = 4096
+
+
 def ramp(name: str, n: int = 32) -> list[str]:
     """Hex stops for a colormap, so the browser's bar matches the image."""
     from matplotlib import colormaps
@@ -1101,10 +1105,11 @@ def _handler(viewer: Viewer, html: str = ""):
                         "image/png")
                 if url.path == "/api/overlay":
                     extent = [float(v) for v in q["extent"].split(",")]
-                    return self._send(viewer.overlay(
-                        extent,
-                        int(q["nx"]) if q.get("nx") else None,
-                        int(q["ny"]) if q.get("ny") else None), "image/png")
+                    # sized by the browser's map box; the cap keeps a request
+                    # from asking matplotlib for an arbitrarily large canvas
+                    size = [int(np.clip(int(q[k]), 16, OVERLAY_MAX_PX))
+                            if q.get(k) else None for k in ("nx", "ny")]
+                    return self._send(viewer.overlay(extent, *size), "image/png")
                 if url.path.startswith("/api/export/"):
                     kind = url.path.rsplit("/", 1)[-1]
                     extent = [float(v) for v in q["extent"].split(",")]
@@ -2129,14 +2134,23 @@ async function pollScan(){
   if(M.scanning) setTimeout(pollScan, 700);
 }
 
+// Coastlines are lines, so they are drawn at the size they are shown -- the
+// map box on screen, outset, at the display's pixel ratio. Sizing them by
+// M.nx drew them at the data's resolution: on a 60x60 --generic grid that is
+// an 84-pixel image stretched over the whole map, coasts as smudges.
+function overlaySize(){
+  const r=$("#wrap").getBoundingClientRect(), dpr=window.devicePixelRatio||1;
+  const fit=v=>Math.max(16, Math.min(OVERLAY_MAX, Math.round(v*OUTSET*dpr)));
+  return [fit(r.width||M.nx), fit(r.height||M.ny)];
+}
 async function overlay(){
-  const b=outset(boxOf(view));
-  $("#over").src=`api/overlay?extent=${b.join(",")}`+
-                 `&nx=${Math.round(M.nx*OUTSET)}&ny=${Math.round(M.ny*OUTSET)}`;
+  const b=outset(boxOf(view)), [nx, ny]=overlaySize();
+  $("#over").src=`api/overlay?extent=${b.join(",")}&nx=${nx}&ny=${ny}`;
 }
 
 // show the frame we already have, transformed into place, until the real one
 // lands. Without this a zoom looks like nothing happens and then it jumps.
+const OVERLAY_MAX = 4096;     // the server's own cap, see OVERLAY_MAX_PX
 function preview(){
   if(!rendered){ return; }
   const b=boxOf(view), s=(rendered[1]-rendered[0])/(b[1]-b[0]);
