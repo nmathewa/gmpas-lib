@@ -204,6 +204,11 @@ class Progress:
     emitted either way, in whichever shape suits the destination.
     """
 
+    #: called as listener(done, total, unit, eta_seconds) on every advance, so
+    #: a page served while a build runs can show the same progress the
+    #: terminal does; see dashboard.build(background=True)
+    listener = None
+
     def __init__(self, total: int, width: int = 32, every: int = 10,
                  unit: str = "file"):
         self.total = total
@@ -220,6 +225,8 @@ class Progress:
         elapsed = time.perf_counter() - self.t0
         frac = self.done / self.total if self.total else 1.0
         eta = (elapsed / self.done) * (self.total - self.done) if self.done else 0
+        if Progress.listener is not None:
+            Progress.listener(self.done, self.total, self.unit, eta)
 
         if self.tty:
             filled = int(self.width * frac)
