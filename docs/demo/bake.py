@@ -118,7 +118,7 @@ def ramps(names, stops: int = RAMP_STOPS) -> dict[str, list[str]]:
 #: package for the demo's benefit, the bake rewrites that one function --
 #: and asserts it found it, so an upstream edit breaks the build loudly
 #: instead of quietly publishing a map with no coastlines.
-OVERLAY_SRC = '  $("#over").src=`api/overlay?extent=${b.join(",")}`+'
+OVERLAY_SRC = '  $("#over").src=`api/overlay?extent=${b.join(",")}&nx=${nx}&ny=${ny}`;'
 OVERLAY_HOOK = ('  if(window.GMPAS_OVERLAY) return window.GMPAS_OVERLAY(b);\n'
                 + OVERLAY_SRC)
 

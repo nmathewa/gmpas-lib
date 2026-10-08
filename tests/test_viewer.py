@@ -947,3 +947,25 @@ def test_text_responses_are_gzipped_only_for_a_client_that_asks(small_viewer):
         assert h["Content-Encoding"] is None and png[:4] == b"\x89PNG"
     finally:
         srv.shutdown()
+
+
+def test_an_overlay_request_cannot_ask_for_an_unbounded_canvas(small_viewer):
+    """nx/ny come from the browser; matplotlib would try to allocate whatever
+    was asked for. The route caps them."""
+    import io as _io
+    import threading
+    import urllib.request
+
+    from PIL import Image
+
+    from gmpas.viewer import OVERLAY_MAX_PX, PAGE, _handler, bind
+
+    srv = bind(_handler(small_viewer, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = (f"http://127.0.0.1:{srv.server_address[1]}/api/overlay"
+               f"?extent=-10,20,-10,10&nx=1000000&ny=3")
+        img = Image.open(_io.BytesIO(urllib.request.urlopen(url).read()))
+        assert img.size == (OVERLAY_MAX_PX, 16)
+    finally:
+        srv.shutdown()

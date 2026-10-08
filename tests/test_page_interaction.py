@@ -12,6 +12,7 @@ when Playwright is not installed, which is the ordinary test run.
 
 from __future__ import annotations
 
+import re
 import threading
 
 import numpy as np
@@ -196,3 +197,14 @@ def test_no_form_control_is_left_browser_white(page):
       .filter(([, c]) => (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255 > 0.5)
       .map(([name]) => name)""")
     assert light == []
+
+
+def test_coastlines_are_drawn_at_the_size_they_are_shown(page):
+    """The overlay was sized by the data's own resolution (M.nx): on a 60x60
+    --generic grid an 84-pixel image stretched over the map, coasts as smudges.
+    It must follow the map box on screen instead."""
+    page.evaluate("() => overlay()")          # the size of the map box as it is now
+    nx = int(re.search(r"nx=(\d+)", page.get_attribute("#over", "src")).group(1))
+    box = page.locator("#wrap").bounding_box()
+    dpr = page.evaluate("() => window.devicePixelRatio || 1")
+    assert nx == round(box["width"] * 1.4 * dpr)
