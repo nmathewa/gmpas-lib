@@ -65,6 +65,16 @@ MAX_SERIES_STEPS = 20000
 #: name so anything importing it still resolves.
 VIEW_LRU_SIZE = 12
 
+#: what each plot kind on the MPAS page uses -- the same table, and the same
+#: entries, as generic.KIND_CAPS, so the page treats both viewers alike
+KIND_CAPS = {
+    "map": {"colour": True, "options": True, "pan": True, "frames": True,
+            "probe": True, "gif": True, "data": False},
+    "hovmoller": {"colour": True, "options": False, "pan": False, "frames": False,
+                  "probe": False, "gif": False, "data": True},
+}
+
+
 def ramp(name: str, n: int = 32) -> list[str]:
     """Hex stops for a colormap, so the browser's bar matches the image."""
     from matplotlib import colormaps
@@ -270,6 +280,8 @@ class Viewer:
         self._overlays = BuildCache()
         # point series: read on a background thread, polled through 202
         self._jobs = _jobs.Jobs(name="gmpas-series")
+        # Hovmöllers read every step; see hovmoller_progress
+        self._hov_jobs = _jobs.Jobs(name="gmpas-hovmoller")
 
     # -- variables -------------------------------------------------------
 
@@ -297,6 +309,8 @@ class Viewer:
                 "dim": (_data.level_dims(da) or [""])[0],
                 "pinned": _data.level_dims(da)[1:],
             })
+            if not out[-1]["static"]:
+                out[-1]["kinds"] = ["map", "hovmoller"]
         out.sort(key=lambda v: (v["static"], v["name"]))
         first = self.series.files[0].name
         title = (first if self.series.n_files == 1
@@ -315,6 +329,11 @@ class Viewer:
             "nx": self.nx,
             "ny": self.ny,
             **_colour.description(),
+            # the page's Hovmöller estimate: whole fields per step, mesh bins
+            "native": True,
+            "kind_labels": {"map": "map (native mesh)",
+                            "hovmoller": "Hovmöller (time × lon, area-weighted)"},
+            "kind_caps": KIND_CAPS,
             "variables": out,
         }
 
@@ -398,7 +417,7 @@ class Viewer:
     # -- export ----------------------------------------------------------
 
     def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
-               colour=None):
+               colour=None, kind="map", hov=None, **_):
         """A publication-shaped figure, not the bare raster the browser shows.
 
         Goes through the ordinary plotting path so it gets cartopy axes,
@@ -411,6 +430,10 @@ class Viewer:
         from .plot import cell_field
         from .style import Style
 
+        if kind == "hovmoller":
+            st = Style.preset(style)
+            return self._render_hovmoller(var, level, extent, cmap, vmin, vmax, hov,
+                                          st.figsize, st.dpi)
         if var not in self.plottable_cell_vars():
             raise ValueError(
                 f"{var!r} is a derived expression -- figure export needs a "
@@ -454,7 +477,8 @@ class Viewer:
         return _limits(np.asarray(values).squeeze(), vmin, vmax,
                        symmetric=False, robust=True)
 
-    def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8, colour=None):
+    def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8, colour=None,
+            **_):
         """Every timestep as one animated GIF.
 
         Frames are already palette images, which is exactly what GIF wants, so
@@ -479,13 +503,16 @@ class Viewer:
                        disposal=2, transparency=255)
         return buf.getvalue()
 
-    def netcdf(self, var, time, level, extent, nx, ny, colour=None):
+    def netcdf(self, var, time, level, extent, nx, ny, colour=None, kind="map",
+               hov=None, **_):
         """The current view sampled onto a regular lat-lon grid, as netCDF.
 
         NEAREST-CELL SAMPLING, not a conservative remap: every point takes the
         value of the cell containing it. Cell integrals are NOT preserved, so
         this is for inspection and downstream plotting, not for budgets.
         """
+        if kind == "hovmoller":
+            return self.hovmoller(var, level, hov, extent).to_netcdf()
         import xarray as xr
 
         from .raster import target_grid
@@ -532,7 +559,98 @@ class Viewer:
         `GenericViewer.close` stops its own.
         """
         self._jobs.stop()
+        self._hov_jobs.stop()
         self.series.close()
+
+    # -- Hovmöller on the native mesh: see gmpas.native ---------------------
+
+    def _hov_request(self, var, level, hov, extent) -> tuple:
+        """The band, longitudes and steps a Hovmöller covers, checked.
+
+        Defaults are the view on screen: its latitudes as the band, its
+        longitudes (at most a full circle) as the range.
+        """
+        if self.series.scanning:
+            raise ValueError(
+                "the time axis is still being counted across the files; a "
+                "Hovmöller over steps whose numbering is about to change would "
+                "mix them up -- try again when the scan finishes")
+        if var not in self.plottable_cell_vars():
+            raise ValueError(f"{var!r} is not a cell field, so it has no Hovmöller")
+        if _data.time_axis(self.series.dataarray(var, 0)) is None:
+            raise ValueError(f"{var!r} has no time axis, so it has no Hovmöller")
+        hov = hov or {}
+        band = tuple(float(v) for v in (hov.get("band") or (extent[2], extent[3])))
+        lon0, lon1 = (float(v) for v in (hov.get("lons") or (extent[0], extent[1])))
+        lons = (lon0, min(lon1, lon0 + 360.0))
+        n = len(self.series)
+        steps = tuple(int(v) for v in hov["steps"]) if hov.get("steps") else (0, n - 1)
+        return band, lons, steps
+
+    def _hov_work(self, var, level, band, lons, steps):
+        from . import native
+
+        def work(progress, cancel, publish=None):
+            return native.hovmoller(self.series, var, level, band, lons, steps,
+                                    sel=self._pins(var), progress=progress,
+                                    cancel=cancel)
+        return work
+
+    def hovmoller_progress(self, var: str, level: int, hov: dict | None, extent) -> dict:
+        """Where a Hovmöller stands, starting it if nothing has: done, running or
+        error. Never blocks; the page polls this through HTTP 202."""
+        band, lons, steps = self._hov_request(var, level, hov, extent)
+        key = (var, int(level), band, lons, steps, len(self.series))
+        return self._hov_jobs.progress(key, steps[1] - steps[0] + 1,
+                                       self._hov_work(var, level, band, lons, steps))
+
+    def hovmoller(self, var: str, level: int, hov: dict | None, extent):
+        """The finished Hovmöller, waiting for its job if one is reading it."""
+        band, lons, steps = self._hov_request(var, level, hov, extent)
+        key = (var, int(level), band, lons, steps, len(self.series))
+        return self._hov_jobs.result(key, steps[1] - steps[0] + 1,
+                                     self._hov_work(var, level, band, lons, steps))
+
+    def _render_hovmoller(self, var, level, extent, cmap, vmin, vmax, hov,
+                          figsize, dpi, meta=None) -> bytes:
+        """Drawn the way the --generic Hovmöller is: longitude across, time
+        down by default, and the step rows reported for the page's marker."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        from .generic import GenericViewer
+
+        da = self.hovmoller(var, level, hov, extent)
+        tdim = da.dims[0]
+        down = (hov or {}).get("ydir", "down") != "up"
+        fig = plt.figure(figsize=figsize, dpi=dpi, layout="constrained")
+        try:
+            ax = fig.add_subplot()
+            da.plot.pcolormesh(ax=ax, x="lon", y=tdim, yincrease=not down,
+                               cmap=cmap or None, vmin=vmin, vmax=vmax,
+                               cbar_kwargs={"label": _data.field_label(
+                                   self.series.dataarray(var, 0)), "shrink": 0.9})
+            ax.set_title(f"{var} · mean {da.attrs['band'].split(' (')[0]} · "
+                         f"{da.attrs['bin_width']} bins, area-weighted", fontsize=10)
+            ax.set_xlabel("longitude [degrees east]")
+            ax._gmpas_hov_time = (tdim, np.asarray(da[tdim].values))
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=dpi)
+            if meta is not None:
+                meta.update(GenericViewer._hov_axis(fig, ax))
+            return buf.getvalue()
+        finally:
+            plt.close(fig)
+
+    def plot(self, var, time, level, kind, extent, width=900, height=560,
+             cmap=None, vmin=None, vmax=None, hov=None, meta=None, **_) -> bytes:
+        """The plot pane. On the MPAS page that is only the Hovmöller."""
+        if kind != "hovmoller":
+            raise ValueError(f"the MPAS viewer has no {kind!r} plot")
+        width, height = int(np.clip(width, 200, 4000)), int(np.clip(height, 150, 3000))
+        return self._render_hovmoller(var, level, extent, cmap, vmin, vmax, hov,
+                                      (width / 100, height / 100), 100, meta)
 
     def probe(self, lon, lat, var, time, level):
         cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
@@ -2583,11 +2701,15 @@ function hovEstimate(){
   const cols=Math.max(1, Math.round((n("#hlon1")-n("#hlon0"))/dlon)+1);
   const rows=Math.max(1, Math.round((n("#hlat1")-n("#hlat0"))/dlat)+1);
   const steps=Math.max(0, n("#hs1")-n("#hs0")+1);
-  const mb=steps*rows*cols*8/1048576;
+  // MPAS: every step reads the whole field, and the bins come from the mesh
+  // (as wide as its coarsest cell in the band), so there is no column count
+  const mb=M.native ? steps*M.cells*8/1048576 : steps*rows*cols*8/1048576;
   $("#hstep").textContent = `${M.labels[n("#hs0")]??""} \u2192 ${M.labels[n("#hs1")]??""}`;
   if(!isFinite(mb)) return;
-  $("#hovhint").textContent=`${steps} steps \u00d7 ~${cols} longitudes \u00b7 reads ~`+
-    (mb>=1024 ? `${(mb/1024).toFixed(1)} GB` : `${mb.toFixed(0)} MB`)+
+  $("#hovhint").textContent=(M.native
+      ? `${steps} steps \u00b7 area-weighted bins on the native mesh \u00b7 reads ~`
+      : `${steps} steps \u00d7 ~${cols} longitudes \u00b7 reads ~`)+
+    (mb>=1024 ? `${(mb/1024).toFixed(1)} GB` : mb<1 ? "<1 MB" : `${mb.toFixed(0)} MB`)+
     (hovWant===hovKey() ? "" : " \u00b7 press compute");
 }
 function hovMode(on){

@@ -376,7 +376,10 @@ def test_bad_parameters_and_exports_over_http(served):
     assert "GIF steps through time" in json.loads(err.value.read())["error"]
 
 
-def test_the_mpas_viewer_has_no_hovmoller():
+def test_the_mpas_viewer_has_its_own_hovmoller():
+    """The MPAS viewer computes its Hovmöller on the native mesh (gmpas.native,
+    tests/test_native.py), not by borrowing this regular-grid one."""
+    from gmpas.generic import GenericViewer
     from gmpas.viewer import Viewer
 
-    assert not hasattr(Viewer, "hovmoller_progress") and not hasattr(Viewer, "plot")
+    assert Viewer.hovmoller_progress is not GenericViewer.hovmoller_progress

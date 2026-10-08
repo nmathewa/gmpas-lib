@@ -453,7 +453,8 @@ def test_a_preset_is_bound_over_http(gv):
 def test_the_mpas_viewer_is_untouched(tmp_path):
     from gmpas.viewer import Viewer
 
-    assert not hasattr(Viewer, "plot") and not hasattr(Viewer, "layer_stack")
+    # it plots a Hovmöller now (#111), but layers are still --generic only
+    assert not hasattr(Viewer, "layer_stack")
 
 
 @pytest.mark.parametrize("projection", L.PROJECTIONS)

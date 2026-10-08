@@ -778,8 +778,16 @@ def test_nothing_is_drawn_while_the_grid_is_unknown(tmp_path):
         srv.shutdown()
 
 
-def test_the_mpas_viewer_has_no_plot_route(tmp_path):
-    """/api/plot is served only to a viewer with plot(); the MPAS one has none."""
+def test_the_mpas_viewer_plots_only_a_hovmoller(tmp_path):
+    """/api/plot on the MPAS page draws the native Hovmöller (#111) and refuses
+    every --generic kind by name rather than drawing something else."""
+    from conftest import write_mesh
     from gmpas.viewer import Viewer
 
-    assert not hasattr(Viewer, "plot")
+    write_mesh(tmp_path / "history.2012-01-01_00.00.00.nc", [(0.0, 0.0), (10.0, 0.0)])
+    v = Viewer(tmp_path, nx=40, ny=30)
+    try:
+        with pytest.raises(ValueError, match="no 'contourf' plot"):
+            v.plot("areaCell", 0, 0, "contourf", v.home)
+    finally:
+        v.close()
