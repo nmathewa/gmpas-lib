@@ -82,6 +82,42 @@ KIND_CAPS = {
 OVERLAY_MAX_PX = 4096
 
 
+def _projected_axes(fig, extent, crs):
+    """A full-figure GeoAxes spanning projected `extent` edge to edge -- the
+    box the projected raster's pixels tile, so the two line up."""
+    x0, x1, y0, y1 = (float(v) for v in extent)
+    ax = fig.add_axes([0, 0, 1, 1], projection=crs)
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+    ax.set_aspect("auto")
+    return ax
+
+
+def _overlay_projected(extent, nx: int, ny: int, crs) -> bytes:
+    """`_overlay` in a projection: same strokes, axis limits in projected units
+    and aspect auto, so it lines up pixel for pixel with the projected raster."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import cartopy.feature as cfeature
+    import matplotlib.pyplot as plt
+
+    x0, x1, y0, y1 = (float(v) for v in extent)
+    fig = plt.figure(figsize=(nx / 100, ny / 100), dpi=100)
+    ax = _projected_axes(fig, extent, crs)
+    # the scale follows the width on the ground, about a degree per 111 km
+    coast = cfeature.NaturalEarthFeature("physical", "coastline",
+                                         coast_scale(abs(x1 - x0) / 111_000.0),
+                                         facecolor="none")
+    ax.add_feature(coast, linewidth=1.8, edgecolor="#ffffff", alpha=0.45)
+    ax.add_feature(coast, linewidth=0.7, edgecolor="#111")
+    ax.patch.set_alpha(0)
+    ax.spines["geo"].set_visible(False)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", transparent=True, dpi=100)
+    plt.close(fig)
+    return buf.getvalue()
+
+
 def ramp(name: str, n: int = 32) -> list[str]:
     """Hex stops for a colormap, so the browser's bar matches the image."""
     from matplotlib import colormaps
@@ -97,11 +133,19 @@ def ramp(name: str, n: int = 32) -> list[str]:
 class ViewIndex:
     """Pixel to cell lookup for one view box, reused across every frame."""
 
-    def __init__(self, mesh: MpasMesh, extent, nx: int, ny: int):
+    def __init__(self, mesh: MpasMesh, extent, nx: int, ny: int, crs=None):
+        """`extent` is a lon/lat box; with `crs` (a cartopy CRS, see
+        gmpas.projection) it is a projected (x0, x1, y0, y1) in that CRS's
+        units instead, and pixels off the projection's map are blank."""
         self.extent, self.nx, self.ny = tuple(extent), nx, ny
 
         with timing.step("view.build", px=nx * ny):
-            pts = grid_points(self.extent, nx, ny)
+            on_map = None
+            if crs is None:
+                pts = grid_points(self.extent, nx, ny)
+            else:
+                from .projection import projected_points
+                pts, on_map = projected_points(crs, self.extent, nx, ny)
 
             radius = np.sqrt(np.asarray(mesh.area_cell) / np.pi) / mesh.sphere_radius
             with timing.step("view.query", px=nx * ny):
@@ -110,9 +154,12 @@ class ViewIndex:
                 )
             missing = idx >= mesh.n_cells
             idx = np.where(missing, 0, idx)
+            blank = missing | (dist > 2.0 * radius[idx])
+            if on_map is not None:
+                blank |= ~on_map
 
             self.idx = idx
-            self.blank = (missing | (dist > 2.0 * radius[idx])).reshape(ny, nx)
+            self.blank = blank.reshape(ny, nx)
 
     @property
     def nbytes(self) -> int:
@@ -273,11 +320,13 @@ def coast_scale(lon_span: float) -> str:
     return "110m"
 
 
-def _overlay(extent, nx: int, ny: int) -> bytes:
+def _overlay(extent, nx: int, ny: int, crs=None) -> bytes:
     """Transparent coastline layer for one view box.
 
     Only coastlines: the graticule is drawn in the browser from the same
     extent, so it toggles without a round trip and its labels stay sharp.
+    With `crs`, `extent` is a projected (x0, x1, y0, y1) and the axis is in
+    that projection, its limits the same box the projected raster spans.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -285,6 +334,8 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
     import cartopy.feature as cfeature
     import matplotlib.pyplot as plt
 
+    if crs is not None:
+        return _overlay_projected(extent, nx, ny, crs)
     lon_min, lon_max, lat_min, lat_max = extent
     central = 0.5 * (lon_min + lon_max) if lon_max > 180.0 else 0.0
     src = ccrs.PlateCarree(central_longitude=central)
@@ -330,6 +381,9 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
 
 class Viewer:
     """Everything the request handlers need, built once at startup."""
+
+    #: /api/frame and /api/overlay accept `proj`; see _proj_params
+    supports_projection = True
 
     def __init__(self, data_path, mesh_path="", nx=1200, ny=700):
         # serve as soon as the mesh is ready; counting timesteps across
@@ -408,15 +462,26 @@ class Viewer:
 
     # -- frames ----------------------------------------------------------
 
-    def view(self, extent, nx=None, ny=None) -> ViewIndex:
+    def view(self, extent, nx=None, ny=None, proj=None) -> ViewIndex:
+        """The pixel-to-cell index for a view. `proj` is (name, params) from
+        gmpas.projection; `extent` is then in that projection's units."""
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        return self._views.get(key, lambda: ViewIndex(self.mesh, extent, nx, ny))
+        if proj is None:
+            return self._views.get(key, lambda: ViewIndex(self.mesh, extent, nx, ny))
+        from .projection import make_crs
+        pkey = _proj_key(proj)
+        return self._views.get(key + pkey, lambda: ViewIndex(
+            self.mesh, extent, nx, ny, crs=make_crs(*proj)))
 
-    def overlay(self, extent, nx=None, ny=None) -> bytes:
+    def overlay(self, extent, nx=None, ny=None, proj=None) -> bytes:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
+        if proj is None:
+            return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
+        from .projection import make_crs
+        return self._overlays.get(key + _proj_key(proj), lambda: _overlay(
+            extent, nx, ny, crs=make_crs(*proj)))
 
     @staticmethod
     def _level_span(da) -> int:
@@ -465,11 +530,11 @@ class Viewer:
     clean_colour = staticmethod(_colour.clean)
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
-              nx=None, ny=None, compress=1, colour=None, meta=None):
+              nx=None, ny=None, compress=1, colour=None, meta=None, proj=None):
         """A map frame. Without `colour` options this is what it always was,
         byte for byte; with them the indexed encoder draws it and `meta` comes
         back holding the bar the page should draw beside it."""
-        view = self.view(extent, nx, ny)
+        view = self.view(extent, nx, ny, proj)
         values = self.values(var, time, level)
         # the plain path does not need the mask, so it does not build one
         on_grid = None
@@ -951,6 +1016,40 @@ def _plot_extras(q: dict) -> dict:
     return out
 
 
+def _proj_key(proj) -> tuple:
+    """A hashable key for a (name, params) projection, for the view caches."""
+    name, params = proj
+    return (name, *sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+                          for k, v in (params or {}).items()))
+
+
+def _proj_params(q: dict, viewer) -> tuple[str, dict]:
+    """The projection a request names: `proj`, and `plon`/`plat` for its
+    centre, `psp` ("lat1,lat2") for Lambert conformal's standard parallels.
+    The extent of such a request is in the projection's own units. Only the
+    MPAS viewer draws projected frames so far."""
+    from .projection import NAMES
+
+    if not getattr(viewer, "supports_projection", False):
+        raise ValueError("projected frames are drawn by the MPAS viewer only")
+    name = q["proj"]
+    if name not in NAMES:
+        raise ValueError(f"unknown projection {name!r}; one of {', '.join(NAMES)}")
+    params: dict = {}
+    for key, out in (("plon", "central_longitude"), ("plat", "central_latitude")):
+        if q.get(key):
+            v = float(q[key])
+            if not math.isfinite(v):
+                raise ValueError(f"{key} must be finite")
+            params[out] = v
+    if q.get("psp"):
+        sp = tuple(float(v) for v in q["psp"].split(","))
+        if len(sp) != 2 or not all(math.isfinite(v) for v in sp):
+            raise ValueError("psp takes two finite latitudes, e.g. psp=30,60")
+        params["standard_parallels"] = sp
+    return name, params
+
+
 def _hov_params(q: dict) -> dict:
     """A Hovmöller's band, longitudes, steps and drawing, checked as they arrive.
 
@@ -1195,6 +1294,8 @@ def _handler(viewer: Viewer, html: str = ""):
                     colours: dict = {"meta": {}}
                     if hasattr(viewer, "clean_colour") and q.get("colour"):
                         colours["colour"] = q["colour"]
+                    if q.get("proj"):
+                        colours["proj"] = _proj_params(q, viewer)
                     png, lo, hi = viewer.frame(
                         q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
                         extent, q.get("cmap", "viridis"),
@@ -1238,6 +1339,9 @@ def _handler(viewer: Viewer, html: str = ""):
                     # from asking matplotlib for an arbitrarily large canvas
                     size = [int(np.clip(int(q[k]), 16, OVERLAY_MAX_PX))
                             if q.get(k) else None for k in ("nx", "ny")]
+                    if q.get("proj"):
+                        return self._send(viewer.overlay(
+                            extent, *size, proj=_proj_params(q, viewer)), "image/png")
                     return self._send(viewer.overlay(extent, *size), "image/png")
                 if url.path.startswith("/api/export/"):
                     kind = url.path.rsplit("/", 1)[-1]
