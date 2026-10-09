@@ -323,3 +323,36 @@ def test_question_mark_toggles_the_key_help(keyed):
     assert keyed.is_visible("#keyhelp")
     keyed.keyboard.press("Escape")
     assert not keyed.is_visible("#keyhelp")
+
+
+def test_the_key_marks_the_data_and_flags_a_clipping_range(page):
+    """Ferret's KEYMARK, plus automatic triangles: with a colour range inside
+    the data the key says the data runs past it on both sides; with the auto
+    range it marks where the data really ends."""
+    def redraw(vmin, vmax):
+        with page.expect_response(lambda r: "api/frame" in r.url):
+            page.fill("#vmin", vmin)
+            page.fill("#vmax", vmax)
+            page.dispatch_event("#vmax", "change")
+        page.wait_for_timeout(100)
+
+    with page.expect_response(lambda r: "api/frame" in r.url):
+        page.evaluate("() => pick('theta')")
+    with page.expect_response(lambda r: "api/frame" in r.url):
+        page.click("#home")                           # earlier tests zoomed in
+    redraw("275", "285")                              # theta runs 260..300 globally
+    assert page.is_visible("#cbunder") and page.is_visible("#cbover")
+    assert "below the colour range" in page.get_attribute("#cbunder", "title")
+    assert "above the colour range" in page.get_attribute("#cbover", "title")
+    assert page.locator("#ramp .mark").count() == 0   # both ends are off the bar
+
+    redraw("250", "310")                              # covers the data
+    assert not page.is_visible("#cbunder") and not page.is_visible("#cbover")
+    assert page.locator("#ramp .mark").count() == 2
+    assert page.inner_text("#cbdata").startswith("data ")
+
+    # the automatic range is the 2nd-98th percentile and clips by design: no
+    # triangles for it, or they would show on every first view
+    redraw("", "")
+    assert not page.is_visible("#cbunder") and not page.is_visible("#cbover")
+    assert page.inner_text("#cbdata").startswith("data ")

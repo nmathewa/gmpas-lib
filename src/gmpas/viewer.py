@@ -195,6 +195,17 @@ def _frame_range(img: np.ndarray, vmin, vmax) -> tuple[float, float]:
     return (lo, lo + 1.0) if hi <= lo else (lo, hi)
 
 
+def data_range(img: np.ndarray) -> tuple[float, float] | None:
+    """The smallest and largest value a frame was drawn from, or None if it
+    holds no finite value. The key marks these (Ferret's KEYMARK), and says
+    when the colour range clips them; nothing about the image changes."""
+    finite = np.isfinite(img)
+    if not finite.any():                 # all-NaN: no range, and no warning
+        return None
+    return float(np.min(img, where=finite, initial=np.inf)), \
+        float(np.max(img, where=finite, initial=-np.inf))
+
+
 def _quantize(img: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
     """Scale a frame to palette indices, with 255 reserved for "no data".
 
@@ -468,6 +479,8 @@ class Viewer:
             img = view.frame(values)
 
         lo, hi = _colour.centred(*_frame_range(img, vmin, vmax), colour, vmin, vmax)
+        if meta is not None:
+            meta["data_range"] = data_range(img)
         outside = None if on_grid is None else ~on_grid
         return _colour.frame_png(img, cmap, lo, hi, compress, colour,
                                  outside=outside, meta=meta), lo, hi
@@ -1177,9 +1190,11 @@ def _handler(viewer: Viewer, html: str = ""):
                     extent = [float(v) for v in q["extent"].split(",")]
                     # colour options only for a viewer that has them (--generic);
                     # the MPAS viewer's frame call is exactly what it was
-                    colours: dict = {}
+                    # `meta` comes back with the frame's data range (and, with
+                    # colour options, the bar the image was drawn with)
+                    colours: dict = {"meta": {}}
                     if hasattr(viewer, "clean_colour") and q.get("colour"):
-                        colours = {"colour": q["colour"], "meta": {}}
+                        colours["colour"] = q["colour"]
                     png, lo, hi = viewer.frame(
                         q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
                         extent, q.get("cmap", "viridis"),
@@ -1193,7 +1208,10 @@ def _handler(viewer: Viewer, html: str = ""):
                     self.send_response(200)
                     self.send_header("Content-Type", "image/png")
                     self.send_header("X-Range", f"{lo},{hi}")
-                    if colours.get("meta", {}).get("colorbar"):
+                    if colours["meta"].get("data_range"):
+                        dlo, dhi = colours["meta"]["data_range"]
+                        self.send_header("X-Data-Range", f"{dlo!r},{dhi!r}")
+                    if colours["meta"].get("colorbar"):
                         # ASCII JSON: header values are latin-1
                         spec = json.dumps(colours["meta"]["colorbar"])
                         self.send_header("X-Colorbar", spec)
@@ -1773,6 +1791,10 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 .cbrow{display:flex;align-items:center}
 .cbrow #ramp{flex:1}
 #cbunder,#cbover{display:none;width:12px;height:16px;flex:none}
+#ramp{position:relative}
+#ramp .mark{position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;
+            background:var(--fg);box-shadow:0 0 0 1px #000a}
+#cbdata{color:var(--dim);font-size:11px;margin-top:2px;font-variant-numeric:tabular-nums}
 #cbunder{clip-path:polygon(100% 0,100% 100%,0 50%)}
 #cbover{clip-path:polygon(0 0,100% 50%,0 100%)}
 #ticks{display:flex;justify-content:space-between;margin-top:3px;color:var(--dim);
@@ -1868,6 +1890,7 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
     <div class="cbrow">
       <div id="cbunder"></div><div id="ramp"></div><div id="cbover"></div></div>
     <div id="ticks"></div>
+    <div id="cbdata"></div>
   </div>
 </div>
 <div id="right">
@@ -2379,6 +2402,36 @@ function graticule(){
 }
 
 let lastBar=null;          // --generic: the server's description of the bar
+let lastData=null;         // [min,max] of the values the frame was drawn from
+// Ferret's KEYMARK: where the data really ends, on the key. A mark sits on the
+// ramp at the data min/max when they fall inside the colour range; when the
+// range clips them, a triangle in the end colour says so -- the image already
+// draws those values in the end colour, so the key now tells the truth about
+// it. A triangle the colour options set (under/over) is left as it is.
+function dataMarks(lo, hi, fmt, ends, explicit){
+  $("#ramp").querySelectorAll(".mark").forEach(m=>m.remove());
+  $("#cbdata").textContent="";
+  if(!lastData) return;
+  // the data ends need more digits than the ticks: 1.01e+5 says nothing
+  fmt=v=>Math.abs(v)>=1e6||(v!==0&&Math.abs(v)<1e-3) ? v.toExponential(4)
+        : +v.toPrecision(6)+"";
+  const [dmin, dmax]=lastData, span=hi-lo;
+  const mark=(v, what)=>{ if(!(span>0) || v<lo || v>hi) return;
+    const m=document.createElement("i"); m.className="mark";
+    m.style.left=(100*(v-lo)/span).toFixed(3)+"%"; m.title=`data ${what} ${fmt(v)}`;
+    $("#ramp").append(m); };
+  mark(dmin, "min"); mark(dmax, "max");
+  // Only for an end the user fixed: the automatic range is the 2nd-98th
+  // percentile, so it clips by design and a triangle would show on every view.
+  const fixed={"#cbunder": !!$("#vmin").value, "#cbover": !!$("#vmax").value};
+  const auto=(id, on, colour, text)=>{ if(explicit[id]) return;
+    on = on && fixed[id];
+    const el=$(id); el.style.display=on?"block":"none"; el.title=on?text:"";
+    if(on) el.style.background=colour; el.classList.toggle("auto", on); };
+  auto("#cbunder", dmin<lo, ends[0], `data below the colour range (min ${fmt(dmin)})`);
+  auto("#cbover", dmax>hi, ends[1], `data above the colour range (max ${fmt(dmax)})`);
+  $("#cbdata").textContent=`data ${fmt(dmin)} \u2026 ${fmt(dmax)}`;
+}
 function colorbar(lo,hi){
   const fmt=v=>Math.abs(v)>=1e4||(v!==0&&Math.abs(v)<1e-3)
     ? v.toExponential(2) : v.toPrecision(4);
@@ -2393,6 +2446,7 @@ function colorbar(lo,hi){
   }
   $("#ticks").innerHTML=out.join("");
   $("#cblabel").textContent=cur?cur.label:"";
+  dataMarks(lo, hi, fmt, [stops[0], stops[stops.length-1]], {});
 }
 // Bands as hard colour steps, triangles for the out-of-range colours: drawn
 // from the colours the server used for the image, so the two cannot disagree.
@@ -2412,6 +2466,8 @@ function colorbarSpec(spec, fmt){
     : [0,1,2,3,4].map(i=>spec.lo+(spec.hi-spec.lo)*i/4);
   $("#ticks").innerHTML=ticks.map(v=>`<span>${fmt(v)}</span>`).join("");
   $("#cblabel").textContent=cur?cur.label:"";
+  dataMarks(spec.lo, spec.hi, fmt, [s[0], s[s.length-1]],
+            {"#cbunder": !!spec.under, "#cbover": !!spec.over});
 }
 
 // ------------------------------------------------------- colour options
@@ -2468,6 +2524,8 @@ async function draw(){
   if(!r.ok){ say((await r.json()).error); return; }
   const [lo,hi]=r.headers.get("X-Range").split(",").map(Number);
   lastBar = r.headers.get("X-Colorbar") ? JSON.parse(r.headers.get("X-Colorbar")) : null;
+  const dr=r.headers.get("X-Data-Range");
+  lastData = dr ? dr.split(",").map(Number) : null;
   const url=URL.createObjectURL(await r.blob());
   const img=$("#data"), old=img.src;
   img.onload=()=>{ if(old.startsWith("blob:")) URL.revokeObjectURL(old); };

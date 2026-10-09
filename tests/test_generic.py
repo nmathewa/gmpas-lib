@@ -791,3 +791,25 @@ def test_the_mpas_viewer_plots_only_a_hovmoller(tmp_path):
             v.plot("areaCell", 0, 0, "contourf", v.home)
     finally:
         v.close()
+
+
+def test_a_generic_frame_carries_its_data_range(tmp_path):
+    import threading
+    import urllib.request
+
+    from gmpas.viewer import PAGE, _handler, bind
+
+    vals = np.arange(3 * 20 * 40, dtype="f4").reshape(3, 20, 40)
+    gv = _open(tmp_path, xr.Dataset({"v": (("time", "lat", "lon"), vals)},
+                                    coords={"time": TIMES, "lat": LAT, "lon": LON}))
+    srv = bind(_handler(gv, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        url = (f"http://127.0.0.1:{srv.server_address[1]}/api/frame?var=v&time=1&level=0"
+               f"&extent=0,360,-90,90&nx=80&ny=40")
+        r = urllib.request.urlopen(url)
+        dlo, dhi = (float(x) for x in r.headers["X-Data-Range"].split(","))
+        img = gv._raster("v", 1, 0, (0, 360, -90, 90), 80, 40)
+        assert (dlo, dhi) == (float(np.nanmin(img)), float(np.nanmax(img)))
+    finally:
+        srv.shutdown()
