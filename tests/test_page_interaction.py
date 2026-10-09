@@ -208,3 +208,118 @@ def test_coastlines_are_drawn_at_the_size_they_are_shown(page):
     box = page.locator("#wrap").bounding_box()
     dpr = page.evaluate("() => window.devicePixelRatio || 1")
     assert nx == round(box["width"] * 1.4 * dpr)
+
+
+# ------------------------------------------------------------------ keys
+
+
+@pytest.fixture(scope="module")
+def keyed(tmp_path_factory, page):
+    """Three steps, three levels and three fields: enough for every key to move.
+
+    A second page on the `page` fixture's browser: one sync Playwright session
+    per process, so a second `sync_playwright()` here would refuse to start.
+    """
+    from conftest import write_mesh
+    from gmpas.viewer import PAGE, Viewer, _handler, bind
+
+    folder = tmp_path_factory.mktemp("keys")
+    rng = np.random.default_rng(1)
+    lon = rng.uniform(-180, 180, 300)
+    lat = np.degrees(np.arcsin(rng.uniform(-1, 1, 300)))
+    base = folder / "mesh.nc"
+    write_mesh(base, list(zip(lon, lat, strict=True)))
+    with xr.open_dataset(base) as ds:
+        mesh = ds.load()
+    for step in range(3):
+        ds = mesh.copy(deep=True)
+        ds["theta"] = (("Time", "nCells", "nVertLevels"),
+                       (280 + step + np.arange(3)[None, :] + 0 * lat[:, None])[None])
+        ds["qv"] = (("Time", "nCells"), (0.01 * (step + 1) + 0 * lat)[None])
+        ds["w"] = (("Time", "nCells"), (0.1 * step + 0 * lat)[None])
+        ds.to_netcdf(folder / f"history.2012-01-0{step + 1}_00.00.00.nc")
+    base.unlink()
+    viewer = Viewer(folder, nx=400, ny=250)
+    srv = bind(_handler(viewer, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    pg = page.context.browser.new_page(viewport={"width": 1100, "height": 800})
+    pg.goto(f"http://127.0.0.1:{srv.server_address[1]}/", wait_until="networkidle")
+    pg.wait_for_function("() => M && !M.scanning && M.steps === 3", timeout=30000)
+    pg.click("#vars div:has-text('theta')")
+    pg.wait_for_timeout(300)
+    yield pg
+    pg.close()
+    srv.shutdown()
+    viewer.close()
+
+
+def _val(pg, sel):
+    return int(pg.eval_on_selector(sel, "e => e.value"))
+
+
+def test_arrows_and_home_end_move_through_time(keyed):
+    keyed.locator("body").click(position={"x": 5, "y": 5})
+    keyed.keyboard.press("Home")
+    assert _val(keyed, "#time") == 0
+    keyed.keyboard.press("ArrowRight")
+    assert _val(keyed, "#time") == 1
+    assert keyed.inner_text("#tlab") == keyed.evaluate("() => M.labels[1]")
+    keyed.keyboard.press("End")
+    assert _val(keyed, "#time") == 2
+    keyed.keyboard.press("ArrowRight")                   # stops at the end
+    assert _val(keyed, "#time") == 2
+    keyed.keyboard.press("ArrowLeft")
+    assert _val(keyed, "#time") == 1
+
+
+def test_up_and_down_move_the_level(keyed):
+    keyed.keyboard.press("ArrowUp")
+    keyed.keyboard.press("ArrowUp")
+    assert _val(keyed, "#level") == 2 and keyed.inner_text("#llab") == "2"
+    keyed.keyboard.press("ArrowDown")
+    assert _val(keyed, "#level") == 1
+
+
+def test_brackets_step_through_the_variables(keyed):
+    names = keyed.eval_on_selector_all(
+        "#vars div", "d => d.filter(x => x.offsetParent).map(x => x.textContent)")
+    at = names.index(keyed.evaluate("() => cur.name"))
+    keyed.keyboard.press("]")
+    assert keyed.evaluate("() => cur.name") == names[(at + 1) % len(names)]
+    keyed.keyboard.press("[")
+    assert keyed.evaluate("() => cur.name") == names[at]
+
+
+def test_zoom_and_reset_keys(keyed):
+    keyed.keyboard.press("+")
+    assert _val(keyed, "#zoom") == 50
+    keyed.keyboard.press("-")
+    assert _val(keyed, "#zoom") == 0
+    keyed.keyboard.press("+")
+    keyed.keyboard.press("r")
+    assert _val(keyed, "#zoom") == 0
+
+
+def test_space_plays_and_pauses(keyed):
+    keyed.keyboard.press("Space")
+    keyed.wait_for_function("() => playingKey !== null", timeout=15000)
+    keyed.keyboard.press("Space")
+    assert keyed.evaluate("() => playingKey") is None
+
+
+def test_typing_in_a_field_is_not_a_key_command(keyed):
+    before = _val(keyed, "#time"), keyed.evaluate("() => cur.name")
+    keyed.click("#deriveExpr")
+    keyed.keyboard.type("]r+ ")
+    keyed.keyboard.press("ArrowRight")
+    assert (_val(keyed, "#time"), keyed.evaluate("() => cur.name")) == before
+    assert keyed.input_value("#deriveExpr") == "]r+ "
+    keyed.fill("#deriveExpr", "")
+
+
+def test_question_mark_toggles_the_key_help(keyed):
+    keyed.locator("body").click(position={"x": 5, "y": 5})
+    keyed.keyboard.press("?")
+    assert keyed.is_visible("#keyhelp")
+    keyed.keyboard.press("Escape")
+    assert not keyed.is_visible("#keyhelp")
