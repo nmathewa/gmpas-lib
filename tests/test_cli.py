@@ -125,3 +125,57 @@ def test_paths_and_variable_do_not_collide(tmp_path):
 
     assert args.path == files
     assert args.var == "areaCell"
+
+
+def _numpy_mix_error():
+    """The shape the failure takes in the wild: matplotlib built for NumPy 1.x."""
+    try:
+        try:
+            raise AttributeError("_ARRAY_API not found")
+        except AttributeError as inner:
+            raise ImportError("numpy.core.multiarray failed to import") from inner
+    except ImportError as exc:
+        return exc
+
+
+def test_a_numpy_1_and_2_mix_is_one_message_not_a_traceback(monkeypatch, capsys):
+    """Issue #153: a pip --user copy beside system matplotlib died in a wall of
+    tracebacks naming neither copy."""
+    import gmpas.cli as cli
+
+    def broken(args):
+        raise _numpy_mix_error()
+
+    monkeypatch.delenv("GMPAS_DEBUG", raising=False)
+    monkeypatch.setattr(cli, "_info", broken)
+    code = cli.main(["info", "x.nc"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "built for NumPy 1.x was loaded under NumPy 2.x" in err
+    for name in ("python :", "gmpas  :", "numpy  :", "python -m pip install",
+                 "PYTHONNOUSERSITE", "which -a gmpas", "GMPAS_DEBUG"):
+        assert name in err
+    assert "Traceback" not in err
+
+
+def test_gmpas_debug_shows_the_traceback(monkeypatch):
+    import gmpas.cli as cli
+
+    def broken(args):
+        raise _numpy_mix_error()
+
+    monkeypatch.setenv("GMPAS_DEBUG", "1")
+    monkeypatch.setattr(cli, "_info", broken)
+    with pytest.raises(ImportError, match="multiarray"):
+        cli.main(["info", "x.nc"])
+
+
+def test_an_unrelated_import_error_is_not_dressed_up(monkeypatch):
+    import gmpas.cli as cli
+
+    def broken(args):
+        raise ImportError("cannot import name 'thing' from 'somewhere'")
+
+    monkeypatch.setattr(cli, "_info", broken)
+    with pytest.raises(ImportError, match="thing"):
+        cli.main(["info", "x.nc"])
