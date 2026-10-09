@@ -268,3 +268,62 @@ def test_auto_resolves_to_the_rule_for_the_view():
     kept = L._resolve_auto({"projection": "auto", "central_longitude": 5.0,
                             "central_latitude": None}, (-10, 30, 30, 60))
     assert kept["central_longitude"] == 5.0           # the stack's own centre wins
+
+
+def test_the_projected_home_frames_the_mesh_and_fills_every_parameter(tmp_path):
+    """/api/projview: the page asks once per projection and then names the
+    same map on every request."""
+    from conftest import write_mesh
+    from gmpas.viewer import Viewer
+
+    write_mesh(tmp_path / "history.2012-01-01_00.00.00.nc",
+               [(140.0, -10.0), (150.0, -10.0), (140.0, 5.0), (150.0, 5.0)])
+    v = Viewer(tmp_path, nx=60, ny=40)
+    try:
+        auto = v.projected_home("auto")
+        assert auto["proj"] in ("Mercator", "PlateCarree")
+        ortho = v.projected_home("Orthographic")
+        assert ortho["plon"] == pytest.approx(145.0, abs=1.0)
+        x0, x1, y0, y1 = ortho["extent"]
+        assert x0 < 0 < x1 and y0 < 0 < y1         # centred on the mesh
+        lcc = v.projected_home("LambertConformal")
+        assert lcc["psp"] and all(p < 0 for p in lcc["psp"])   # southern centre
+        centre = v.unproject(("Orthographic", {"central_longitude": ortho["plon"],
+                                               "central_latitude": ortho["plat"]}),
+                             0.0, 0.0, 1.0)
+        assert centre["on"] and centre["lon"] == pytest.approx(ortho["plon"])
+        off = v.unproject(("Orthographic", {"central_longitude": 0.0}), 9e6, 9e6, 1.0)
+        assert not off["on"]
+        from gmpas.projection import home_view
+        with pytest.raises(ValueError, match="no part"):     # wholly southern
+            home_view("NorthPolarStereo", {}, (140, 150, -40, -10), 0.01)
+    finally:
+        v.close()
+
+
+def test_the_projection_routes_answer_over_http(tmp_path):
+    import json
+    import threading
+    import urllib.request
+
+    from conftest import write_mesh
+    from gmpas.viewer import PAGE, Viewer, _handler, bind
+
+    write_mesh(tmp_path / "history.2012-01-01_00.00.00.nc",
+               [(140.0, -10.0), (150.0, -10.0), (140.0, 5.0), (150.0, 5.0)])
+    v = Viewer(tmp_path, nx=60, ny=40)
+    srv = bind(_handler(v, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}/"
+    try:
+        home = json.load(urllib.request.urlopen(base + "api/projview?proj=Orthographic"))
+        assert home["proj"] == "Orthographic" and len(home["extent"]) == 4
+        u = json.load(urllib.request.urlopen(
+            base + f"api/unproject?proj=Orthographic&plon={home['plon']}"
+                   f"&plat={home['plat']}&x=0&y=0"))
+        assert u["on"] and u["lon"] == pytest.approx(home["plon"])
+        meta = json.load(urllib.request.urlopen(base + "api/meta"))
+        assert "Orthographic" in meta["projections"]
+    finally:
+        srv.shutdown()
+        v.close()

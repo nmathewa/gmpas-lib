@@ -150,6 +150,7 @@ def bake(source: Path, out: Path) -> None:
         meta["file"] = TITLE
         meta["scanning"] = False          # or the page polls api/status for ever
         meta.pop("setup", None)           # no dimension chooser without a server
+        meta.pop("projections", None)     # projected frames need the server too
         for row in meta["variables"]:
             # `kinds` is what puts the page into matplotlib plot mode, which
             # needs a server. Without it the page is the fast map and the

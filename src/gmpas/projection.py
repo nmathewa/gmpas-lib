@@ -159,11 +159,67 @@ def _ortho_inverse(crs, x, y):
     return np.degrees(lon), np.degrees(lat), on
 
 
+def unproject(crs, x, y, tol: float):
+    """(lon, lat, on) for projected points: the closed-form inverse for
+    orthographic, pyproj otherwise with a forward round trip -- a point whose
+    round trip misses by more than `tol` (projection units) is off the map."""
+    import cartopy.crs as ccrs
+
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if crs.proj4_params.get("proj") == "ortho":
+        return _ortho_inverse(crs, x, y)
+    ll = ccrs.PlateCarree().transform_points(crs, x, y)
+    lon, lat = ll[:, 0], ll[:, 1]
+    on = np.isfinite(lon) & np.isfinite(lat)
+    # the forward round trip: an inverse can be finite and still wrong
+    back = crs.transform_points(ccrs.PlateCarree(), np.where(on, lon, 0.0),
+                                np.where(on, lat, 0.0))[:, :2]
+    miss = np.hypot(back[:, 0] - x, back[:, 1] - y)
+    on &= np.isfinite(miss) & (miss <= tol)
+    return lon, lat, on
+
+
+def home_view(name: str, params: dict | None, extent,
+              coverage: float) -> tuple[str, dict, tuple]:
+    """A projection for a mesh, with every parameter filled in, and the
+    projected box that frames the mesh in it: (name, params, (x0, x1, y0, y1)).
+
+    `name` may be "auto" (see `auto_projection`). Unset centres default to the
+    middle of the mesh's box; polar stereographic keeps only its own
+    hemisphere (the far pole is at infinity), Mercator stops at 80 degrees.
+    """
+    p = dict(params or {})
+    if name == "auto":
+        name, auto = auto_projection(extent, coverage)
+        p = {**auto, **p}
+    lon0, dlon, lat0, lat1, lonc = _box(extent)
+    if name != "PlateCarree":
+        p.setdefault("central_longitude", lonc)
+    if name in ("Orthographic", "LambertConformal"):
+        p.setdefault("central_latitude", 0.5 * (lat0 + lat1))
+    if name == "LambertConformal" and "standard_parallels" not in p:
+        span, latc = lat1 - lat0, p["central_latitude"]
+        sp = (lat0 + span / 6.0, lat0 + 5.0 * span / 6.0)
+        p["standard_parallels"] = (tuple(max(v, 1.0) for v in sp) if latc > 0
+                                   else tuple(min(v, -1.0) for v in sp))
+    if name == "NorthPolarStereo":
+        lat0 = max(lat0, 0.0)
+    elif name == "SouthPolarStereo":
+        lat1 = min(lat1, 0.0)
+    elif name == "Mercator":
+        lat0, lat1 = max(lat0, -80.0), min(lat1, 80.0)
+    if lat1 <= lat0:
+        raise ValueError(f"the mesh has no part on this {name} map")
+    crs = make_crs(name, p)
+    box = (lon0, lon0 + dlon, lat0, lat1)
+    return name, p, projected_extent(crs, box)
+
+
 def projected_points(crs, xy_extent, nx: int, ny: int):
     """Unit vectors for every pixel centre of a projected view, and which are on
     the map: ((ny*nx, 3) array, (ny*nx,) bool). Row 0 is the bottom row, as in
     `raster.grid_points`."""
-    import cartopy.crs as ccrs
 
     x0, x1, y0, y1 = (float(v) for v in xy_extent)
     dx, dy = (x1 - x0) / nx, (y1 - y0) / ny
@@ -171,18 +227,7 @@ def projected_points(crs, xy_extent, nx: int, ny: int):
     ys = y0 + dy * (np.arange(ny) + 0.5)
     X, Y = np.meshgrid(xs, ys)
     X, Y = X.ravel(), Y.ravel()
-
-    if crs.proj4_params.get("proj") == "ortho":
-        lon, lat, on = _ortho_inverse(crs, X, Y)
-    else:
-        ll = ccrs.PlateCarree().transform_points(crs, X, Y)
-        lon, lat = ll[:, 0], ll[:, 1]
-        on = np.isfinite(lon) & np.isfinite(lat)
-        # the forward round trip: an inverse can be finite and still wrong
-        back = crs.transform_points(ccrs.PlateCarree(), np.where(on, lon, 0.0),
-                                    np.where(on, lat, 0.0))[:, :2]
-        miss = np.hypot(back[:, 0] - X, back[:, 1] - Y)
-        on &= np.isfinite(miss) & (miss <= 0.5 * max(abs(dx), abs(dy)))
+    lon, lat, on = unproject(crs, X, Y, 0.5 * max(abs(dx), abs(dy)))
 
     lon_r = np.radians(np.where(on, lon, 0.0))
     lat_r = np.radians(np.where(on, lat, 0.0))
