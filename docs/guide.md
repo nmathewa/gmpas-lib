@@ -252,6 +252,20 @@ in the background and plays them when ready. Several can load independently.
   up.
 - **animation (GIF)**
 
+**Keys**, as in ncview. They do what the matching control does, and are
+ignored while typing in a field. `?` shows them on the page.
+
+| key | does |
+|---|---|
+| `←` `→` | previous / next time step |
+| `Home` `End` | first / last time step |
+| `↑` `↓` | level up / down |
+| `[` `]` | previous / next variable |
+| `space` | play / pause |
+| `+` `-` | zoom in / out |
+| `r` | reset view |
+| `?` `Esc` | show / hide the key list |
+
 ### `--generic`: plain netCDF files
 
 ```bash

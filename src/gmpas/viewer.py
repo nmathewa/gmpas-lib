@@ -1757,6 +1757,13 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #ptfoot .hint{flex:1;margin:0}
 #ptmark{position:absolute;pointer-events:none;display:none;z-index:4}
 #ptmark i{position:absolute;background:#fff;box-shadow:0 0 2px #000}
+#keyhelp{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+  background:#0008;z-index:20}
+#keyhelp.on{display:flex}
+#keyhelp div{background:var(--panel);border:1px solid var(--line);border-radius:6px;
+  padding:14px 18px;font-size:12px;line-height:1.7}
+#keyhelp kbd{display:inline-block;min-width:22px;padding:0 5px;margin-right:8px;text-align:center;
+  border:1px solid var(--line);border-radius:3px;background:var(--bg);font:11px monospace}
 #msg{position:absolute;top:14px;left:50%;transform:translateX(-50%);background:#000a;
      padding:4px 10px;border-radius:4px;color:var(--dim);opacity:0;transition:opacity .2s;
      pointer-events:none}
@@ -1802,6 +1809,15 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
     </div>
   </div>
 </div>
+<div id="keyhelp"><div><b>keys</b><br>
+  <kbd>\u2190</kbd><kbd>\u2192</kbd>previous / next time step<br>
+  <kbd>Home</kbd><kbd>End</kbd>first / last time step<br>
+  <kbd>\u2191</kbd><kbd>\u2193</kbd>level up / down<br>
+  <kbd>[</kbd><kbd>]</kbd>previous / next variable<br>
+  <kbd>space</kbd>play / pause<br>
+  <kbd>+</kbd><kbd>-</kbd>zoom in / out<br>
+  <kbd>r</kbd>reset view<br>
+  <kbd>?</kbd><kbd>Esc</kbd>this help</div></div>
 <div id="main">
   <div id="top">
     <span>time <b id="tlab">–</b></span><input type="range" id="time" min="0" max="0" style="width:150px">
@@ -1814,6 +1830,7 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
     <button id="home">reset view</button>
     <button id="anim">▶ play</button>
     <span id="animstate"></span>
+    <span id="keyhint" class="pin" title="press ? for every key">keys: \u2190\u2192 time \u00b7 \u2191\u2193 level \u00b7 space play \u00b7 ?</span>
   </div>
   <div id="stage">
     <img id="plotimg" alt=""><div id="hovmark"></div>
@@ -3270,6 +3287,53 @@ $("#cmap").onchange = ()=>{ stopPlayback(); draw(); };
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
 $("#home").onclick = ()=>{ view={...home}; clamp(); schedule(0); };
+
+// ncview-style keys. Each one does exactly what its control does -- it moves
+// the slider and fires the slider's own handler, or clicks the button -- so
+// the keyboard and the mouse can never disagree about what happened.
+function nudge(id, by, to){
+  const el=$(id); if(!el || el.disabled) return false;
+  const lo=+el.min, hi=+el.max, now=+el.value;
+  const next = to===undefined ? Math.max(lo, Math.min(hi, now+by)) : to;
+  if(next===now) return true;
+  el.value=next; el.dispatchEvent(new Event("input"));
+  return true;
+}
+function stepVar(by){
+  const rows=[...$("#vars").children].filter(d=>d.offsetParent!==null && d.onclick);
+  if(!rows.length) return;
+  const at=rows.findIndex(d=>d.classList.contains("on"));
+  const next=rows[(at<0 ? 0 : (at+by+rows.length)%rows.length)];
+  next.click(); next.scrollIntoView({block:"nearest"});
+}
+document.addEventListener("keydown", e=>{
+  if(e.ctrlKey || e.altKey || e.metaKey) return;
+  const t=e.target, tag=(t && t.tagName)||"";
+  if(tag==="INPUT" && t.type!=="range" && t.type!=="checkbox" ||
+     tag==="TEXTAREA" || tag==="SELECT" || (t && t.isContentEditable)) return;
+  const help=$("#keyhelp");
+  if(e.key==="?"){ help.classList.toggle("on"); e.preventDefault(); return; }
+  if(e.key==="Escape" && help.classList.contains("on")){ help.classList.remove("on"); return; }
+  const timeKey=["ArrowLeft","ArrowRight","Home","End"].includes(e.key);
+  if(timeKey && playingKey) stopPlayback();        // stepping by hand ends playback
+  let done=true;
+  switch(e.key){
+    case "ArrowLeft":  nudge("#time", -1); break;
+    case "ArrowRight": nudge("#time", +1); break;
+    case "Home":       nudge("#time", 0, +$("#time").min); break;
+    case "End":        nudge("#time", 0, +$("#time").max); break;
+    case "ArrowUp":    nudge("#level", +1); break;
+    case "ArrowDown":  nudge("#level", -1); break;
+    case "[":          stepVar(-1); break;
+    case "]":          stepVar(+1); break;
+    case " ":          if(playingKey) stopPlayback(); else $("#anim").click(); break;
+    case "+": case "=": if(!plotMode()) nudge("#zoom", +50); break;
+    case "-": case "_": if(!plotMode()) nudge("#zoom", -50); break;
+    case "r":          if(!plotMode()) $("#home").click(); break;
+    default: done=false;
+  }
+  if(done) e.preventDefault();
+});
 $("#zoom").oninput = e=>{ view.w = home.w/Math.pow(2, e.target.value/100);
                           clamp(); schedule(180); };
 
