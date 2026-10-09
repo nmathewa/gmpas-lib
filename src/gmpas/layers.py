@@ -104,6 +104,8 @@ _CONTOUR_HIGHLIGHT = {
     "highlight_linewidth": {"type": "float", "default": 2.0, "min": 0.0},
     "label_every": {"type": "int", "default": 1, "min": 1, "max": MAX_LEVELS,
                     "help": "label only every Nth level"},
+    "zero_bold": {"type": "bool", "default": False,
+                  "help": "draw the 0 contour at the highlight width (Ferret, GrADS)"},
 }
 _RESOLUTIONS = ["110m", "50m", "10m"]
 
@@ -646,11 +648,17 @@ def _levels_of(values, opts: dict):
 def _emphasise(artist, opts: dict, coloured: bool) -> list[bool]:
     """Draw every Nth contour heavier (and in its own colour). Returns which
     levels were emphasised, so the labels can follow the same lines."""
-    heavy = _highlighted(list(artist.levels), opts)
+    levels = list(artist.levels)
+    heavy = _highlighted(levels, opts)
+    # the zero line is heavy without becoming a highlighted (labelled) level
+    zero = [bool(opts.get("zero_bold")) and float(v) == 0.0 for v in levels]
+    if not any(heavy) and not any(zero):
+        return heavy
+    widths = [opts["highlight_linewidth"] if on or z else opts["linewidths"]
+              for on, z in zip(heavy, zero, strict=True)]
+    artist.set_linewidth(widths)
     if not any(heavy):
         return heavy
-    widths = [opts["highlight_linewidth"] if on else opts["linewidths"] for on in heavy]
-    artist.set_linewidth(widths)
     if opts.get("highlight_color") and not coloured:
         base = artist.get_edgecolor()
         colours = [opts["highlight_color"] if on else base[i % len(base)]

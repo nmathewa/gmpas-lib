@@ -1139,7 +1139,7 @@ class GenericViewer:
             return _png(img, cmap, lo, hi, compress), lo, hi
 
         img, on_grid = self._raster_masked(var, time, level, extent, nx, ny)
-        lo, hi = self._range(img, vmin, vmax)
+        lo, hi = _colour.centred(*self._range(img, vmin, vmax), colour, vmin, vmax)
         return _colour.frame_png(img, cmap, lo, hi, compress, colour,
                                  outside=~on_grid, meta=meta), lo, hi
 
@@ -1617,7 +1617,9 @@ class GenericViewer:
             if colours:
                 # the fast map's colours, in a figure: the same range rule as
                 # the map (_range) and the same colormap and norm (palettes.scale)
-                lo, hi = self._range(np.asarray(da.values, float), vmin, vmax)
+                lo, hi = _colour.centred(
+                    *self._range(np.asarray(da.values, float), vmin, vmax),
+                    colour, vmin, vmax)
                 levels = None
                 if colours.get("bands") and method in ("contour", "contourf"):
                     # contours band by their levels, not by a norm
@@ -1944,8 +1946,10 @@ class GenericViewer:
         if kind == "map":
             nx, ny = nx or self.nx, ny or self.ny
             if vmin is None or vmax is None:
-                vmin, vmax = self._range(self._raster(var, 0, level, extent, nx, ny),
-                                         vmin, vmax)
+                # one range for every frame, centred like the map's if asked
+                vmin, vmax = _colour.centred(
+                    *self._range(self._raster(var, 0, level, extent, nx, ny), vmin, vmax),
+                    colour, vmin, vmax)
             for step in range(n):
                 png, _, _ = self.frame(var, step, level, extent, cmap, vmin, vmax,
                                        nx, ny, compress=1, colour=colour)
