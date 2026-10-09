@@ -969,3 +969,48 @@ def test_an_overlay_request_cannot_ask_for_an_unbounded_canvas(small_viewer):
         assert img.size == (OVERLAY_MAX_PX, 16)
     finally:
         srv.shutdown()
+
+
+@pytest.mark.parametrize("span, on_disk, scale", [
+    (360.0, {"10m", "50m"}, "110m"),       # a wide view never needs more
+    (40.0, {"10m", "50m"}, "50m"),
+    (6.0, {"10m", "50m"}, "10m"),
+    (6.0, {"50m"}, "50m"),                 # 10m missing: the next coarser one
+    (6.0, set(), "110m"),                  # nothing finer: never a download
+])
+def test_the_coastline_scale_follows_the_zoom(monkeypatch, span, on_disk, scale):
+    import gmpas.viewer as V
+
+    monkeypatch.setattr(V, "_coast_on_disk", lambda s: s in on_disk)
+    assert V.coast_scale(span) == scale
+
+
+def test_a_missing_finer_scale_is_not_fetched_during_a_request(monkeypatch):
+    """The overlay must not reach the network: cartopy downloads on first use,
+    and an offline compute node would fail the request, a slow link stall it."""
+    import cartopy.io
+
+    import gmpas.viewer as V
+
+    def no_network(*a, **k):
+        raise AssertionError("the overlay tried to download")
+
+    monkeypatch.setattr(cartopy.io.Downloader, "acquire_resource", no_network)
+    monkeypatch.setattr(V, "_coast_on_disk", lambda s: False)
+    assert V._overlay((144.0, 150.0, -5.0, 1.0), 200, 200)[:4] == b"\x89PNG"
+
+
+def test_coastlines_carry_a_light_halo_under_the_dark_line():
+    """Thin dark lines alone vanish over the dark end of a colormap."""
+    import io as _io
+
+    from PIL import Image
+
+    from gmpas.viewer import _overlay
+
+    rgba = np.array(Image.open(_io.BytesIO(
+        _overlay((140.0, 160.0, -12.0, 0.0), 600, 400))).convert("RGBA")).astype(int)
+    ink = rgba[..., 3] > 0
+    light = ink & (rgba[..., :3].min(axis=-1) > 200)
+    dark = ink & (rgba[..., :3].max(axis=-1) < 80)
+    assert light.sum() > 0 and dark.sum() > 0
