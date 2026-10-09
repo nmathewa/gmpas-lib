@@ -219,6 +219,49 @@ def _quantize(img: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
     return buf.astype(np.uint8)
 
 
+#: Natural Earth coastline scale by the width of the view, in degrees of
+#: longitude: finer as the map zooms in, never finer than what is on disk
+COAST_SCALES = ((60.0, "110m"), (10.0, "50m"), (0.0, "10m"))
+
+
+def _coast_on_disk(scale: str) -> bool:
+    """Whether a Natural Earth coastline scale is already on this machine.
+
+    Asked without downloading: cartopy fetches a missing layer on first use,
+    and inside an overlay request that would hang the map on the network --
+    or fail outright on an offline compute node.
+    """
+    import cartopy
+    from cartopy.io import Downloader
+
+    fmt = {"config": cartopy.config, "category": "physical", "name": "coastline",
+           "resolution": scale}
+    try:
+        d = Downloader.from_config(("shapefiles", "natural_earth", scale,
+                                    "physical", "coastline"))
+        return bool(d.pre_downloaded_path(fmt)) or Path(d.target_path(fmt)).exists()
+    except Exception:
+        return False
+
+
+def coast_scale(lon_span: float) -> str:
+    """The coastline scale for a view `lon_span` degrees wide.
+
+    110m wide, 50m from 60 degrees down, 10m below 10; a finer scale that is
+    not on disk falls back to the next coarser one. 110m is always used as
+    the floor (cartopy fetches it on first use, as it always has). Pre-fetch
+    the finer ones on a machine with internet:
+    `python -c "from cartopy.io import shapereader as s;
+    [s.natural_earth(r, 'physical', 'coastline') for r in ('50m', '10m')]"`.
+    """
+    wanted = next(scale for above, scale in COAST_SCALES if lon_span > above)
+    order = ["10m", "50m", "110m"]
+    for scale in order[order.index(wanted):-1]:
+        if _coast_on_disk(scale):
+            return scale
+    return "110m"
+
+
 def _overlay(extent, nx: int, ny: int) -> bytes:
     """Transparent coastline layer for one view box.
 
@@ -255,7 +298,13 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
     # the raster's linear lon/lat mapping precisely.
     ax.set_aspect("auto")
 
-    ax.add_feature(cfeature.COASTLINE, linewidth=0.7, edgecolor="#111")
+    # a light halo under the dark line: without it a coast vanishes over
+    # the dark end of a colormap (land at 0 in viridis is near-black)
+    coast = cfeature.NaturalEarthFeature("physical", "coastline",
+                                         coast_scale(lon_max - lon_min),
+                                         facecolor="none")
+    ax.add_feature(coast, linewidth=1.8, edgecolor="#ffffff", alpha=0.45)
+    ax.add_feature(coast, linewidth=0.7, edgecolor="#111")
     ax.patch.set_alpha(0)
     ax.spines["geo"].set_visible(False)
 
