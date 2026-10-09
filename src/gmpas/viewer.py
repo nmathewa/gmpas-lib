@@ -72,6 +72,9 @@ KIND_CAPS = {
             "probe": True, "gif": True, "data": False},
     "hovmoller": {"colour": True, "options": False, "pan": False, "frames": False,
                   "probe": False, "gif": False, "data": True},
+    # MPAS only: a vertical section along a path, native cells and levels
+    "section": {"colour": True, "options": False, "pan": False, "frames": False,
+                "probe": False, "gif": False, "data": True},
 }
 
 
@@ -314,7 +317,8 @@ class Viewer:
                 "pinned": _data.level_dims(da)[1:],
             })
             if not out[-1]["static"]:
-                out[-1]["kinds"] = ["map", "hovmoller"]
+                out[-1]["kinds"] = ["map", "hovmoller"] + (
+                    ["section"] if out[-1]["levels"] > 1 else [])
         out.sort(key=lambda v: (v["static"], v["name"]))
         first = self.series.files[0].name
         title = (first if self.series.n_files == 1
@@ -336,7 +340,8 @@ class Viewer:
             # the page's Hovmöller estimate: whole fields per step, mesh bins
             "native": True,
             "kind_labels": {"map": "map (native mesh)",
-                            "hovmoller": "Hovmöller (time × lon, area-weighted)"},
+                            "hovmoller": "Hovmöller (time × lon, area-weighted)",
+                            "section": "vertical section along a path"},
             "kind_caps": KIND_CAPS,
             "variables": out,
         }
@@ -421,7 +426,7 @@ class Viewer:
     # -- export ----------------------------------------------------------
 
     def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
-               colour=None, kind="map", hov=None, **_):
+               colour=None, kind="map", hov=None, **extra):
         """A publication-shaped figure, not the bare raster the browser shows.
 
         Goes through the ordinary plotting path so it gets cartopy axes,
@@ -438,6 +443,10 @@ class Viewer:
             st = Style.preset(style)
             return self._render_hovmoller(var, level, extent, cmap, vmin, vmax, hov,
                                           st.figsize, st.dpi)
+        if kind == "section":
+            st = Style.preset(style)
+            return self._render_section(var, time, extent, cmap, vmin, vmax,
+                                        extra.get("sec"), st.figsize, st.dpi)
         if var not in self.plottable_cell_vars():
             raise ValueError(
                 f"{var!r} is a derived expression -- figure export needs a "
@@ -508,7 +517,7 @@ class Viewer:
         return buf.getvalue()
 
     def netcdf(self, var, time, level, extent, nx, ny, colour=None, kind="map",
-               hov=None, **_):
+               hov=None, **extra):
         """The current view sampled onto a regular lat-lon grid, as netCDF.
 
         NEAREST-CELL SAMPLING, not a conservative remap: every point takes the
@@ -517,6 +526,8 @@ class Viewer:
         """
         if kind == "hovmoller":
             return self.hovmoller(var, level, hov, extent).to_netcdf()
+        if kind == "section":
+            return self.section(var, time, extent, extra.get("sec")).to_netcdf()
         import xarray as xr
 
         from .raster import target_grid
@@ -648,13 +659,55 @@ class Viewer:
             plt.close(fig)
 
     def plot(self, var, time, level, kind, extent, width=900, height=560,
-             cmap=None, vmin=None, vmax=None, hov=None, meta=None, **_) -> bytes:
-        """The plot pane. On the MPAS page that is only the Hovmöller."""
+             cmap=None, vmin=None, vmax=None, hov=None, meta=None, sec=None,
+             **_) -> bytes:
+        """The plot pane: the Hovmöller, or a vertical section."""
+        width, height = int(np.clip(width, 200, 4000)), int(np.clip(height, 150, 3000))
+        if kind == "section":
+            return self._render_section(var, time, extent, cmap, vmin, vmax, sec,
+                                        (width / 100, height / 100), 100)
         if kind != "hovmoller":
             raise ValueError(f"the MPAS viewer has no {kind!r} plot")
-        width, height = int(np.clip(width, 200, 4000)), int(np.clip(height, 150, 3000))
         return self._render_hovmoller(var, level, extent, cmap, vmin, vmax, hov,
                                       (width / 100, height / 100), 100, meta)
+
+    # -- vertical section along a great circle: see gmpas.native --------------
+
+    def section(self, var: str, time: int, extent, sec=None):
+        """The section on screen: the path asked for, or west to east through
+        the middle of the view."""
+        from . import native
+
+        if sec is None:
+            lat = 0.5 * (float(extent[2]) + float(extent[3]))
+            sec = ((float(extent[0]), lat), (float(extent[1]), lat))
+        if var not in self.plottable_cell_vars():
+            raise ValueError(f"{var!r} is not a cell field, so it has no section")
+        return native.cross_section(self.series, var, int(time), sec[0], sec[1],
+                                    sel=self._pins(var))
+
+    def _render_section(self, var, time, extent, cmap, vmin, vmax, sec,
+                        figsize, dpi) -> bytes:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        from . import native
+
+        da = self.section(var, time, extent, sec)
+        fig = plt.figure(figsize=figsize, dpi=dpi, layout="constrained")
+        try:
+            ax = fig.add_subplot()
+            artist = native.draw_section(ax, da, cmap=cmap or None, vmin=vmin, vmax=vmax)
+            fig.colorbar(artist, ax=ax, shrink=0.9,
+                         label=_data.field_label(self.series.dataarray(var, time)))
+            ax.set_title(f"{var} · {da.attrs['path']} · "
+                         f"{int((da['cell'] >= 0).sum())} cells, native", fontsize=10)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=dpi)
+            return buf.getvalue()
+        finally:
+            plt.close(fig)
 
     def probe(self, lon, lat, var, time, level):
         cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
@@ -824,6 +877,14 @@ def _plot_extras(q: dict) -> dict:
             out[key] = float(q[key])
     if q.get("hlat0") or q.get("hlat1"):
         out["hov"] = _hov_params(q)
+    if all(q.get(k) for k in ("s0lon", "s0lat", "s1lon", "s1lat")):
+        try:
+            p = [float(q[k]) for k in ("s0lon", "s0lat", "s1lon", "s1lat")]
+        except ValueError:
+            raise ValueError("section end points must be numbers") from None
+        if not all(math.isfinite(v) for v in p) or abs(p[1]) > 90 or abs(p[3]) > 90:
+            raise ValueError("section end points must be finite, latitude within 90")
+        out["sec"] = ((p[0], p[1]), (p[2], p[3]))
     return out
 
 
@@ -1780,6 +1841,19 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
     <div class="hint" id="lyhint"></div>
   </div>
 
+  <div class="sec" id="secbox" style="display:none"><label>section</label>
+    <div class="kv"><span>from (lon, lat)</span></div>
+    <div class="row"><input type="number" id="s0lon" step="any" placeholder="lon">
+      <input type="number" id="s0lat" step="any" placeholder="lat"></div>
+    <div class="kv" style="margin-top:6px"><span>to (lon, lat)</span></div>
+    <div class="row"><input type="number" id="s1lon" step="any" placeholder="lon">
+      <input type="number" id="s1lat" step="any" placeholder="lat"></div>
+    <div class="row" style="margin-top:6px">
+      <button id="secgo" style="flex:1">draw</button>
+      <button id="secview">use view</button></div>
+    <div class="hint">along the great circle; one column per crossed cell, as wide as
+      the path inside it, one row per level in the file -- nothing interpolated</div>
+  </div>
   <div class="sec" id="hovbox" style="display:none"><label>Hovm\u00f6ller</label>
     <div class="kv"><span>latitude band (averaged)</span></div>
     <div class="row"><input type="number" id="hlat0" step="any" placeholder="lat min">
@@ -2075,6 +2149,7 @@ function setMode(){
   // the point panel marks a place on the map; a figure has no place to mark
   ptShown(!p && c.probe);
   hovMode(p && $("#kind").value==="hovmoller");
+  secMode(p && $("#kind").value==="section");
   renderAnimList();
   exportModes();
 }
@@ -2356,6 +2431,8 @@ async function drawPlot(){
     if($("#vmin").value) p.set("vmin",$("#vmin").value);
     if($("#vmax").value) p.set("vmax",$("#vmax").value);
     if($("#kind").value==="layers") p.set("layers", JSON.stringify(LY));
+    if($("#kind").value==="section")
+      Object.entries(secParams()).forEach(([k,v])=>p.set(k,v));
     if(colourParam()) p.set("colour", colourParam());
     const t0=performance.now();
     const r=await fetch("api/plot?"+p, {signal: ctrl.signal});
@@ -2797,6 +2874,24 @@ async function drawHov(){
 }
 $("#hovgo").onclick=()=>{ hovWant=hovKey(); hovAxis=null; draw(); };
 $("#hovview").onclick=()=>{ hovFromView(); if(plotMode()) draw(); };
+// A vertical section along a great circle (MPAS only, gmpas.native). The
+// default path runs west to east through the middle of the view.
+function secFromView(){
+  const b=boxOf(view), lat=(Math.max(-90,b[2])+Math.min(90,b[3]))/2;
+  $("#s0lon").value=b[0].toFixed(2); $("#s0lat").value=lat.toFixed(2);
+  $("#s1lon").value=b[1].toFixed(2); $("#s1lat").value=lat.toFixed(2);
+}
+function secMode(on){
+  $("#secbox").style.display = on ? "" : "none";
+  if(on && !$("#s0lon").value) secFromView();
+}
+function secParams(){
+  const out={};
+  ["s0lon","s0lat","s1lon","s1lat"].forEach(k=>{ out[k]=$("#"+k).value; });
+  return out;
+}
+$("#secgo").onclick=()=>{ if(plotMode()) draw(); };
+$("#secview").onclick=()=>{ secFromView(); if(plotMode()) draw(); };
 ["#hlat0","#hlat1","#hlon0","#hlon1","#hs0","#hs1"].forEach(id=>
   $(id).addEventListener("input", ()=>{
     hovEstimate();
@@ -3073,6 +3168,8 @@ async function exportAs(kind, label){
     p.set("lon", pt.lon); p.set("lat", pt.lat);
     if($("#kind").value==="hovmoller")
       Object.entries(hovParams()).forEach(([k,v])=>p.set(k,v));
+    if($("#kind").value==="section")
+      Object.entries(secParams()).forEach(([k,v])=>p.set(k,v));
   }
   // GIF must have one range for the whole run, or every frame rescales
   if(kind==="gif" && !$("#vmin").value && lastRange && !plotMode()){

@@ -170,3 +170,257 @@ def hovmoller(series, var: str, level: int = 0, band=(-15.0, 15.0), lons=None,
                             "to the bin its centre lies in",
                "empty_bins": int((plan.counts == 0).sum()),
                "level": int(level)})
+
+
+# -- vertical cross-section along a great circle ---------------------------
+
+#: most samples one section may take; at 1/4 of the smallest cell this is a
+#: ~20,000 km path at 3.75 km, so a request past it is not a real section
+SECTION_MAX_SAMPLES = 2_000_000
+
+
+@dataclass(frozen=True)
+class Section:
+    """The cells a great-circle path crosses, in order, and where."""
+    cells: np.ndarray        # cell index per segment; -1 where the path leaves the mesh
+    x0: np.ndarray           # km along the path where each segment starts
+    x1: np.ndarray           # ... and ends
+    lon: np.ndarray          # segment midpoint, degrees east
+    lat: np.ndarray
+    length: float            # km, the whole path
+
+
+def _unit(lon, lat) -> np.ndarray:
+    lo, la = np.radians(np.asarray(lon, float)), np.radians(np.asarray(lat, float))
+    return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], -1)
+
+
+def _great_circle(p0, p1, n: int):
+    """`n` evenly spaced points from p0 to p1 along the great circle, as unit
+    vectors, with their angular distance from p0 in radians."""
+    a, b = _unit(*p0), _unit(*p1)
+    omega = float(np.arccos(np.clip(a @ b, -1.0, 1.0)))
+    t = np.linspace(0.0, 1.0, n)
+    if omega < 1e-12:
+        return np.repeat(a[None], n, 0), np.zeros(n), 0.0
+    if abs(omega - math.pi) < 1e-9:
+        raise ValueError("the two points are antipodal: no single great circle joins them")
+    s = math.sin(omega)
+    pts = (np.sin((1 - t) * omega)[:, None] * a + np.sin(t * omega)[:, None] * b) / s
+    return pts, t * omega, omega
+
+
+def _locate(mesh, pts) -> np.ndarray:
+    """Cell containing each unit-vector point, -1 off the mesh.
+
+    On a Voronoi mesh the nearest centre is the containing cell, exactly. Past
+    the edge of a regional mesh the nearest centre is a boundary cell, so a
+    point more than two cell widths from it is off the mesh; a global mesh
+    has no off.
+    """
+    dist, idx = mesh.tree().query(pts, workers=-1)
+    if mesh.is_global:
+        return idx
+    km = dist * mesh.sphere_radius / 1000.0          # chord, ~ arc at cell scale
+    width = np.asarray(mesh.cell_width_km, dtype=np.float64)[idx]
+    return np.where(km <= 2.0 * width, idx, -1)
+
+
+def _point_at(p0, p1, omega: float, t: np.ndarray) -> np.ndarray:
+    a, b = _unit(*p0), _unit(*p1)
+    s = math.sin(omega)
+    return (np.sin((1 - t) * omega)[:, None] * a + np.sin(t * omega)[:, None] * b) / s
+
+
+def _refine(mesh, p0, p1, omega, t, ids, eps: float):
+    """Bisect every change between samples down to `eps` (fraction of the path),
+    all at once: finds where each boundary really is, and any cell a sample
+    stepped over -- a path clipping a cell's corner for less than the spacing.
+
+    Returns the cell sequence and the boundary positions between them.
+    """
+    i = np.flatnonzero(ids[1:] != ids[:-1])
+    tl, tr, cl, cr = t[i], t[i + 1], ids[i], ids[i + 1]
+    while True:
+        open_ = (tr - tl) > eps
+        if not open_.any():
+            break
+        tm = 0.5 * (tl + tr)
+        cm = np.where(open_, _locate(mesh, _point_at(p0, p1, omega, tm)), cl)
+        left, right = cm == cl, cm == cr
+        new = open_ & ~left & ~right              # a third cell between: split
+        tl = np.where(open_ & left, tm, tl)
+        tr = np.where(open_ & right, tm, tr)
+        if new.any():
+            tl, tr, cl, cr = (np.r_[np.where(new, tl, tl), tm[new]],
+                              np.r_[np.where(new, tm, tr), tr[new]],
+                              np.r_[cl, cm[new]],
+                              np.r_[np.where(new, cm, cr), cr[new]])
+            order = np.argsort(tl, kind="stable")
+            tl, tr, cl, cr = tl[order], tr[order], cl[order], cr[order]
+    seq = np.r_[ids[0], cr]
+    return seq, 0.5 * (tl + tr)
+
+
+def section_cells(mesh, p0, p1) -> Section:
+    """The ordered cells a great-circle path from p0 to p1 crosses.
+
+    A coarse pass finds the smallest cell along the path; the path is then
+    sampled at a quarter of that width, each sample mapped to its cell, and
+    consecutive repeats merged. A geodesic crosses a convex cell once, so no
+    cell is skipped or repeated; a segment's ends sit halfway between the
+    last sample in one cell and the first in the next.
+    """
+    radius_km = mesh.sphere_radius / 1000.0
+    _, _, omega = _great_circle(p0, p1, 2)
+    length = omega * radius_km
+    if length <= 0:
+        raise ValueError("the two section points are the same place")
+    coarse_pts, _, _ = _great_circle(p0, p1, 2048)
+    coarse = _locate(mesh, coarse_pts)
+    inside = coarse[coarse >= 0]
+    if not inside.size:
+        raise ValueError("the section path does not cross the mesh")
+    smallest = float(np.min(np.asarray(mesh.cell_width_km)[np.unique(inside)]))
+    n = int(math.ceil(length / (smallest / 4.0))) + 1
+    if n > SECTION_MAX_SAMPLES:
+        raise ValueError(f"a {length:,.0f} km section at {smallest:.2f} km cells needs "
+                         f"{n:,} samples, over the {SECTION_MAX_SAMPLES:,} allowed; "
+                         f"shorten the path")
+    pts, ang, _ = _great_circle(p0, p1, max(n, 2))
+    ids = _locate(mesh, pts)
+    # boundaries to ~1 m: exact for any purpose a plot has
+    cells, at = _refine(mesh, p0, p1, omega, ang / omega, ids, eps=1e-3 / length)
+    edges = np.r_[0.0, at * length, length]
+    x0, x1 = edges[:-1], edges[1:]
+    # segment midpoints back to lon/lat
+    frac = (0.5 * (x0 + x1)) / length
+    a, b = _unit(*p0), _unit(*p1)
+    s = math.sin(omega)
+    m = (np.sin((1 - frac) * omega)[:, None] * a + np.sin(frac * omega)[:, None] * b) / s
+    lat = np.degrees(np.arcsin(np.clip(m[:, 2], -1, 1)))
+    lon = np.degrees(np.arctan2(m[:, 1], m[:, 0]))
+    return Section(cells=cells, x0=x0, x1=x1, lon=lon, lat=lat, length=length)
+
+
+def _vertical_axis(series, var: str, step: int, levdim: str, n: int, cells):
+    """The vertical coordinate of a section, as the file states it.
+
+    Returns (name, units, centres (n,), bounds (n+1,) or (n+1, ncells), down)
+    where `down` means the axis increases downward (pressure).
+    """
+    with series._lock:
+        src = series._dataset(series.steps[step][0])
+        # a 1-D variable on the level dimension, e.g. t_iso_levels on nIsoLevelsT
+        for name, v in src.variables.items():
+            if v.dims == (levdim,) and name != levdim and np.issubdtype(v.dtype, np.number):
+                units = str(v.attrs.get("units", ""))
+                values = np.asarray(v.values, dtype=np.float64)
+                if units.lower() in ("pa", "pascal", "pascals"):
+                    values, units = values / 100.0, "hPa"
+                bounds = _bounds(values)
+                down = units.lower() in ("hpa", "mb", "mbar", "millibar")
+                return name, units, values, bounds, down
+        if levdim == "nVertLevels" and "zgrid" in src.variables \
+                and src["zgrid"].dims[-1] == "nVertLevelsP1":
+            z = src["zgrid"]
+            z = z.isel({d: 0 for d in z.dims if d not in ("nCells", "nVertLevelsP1")})
+            zc = np.asarray(z.transpose("nVertLevelsP1", "nCells").values[:, cells],
+                            dtype=np.float64)                      # (n+1, ncells)
+            centres = 0.5 * (zc[:-1] + zc[1:]).mean(axis=1)
+            return "height", "m", centres, zc, False
+    idx = np.arange(n, dtype=np.float64)
+    name = "model level" if levdim.startswith("nVertLevels") else f"{levdim} index"
+    return name, "index", idx, _bounds(idx), False
+
+
+def _bounds(c: np.ndarray) -> np.ndarray:
+    """Cell boundaries for centres `c`: midway between, half a step past the ends."""
+    c = np.asarray(c, dtype=np.float64)
+    if c.size == 1:
+        return np.array([c[0] - 0.5, c[0] + 0.5])
+    mid = 0.5 * (c[1:] + c[:-1])
+    return np.r_[c[0] - (mid[0] - c[0]), mid, c[-1] + (c[-1] - mid[-1])]
+
+
+def cross_section(series, var: str, step: int, p0, p1, sel=None):
+    """`var` on the cells a great-circle path crosses, as (level, distance).
+
+    Native in both directions: each column is one cell, as wide as the path
+    inside it; each row is one level of the file. Nothing is interpolated.
+    """
+    import xarray as xr
+
+    from . import data as _data
+
+    da = series.dataarray(var, step)
+    where = _data.spatial_dim(da)
+    if where != "nCells":
+        raise ValueError(f"{var!r} lives on {where}; a section takes cell fields only")
+    levels = _data.level_dims(da)
+    if not levels:
+        raise ValueError(f"{var!r} has no vertical axis, so it has no section")
+    levdim = levels[0]
+    n = int(da.sizes[levdim])
+    sec = section_cells(series.mesh, p0, p1)
+    on = sec.cells >= 0
+    block = np.full((n, sec.cells.size), np.nan)
+    with timing.step("native.section", cells=int(on.sum()), levels=n):
+        for k in range(n):
+            field = np.asarray(series.values(var, step=step, level=k, sel=sel))
+            block[k, on] = field[sec.cells[on]]
+    name, units, centres, bounds, down = _vertical_axis(
+        series, var, step, levdim, n, np.where(on, sec.cells, 0))
+    if bounds.ndim == 2:                    # per-column heights: off-mesh columns blank
+        bounds = np.where(on[None, :], bounds, np.nan)
+        lo, hi = ((("level", "distance"), bounds[:-1]), (("level", "distance"), bounds[1:]))
+    else:
+        lo, hi = ("level", bounds[:-1]), ("level", bounds[1:])
+    attrs = {k: v for k, v in da.attrs.items()
+             if k in ("units", "long_name", "standard_name")}
+    return xr.DataArray(
+        block, dims=("level", "distance"),
+        coords={"level": ("level", centres, {"long_name": name, "units": units}),
+                "distance": ("distance", 0.5 * (sec.x0 + sec.x1), {"units": "km"}),
+                "x0": ("distance", sec.x0), "x1": ("distance", sec.x1),
+                "cell": ("distance", sec.cells),
+                "lon": ("distance", sec.lon), "lat": ("distance", sec.lat),
+                "level_lo": lo, "level_hi": hi},
+        name=var,
+        attrs={**attrs,
+               "pressure_down": int(down),
+               "path": f"({p0[0]:g}, {p0[1]:g}) to ({p1[0]:g}, {p1[1]:g}), "
+                       f"{sec.length:,.0f} km great circle",
+               "method": "native: one column per crossed cell, as wide as the path "
+                         "inside it; one row per file level; nothing interpolated",
+               "time_step": int(step)})
+
+
+def draw_section(ax, da, cmap=None, vmin=None, vmax=None):
+    """Each crossed cell as a column exactly as wide as the path inside it."""
+    lo = np.asarray(da["level_lo"].values, dtype=np.float64)
+    hi = np.asarray(da["level_hi"].values, dtype=np.float64)
+    bounds = np.concatenate([lo[:1], hi], axis=0)       # (n+1,) or (n+1, columns)
+    x0, x1 = np.asarray(da["x0"].values), np.asarray(da["x1"].values)
+    v = np.asarray(da.values)                      # (level, column)
+    nl, nc = v.shape
+    # two x positions per column, so neighbouring columns share no corner and
+    # per-column level bounds (zgrid) stay per column; the zero-width quad
+    # between them is masked
+    X = np.empty(2 * nc)
+    X[0::2], X[1::2] = x0, x1
+    if bounds.ndim == 1:
+        Y = np.repeat(bounds[:, None], 2 * nc, axis=1)
+    else:
+        Y = np.repeat(bounds, 2, axis=1)
+    Xg = np.repeat(X[None, :], nl + 1, axis=0)
+    C = np.full((nl, 2 * nc - 1), np.nan)
+    C[:, 0::2] = v
+    mesh = ax.pcolormesh(Xg, Y, np.ma.masked_invalid(C), cmap=cmap, vmin=vmin,
+                         vmax=vmax, shading="flat")
+    if int(da.attrs.get("pressure_down", 0)):
+        ax.invert_yaxis()
+    lvl = da["level"]
+    ax.set_ylabel(f"{lvl.attrs.get('long_name', 'level')} [{lvl.attrs.get('units', '')}]")
+    ax.set_xlabel("distance along the path [km]")
+    return mesh
