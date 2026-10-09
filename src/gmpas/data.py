@@ -95,6 +95,68 @@ def find_mesh_beside(dpath: Path, n_cells: int) -> Path | None:
             t.note(scanned=len(candidates), opened=opened)
 
 
+def detect_kind(paths, mesh_path: str = "") -> tuple[str, str]:
+    """Whether `paths` is MPAS output or a regular lat/lon grid, and why.
+
+    Returns ("mpas" | "generic" | "ask", one line for the terminal). Reads the
+    first file that opens, header and 1D coordinates only.
+
+    - "mpas": the file has an `nCells` dimension. That alone decides it, mesh
+      or no mesh: an MPAS diag file without its mesh must reach the MPAS
+      reader's own "pass -m mesh.nc" message, never be drawn as something else.
+    - "generic": no `nCells`, and the --generic reader finds a 1D latitude and
+      a 1D longitude on separate dimensions -- the same `_find_axis` it opens
+      with, so the two cannot disagree.
+    - "ask": neither. The --generic viewer opens in its needs-setup state and
+      the page asks which dimension is which.
+    """
+    import netCDF4
+
+    from .series import expand
+
+    files = expand(paths)
+    first, n_cells, inside = None, None, False
+    for f in files:
+        try:
+            with netcdf.LOCK, netCDF4.Dataset(f) as nc:
+                dim = nc.dimensions.get("nCells")
+                n_cells = len(dim) if dim is not None else None
+                inside = has_mesh(nc)
+            first = f
+            break
+        except Exception:
+            continue
+    if first is None:
+        # the reader that opens these next says which files and why
+        return "ask", "no file could be read to tell what it is"
+
+    if n_cells is not None:
+        what = f"MPAS output · {n_cells:,} cells"
+        if inside:
+            return "mpas", what
+        if mesh_path:
+            return "mpas", f"{what} · mesh {Path(mesh_path).name}"
+        found = find_mesh_beside(first, n_cells)
+        if found is not None:
+            return "mpas", f"{what} · mesh {found.name} (beside it)"
+        return "mpas", f"{what} · no mesh found beside it"
+
+    from .generic import _find_axis
+
+    try:
+        with netcdf.LOCK, xr.open_dataset(first, decode_times=False,
+                                          engine="netcdf4") as ds:
+            lat, lat_dim = _find_axis(ds, "lat")
+            lon, lon_dim = _find_axis(ds, "lon")
+            sizes = (ds.sizes[lat_dim], ds.sizes[lon_dim])
+    except (ValueError, KeyError) as exc:
+        return "ask", f"no nCells and no regular lat/lon grid ({exc})"
+    if lat_dim == lon_dim:
+        return "ask", (f"no nCells, and {lat!r}/{lon!r} share the dimension "
+                       f"{lat_dim!r} -- points, not a grid")
+    return "generic", f"regular lat/lon grid · {sizes[0]} x {sizes[1]} ({lat}, {lon})"
+
+
 def spatial_dim(da: xr.DataArray) -> str:
     """Which MPAS mesh element this field lives on."""
     for d in SPATIAL_DIMS:

@@ -87,11 +87,44 @@ def _shown(paths) -> str:
     return paths[0] if len(paths) == 1 else f"{paths[0]} (+{len(paths) - 1} more)"
 
 
+def _generic_info(args) -> int:
+    """A short summary of a regular lat/lon file (or run): grid, steps, fields."""
+    from .generic import GenericViewer
+
+    gv = GenericViewer(args.path)
+    try:
+        print(f"# {gv.title}")
+        if gv.needs_setup:
+            print(f"grid      : not worked out -- {gv.setup_problem}")
+            return 0
+        lo, hi, la, lb = gv.home
+        print(f"grid      : {gv.ny} x {gv.nx} ({gv.lat_name}, {gv.lon_name}), "
+              f"{'global' if gv.cyclic else 'regional'}")
+        print(f"extent    : lon {lo:.2f} .. {hi:.2f}, lat {la:.2f} .. {lb:.2f}")
+        n = len(gv.files)
+        span = f" ({gv.labels[0]} .. {gv.labels[-1]})" if gv.labels else ""
+        print(f"steps     : {gv.steps} across {n} file{'s' if n != 1 else ''}{span}")
+        rows = gv.describe()["variables"]
+        on_map = [r for r in rows if r["spatial"]]
+        print()
+        print(f"## on the grid ({len(on_map)})")
+        for r in on_map[:args.limit]:
+            da = gv.ds[r["name"]]
+            print(f"  {r['name']} {tuple(da.dims)}  {da.attrs.get('units', '')}".rstrip())
+        if len(on_map) > args.limit:
+            print(f"  ... and {len(on_map) - args.limit} more")
+    finally:
+        gv.close()
+    return 0
+
+
 def _info(args) -> int:
     from .data import plottable
     from .mesh import MpasMesh
     from .series import Series
 
+    if not args.mesh_only and _kind(args) != "mpas":
+        return _generic_info(args)
     series = None
     if args.mesh_only:
         mesh, ds = MpasMesh.load(args.path[0]), None
@@ -255,7 +288,40 @@ def _plot_series(args) -> int:
     return 0
 
 
+def _generic_plot(args) -> int:
+    """`gmpas plot` on a regular lat/lon file: the same figure the viewer's
+    export draws (`GenericViewer.figure`), one step."""
+    from .generic import GenericViewer
+
+    unsupported = [flag for flag, on in (
+        ("--all-steps", args.all_steps), ("--sel", args.sel),
+        ("--extent", args.extent), ("--symmetric", args.symmetric),
+        ("--method", args.method != "auto")) if on]
+    if unsupported:
+        print(f"gmpas: {', '.join(unsupported)} "
+              f"{'is' if len(unsupported) == 1 else 'are'} for MPAS output; "
+              f"a lat/lon file plots one step (use `gmpas view` to export more)",
+              file=sys.stderr)
+        return 1
+    gv = GenericViewer(args.path, strict=True)
+    try:
+        if args.var not in gv.ds:
+            print(f"{args.var!r} not in {_shown(args.path)}. Variables: "
+                  f"{list(gv.ds.data_vars)[:20]}", file=sys.stderr)
+            return 1
+        png = gv.figure(args.var, args.time, args.level, gv.home,
+                        args.cmap or "viridis", None, None, style=args.style)
+    finally:
+        gv.close()
+    out = Path(args.out)
+    out.write_bytes(png)
+    print(out)
+    return 0
+
+
 def _plot(args) -> int:
+    if _kind(args) != "mpas":
+        return _generic_plot(args)
     if args.all_steps:
         # "{step" not "{step}" -- a format spec like {step:04d} is the normal
         # case and does not contain the bare placeholder
@@ -575,8 +641,28 @@ def _dashboard(args, data_path=None, mesh_path="", hfun_path="") -> int:
     return 0
 
 
+def _kind(args) -> str:
+    """MPAS or a regular lat/lon grid, decided from the file and said once.
+
+    `--generic` still forces the lat/lon reader for one more release; the
+    file decides otherwise (`data.detect_kind`).
+    """
+    if getattr(args, "generic", False):
+        print("gmpas: --generic is no longer needed -- files are recognised "
+              "automatically; it will be removed in the next release",
+              file=sys.stderr)
+        return "generic"
+    from .data import detect_kind
+
+    kind, why = detect_kind(args.path, getattr(args, "mesh", "") or "")
+    print(f"gmpas: {why}" + ("" if kind != "ask" else
+                             " -- choose the dimensions in the browser"),
+          file=sys.stderr)
+    return kind
+
+
 def _view(args) -> int:
-    if args.generic:
+    if _kind(args) != "mpas":                # "ask" opens the setup panel
         return _generic_view(args)
     return _dashboard(args, data_path=args.path, mesh_path=args.mesh or "",
                       hfun_path=args.hfun or "")
@@ -617,7 +703,7 @@ def _generic_view(args) -> int:
     serve([source], port=DEFAULT_PORT if args.port is None else args.port,
           host=args.host, open_browser=args.browser,
           strict_port=args.port is not None,          # see the note in _dashboard
-          banner=f"gmpas view --generic · {gv.title}")
+          banner=f"gmpas view · lat/lon grid · {gv.title}")
     return 0
 
 
@@ -869,20 +955,9 @@ def build_parser() -> argparse.ArgumentParser:
     common(v)
     v.add_argument("--hfun", help="also serve the JIGSAW hfun.py behind this "
                                   "mesh, as a third page on the same port")
-    v.add_argument("--generic", action="store_true",
-                   help="treat PATH as plain, self-describing netCDF on a "
-                        "regular lat/lon grid, not MPAS output -- ERA5, "
-                        "reanalysis, anything CF. Files, globs and directories "
-                        "become one time axis, as with MPAS output; every file "
-                        "must share the first one's grid. No mesh and no "
-                        "KD-tree, so it is much faster, but a curvilinear or "
-                        "unstructured file needs a mesh instead. Beside the "
-                        "map it draws what xarray's DataArray.plot would -- "
-                        "filled contours, lines, a time series or profile at a "
-                        "clicked point -- and exports figures and GIFs of "
-                        "them. --width/--height, -m/--mesh, --hfun and "
-                        "--cache-dir are ignored; netCDF export is not "
-                        "implemented for this mode yet.")
+    # deprecated: the file says whether it is MPAS output or a lat/lon grid
+    # (data.detect_kind); kept one more release so scripts keep working
+    v.add_argument("--generic", action="store_true", help=argparse.SUPPRESS)
     v.add_argument("-p", "--port", type=int, default=None,
                    help=f"port (default {DEFAULT_PORT}; the default wanders "
                         f"if busy, an explicit one fails instead)")

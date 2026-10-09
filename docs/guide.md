@@ -229,7 +229,7 @@ fields:
 | `diff(a)` | this timestep minus the previous one — a tendency |
 
 Names match regardless of case (`Q` finds `q`) unless the file has two fields
-that differ only in case. The box works the same under `view --generic`. The
+that differ only in case. The box works the same on lat/lon files. The
 level slider follows the fields in the expression when they share one level
 axis.
 
@@ -266,13 +266,20 @@ ignored while typing in a field. `?` shows them on the page.
 | `r` | reset view |
 | `?` `Esc` | show / hide the key list |
 
-### `--generic`: plain netCDF files
+### Plain netCDF files (lat/lon grids)
 
 ```bash
-gmpas view reanalysis.nc --generic
+gmpas view reanalysis.nc
 ```
 
-For files that are *already* on a regular lat/lon grid — reanalysis,
+`gmpas view`, `gmpas info` and `gmpas plot` recognise the file themselves and
+say so on the first line: a file with an `nCells` dimension is MPAS output
+(with or without its mesh beside it), a file with 1D latitude and longitude
+axes is a regular grid, and anything else opens with the page asking which
+dimension is which. `--generic`, which used to choose this, is no longer
+needed; it still works for one more release and says so.
+
+This is for files that are *already* on a regular lat/lon grid — reanalysis,
 satellite products, anything CF-conventional. It skips the mesh and k-d tree
 entirely (a regular grid is already the picture, so a view is just an index
 range) and serves slices at the file's native resolution.

@@ -15,7 +15,7 @@ load the site's own build (`module load esmf`) rather than a conda-forge copy
 in gmpas's own environment; the two compete on `PATH`/`LD_LIBRARY_PATH`
 rather than help.
 
-**The viewer** draws a run as a fast raster and, for `--generic` files, as a
+**The viewer** draws a run as a fast raster and, for lat/lon files, as a
 composite of layers, a Hovmoller diagram, or any of the xarray plot kinds.
 Both viewers offer the same colours: matplotlib, cmocean, the Ferret palettes
 and the GrADS tables, with discrete bands, out-of-range and missing colours,
@@ -28,7 +28,7 @@ viewer's own page on a real MPAS run, rendering in the browser with no server
 behind it, so the interface can be tried before anything is installed. See
 [demo/README](demo/README.md) for what it leaves out.
 
-**When `--generic` cannot work a file out** it does not guess and draw. The
+**When gmpas cannot work a lat/lon file out** it does not guess and draw. The
 viewer starts, nothing is drawn, and a panel asks which variable is x and y
 and which dimensions are time and level; the answer is checked the same way
 a detected one is, and remembered for that file. The panel is also shown,

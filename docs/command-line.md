@@ -4,6 +4,7 @@
 gmpas info       history.2012-02-25_12.00.00.nc
 gmpas plot       history.2012-02-25_12.00.00.nc precipw -o pw.png
 gmpas view       /path/to/run/
+gmpas view       reanalysis.nc          # a lat/lon file: recognised, no flag needed
 gmpas scrip      history.2012-02-25_12.00.00.nc -o src.scrip.nc
 gmpas target     -o dst.scrip.nc
 gmpas prep view  mesh.nc
@@ -32,7 +33,7 @@ GrADS colours (`grads.*`). Beside it, **colour options** set discrete bands,
 reverse the palette, apply a log, symlog or power scale, and give out-of-range
 and missing values their own colours — with the colorbar drawn from exactly the
 colours the image was drawn with. All of it applies to `view` and
-`view --generic` alike, and to the figures and GIFs they export. A frame with
+lat/lon files alike, and to the figures and GIFs they export. A frame with
 no option set is encoded the way it always was.
 
 **Click the map** and a panel opens with that location: the cell, its centre,
