@@ -35,6 +35,51 @@ Check it landed:
 gmpas --version
 ```
 
+## In a conda environment, or beside system packages
+
+Install gmpas into the environment that will run it, with that
+environment's own pip:
+
+```bash
+conda activate myenv
+python -m pip install "gmpas[plot]"
+```
+
+Plain `pip` or a `gmpas` command found on `PATH` may belong to another
+Python. Two traps produce a mixed install:
+
+- **A leftover `pip install --user` copy.** `~/.local/bin/gmpas` runs under
+  the system Python even with an environment active, and loads whatever
+  `~/.local` and the system packages hold.
+- **`~/.local` leaking into the environment.** A conda Python of the same
+  version (say 3.10) also reads `~/.local/lib/python3.10/site-packages`.
+  Keep it out:
+
+  ```bash
+  conda env config vars set PYTHONNOUSERSITE=1    # or: export PYTHONNOUSERSITE=1
+  ```
+
+Check which copy runs:
+
+```bash
+which -a gmpas                       # the first one listed is what runs
+head -1 "$(which gmpas)"             # the Python it runs under
+```
+
+**The symptom** of a mix is NumPy 2 next to matplotlib, numexpr or
+bottleneck built for NumPy 1 (often from `/usr/lib/python3/dist-packages`):
+
+```
+A module that was compiled using NumPy 1.x cannot be run in NumPy 2.x ...
+AttributeError: _ARRAY_API not found
+ImportError: numpy.core.multiarray failed to import
+```
+
+gmpas reports this case in one message naming the Python, the gmpas copy,
+NumPy and the module at fault; `GMPAS_DEBUG=1` shows the full traceback.
+Remove the stray copy with the pip that installed it (for example
+`/usr/bin/python3 -m pip uninstall gmpas`), then install as above.
+
 ## From source
 
 Copy the directory (or clone it) onto the target machine and install it.

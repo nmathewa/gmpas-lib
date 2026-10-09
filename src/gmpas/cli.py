@@ -1054,6 +1054,75 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+#: what a module built for NumPy 1.x says when it is loaded under NumPy 2.x
+_NUMPY_ABI_SIGNS = ("_ARRAY_API not found", "numpy.core.multiarray failed to import",
+                    "compiled using NumPy 1.x", "numpy.core._multiarray_umath")
+
+
+def numpy_abi_problem(exc: BaseException) -> str | None:
+    """One readable message for a NumPy 1.x/2.x mix, or None if it is not one.
+
+    The usual cause is two Python stacks on one path: gmpas and a new NumPy
+    from `pip install --user` or a conda env, beside matplotlib (or numexpr,
+    bottleneck) from the system's own packages, built for NumPy 1.x. The
+    traceback that follows is long and names neither copy, so this says
+    which interpreter, which gmpas and which module, and how to fix it
+    (issue #153). GMPAS_DEBUG=1 shows the full traceback instead.
+    """
+    import traceback
+
+    chain, seen = [], set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        chain.append(e)
+        e = e.__cause__ or e.__context__
+    if not any(sign in str(e) for e in chain for sign in _NUMPY_ABI_SIGNS):
+        return None
+
+    # the deepest frame outside numpy itself is the module that was built
+    # for the other NumPy
+    culprit = ""
+    for e in chain:
+        for frame in reversed(traceback.extract_tb(e.__traceback__)):
+            name = frame.filename
+            if ("-packages" in name and "/numpy/" not in name
+                    and "/gmpas/" not in name):
+                culprit = name
+                break
+        if culprit:
+            break
+    try:
+        import numpy
+        numpy_where = f"{numpy.__version__} from {Path(numpy.__file__).parent}"
+    except Exception:                                   # noqa: BLE001
+        numpy_where = "could not be imported"
+    from . import __file__ as gmpas_file
+
+    lines = [
+        "gmpas: a module built for NumPy 1.x was loaded under NumPy 2.x, so it "
+        "cannot run.",
+        f"  python : {sys.executable}",
+        f"  gmpas  : {Path(gmpas_file).parent}",
+        f"  numpy  : {numpy_where}",
+    ]
+    if culprit:
+        lines.append(f"  module : {culprit}")
+    lines += [
+        "Two Python stacks are mixed: usually a `pip install --user` copy, or a",
+        "conda environment, beside the system's own packages. To fix it, install",
+        "gmpas into the environment that should run it, and keep ~/.local out:",
+        '  python -m pip install --upgrade "gmpas[plot]"',
+        "  export PYTHONNOUSERSITE=1       # in a conda env: conda env config vars set "
+        "PYTHONNOUSERSITE=1",
+        "  which -a gmpas                  # a ~/.local/bin/gmpas listed first is a stray "
+        "copy:",
+        "                                  #   remove it with the pip that installed it",
+        "Set GMPAS_DEBUG=1 to see the full traceback.",
+    ]
+    return "\n".join(lines)
+
+
 def main(argv=None) -> int:
     # A fatal signal is not an exception and cannot be caught below: SIGBUS
     # from a memory-mapped page the filesystem could not supply kills the
@@ -1116,11 +1185,18 @@ def main(argv=None) -> int:
         # used to come out as a netCDF traceback.
         print(f"gmpas: {exc}", file=sys.stderr)
         return 1
-    except ModuleNotFoundError as exc:
-        print(f"gmpas: {exc}. Rendering needs matplotlib and cartopy, which are "
-              f"an optional extra — install them with:  pip install gmpas[plot]",
-              file=sys.stderr)
-        return 1
+    except (ImportError, AttributeError) as exc:
+        # ModuleNotFoundError is an ImportError, so both arrive here
+        problem = numpy_abi_problem(exc)
+        if problem is not None and not os.environ.get("GMPAS_DEBUG"):
+            print(problem, file=sys.stderr)
+            return 1
+        if isinstance(exc, ModuleNotFoundError):
+            print(f"gmpas: {exc}. Rendering needs matplotlib and cartopy, which are "
+                  f"an optional extra — install them with:  pip install gmpas[plot]",
+                  file=sys.stderr)
+            return 1
+        raise
 
 
 if __name__ == "__main__":
