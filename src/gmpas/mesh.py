@@ -510,6 +510,39 @@ def _check_space(where: Path, need: int, mesh: Path) -> None:
     )
 
 
+#: every variable `_build_to_dir` reads, block by block
+_BUILD_READS = ("lonVertex", "latVertex", "verticesOnCell", "nEdgesOnCell",
+                "verticesOnEdge", "xCell", "yCell", "zCell", "areaCell", "lonCell",
+                "latCell", "lonEdge", "latEdge", "angleEdge")
+
+
+def _hold_chunks(var, block: int) -> None:
+    """Size `var`'s HDF5 chunk cache to keep every chunk a block touches.
+
+    The build reads `block` rows at a time. A chunked, compressed variable
+    whose chunks are longer than that -- the default for files from
+    `nccopy -d`, `ncks -L` or xarray -- is otherwise decompressed again for
+    every block that reaches into it, and again for every column when it is
+    chunked per column: the 42M-cell 3.75 km mesh took 220 s that way, 24 s
+    stored contiguous (#157). Caching is all this changes: the values read
+    are the same bytes.
+    """
+    chunking = var.chunking()
+    if chunking == "contiguous" or not var.shape:
+        return
+    lead = chunking[0]
+    across = 1
+    for n, c in zip(var.shape[1:], chunking[1:], strict=True):
+        across *= -(-n // c)
+    # a block can straddle one chunk more than it spans; those are revisited
+    along = -(-block // lead) + 1
+    count = across * along
+    nbytes = count * int(np.prod(chunking)) * var.dtype.itemsize
+    # preemption 1.0: a chunk read in full is the first to go
+    var.set_var_chunk_cache(size=nbytes, nelems=max(1009, 4 * count + 1),
+                            preemption=1.0)
+
+
 def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
     """Build geometry a chunk at a time, straight into mapped .npy files.
 
@@ -547,6 +580,9 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             )
 
         _check_space(cache.parent, _cache_bytes(nc), path)
+        for name in _BUILD_READS:
+            if name in nc.variables:
+                _hold_chunks(nc.variables[name], chunk)
 
         lon_v_var = nc.variables["lonVertex"]
         lat_v_var = nc.variables["latVertex"]
