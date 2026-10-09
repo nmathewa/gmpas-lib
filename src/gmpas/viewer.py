@@ -413,7 +413,7 @@ class Viewer:
         else:
             img = view.frame(values)
 
-        lo, hi = _frame_range(img, vmin, vmax)
+        lo, hi = _colour.centred(*_frame_range(img, vmin, vmax), colour, vmin, vmax)
         outside = None if on_grid is None else ~on_grid
         return _colour.frame_png(img, cmap, lo, hi, compress, colour,
                                  outside=outside, meta=meta), lo, hi
@@ -478,8 +478,9 @@ class Viewer:
             return 0.0, 1.0                       # unused: no norm is built
         from .plot import _limits
 
-        return _limits(np.asarray(values).squeeze(), vmin, vmax,
-                       symmetric=False, robust=True)
+        lo, hi = _limits(np.asarray(values).squeeze(), vmin, vmax,
+                         symmetric=False, robust=True)
+        return _colour.centred(lo, hi, colour, vmin, vmax)
 
     def gif(self, var, level, extent, cmap, vmin, vmax, nx, ny, fps=8, colour=None,
             **_):

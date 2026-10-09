@@ -28,7 +28,8 @@ from . import palettes
 #: sense for a raster, checked by the same code as a layer's.
 OPTIONS = {
     **{k: _layers._COLOUR_SCALE[k] for k in ("reverse", "norm", "gamma", "linthresh",
-                                             "extend", "under_color", "over_color")},
+                                             "extend", "under_color", "over_color",
+                                             "center")},
     "bands": {**_layers._RASTER_COLOUR["bands"], "max": 252},   # 252 data palette entries
     "missing_color": _layers._RASTER_COLOUR["missing_color"],
 }
@@ -54,6 +55,25 @@ def clean(colour) -> dict:
     opts = _layers._clean_options(colour, OPTIONS, "colour: ")
     _layers._check_colour_options(opts, "colour: ")
     return opts
+
+
+def centred(lo: float, hi: float, colour=None, vmin=None, vmax=None):
+    """The range made symmetric about the `center` option, if one is set.
+
+    The same rule as a layer's `center` (layers._auto_range): half the width
+    is the larger distance from the centre to either end, so the centre -- 0
+    for an anomaly, a difference, w or u/v -- sits at the middle of the
+    palette. A range the user typed in both ends of is theirs and is left as
+    it is, as it is for a layer. Without `center` this returns (lo, hi)
+    untouched, so nothing changes for anyone who does not ask.
+    """
+    center = clean(colour).get("center")
+    if center is None or (vmin is not None and vmax is not None):
+        return lo, hi
+    half = max(abs(lo - center), abs(hi - center))
+    if half <= 0:
+        half = 1.0
+    return center - half, center + half
 
 
 def groups() -> dict[str, list[str]]:
