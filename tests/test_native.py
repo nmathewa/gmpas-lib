@@ -168,11 +168,15 @@ def test_a_time_varying_field_offers_the_hovmoller(viewer):
 
 
 def test_the_mpas_kind_table_matches_the_generic_one():
-    """One page serves both viewers; a kind must mean the same thing in each."""
+    """One page serves both viewers; a kind both offer must mean the same thing
+    in each. The section is MPAS only, and a figure like the Hovmöller."""
     from gmpas import generic, viewer
 
-    for kind, caps in viewer.KIND_CAPS.items():
-        assert caps == generic.KIND_CAPS[kind]
+    shared = set(viewer.KIND_CAPS) & set(generic.KIND_CAPS)
+    assert shared == {"map", "hovmoller"}
+    for kind in shared:
+        assert viewer.KIND_CAPS[kind] == generic.KIND_CAPS[kind]
+    assert viewer.KIND_CAPS["section"] == viewer.KIND_CAPS["hovmoller"]
 
 
 def test_the_hovmoller_travels_over_http(viewer):
@@ -215,3 +219,140 @@ def test_the_hovmoller_exports_as_netcdf_and_figure(viewer, tmp_path):
 def test_a_static_field_has_no_hovmoller(viewer):
     with pytest.raises(ValueError, match="no time axis"):
         viewer.hovmoller_progress("areaCell", 0, {"band": (-5, 5)}, viewer.home)
+
+
+# --------------------------------------------------------- vertical section
+
+KM = 111.2
+SFINE = [(0.25 + 0.5 * i, -3.75 + 0.5 * j) for i in range(20) for j in range(16)]  # 0.5 deg
+SCOARSE = [(11.0 + 2.0 * i, -3.0 + 2.0 * j) for i in range(10) for j in range(4)]   # 2 deg
+PLEV = [50000.0, 70000.0, 85000.0]                                                 # Pa
+
+
+@pytest.fixture
+def sec_run(tmp_path):
+    """A fine half and a coarse half, areas matching the spacing (a hexagon of
+    width w has area sqrt(3)/2 w^2), with isobaric, model-level, flat and edge
+    fields. Value = 100 * level + cell index, so a read names its cell."""
+    from conftest import write_mesh
+
+    centres = SFINE + SCOARSE
+    w = np.r_[np.full(len(SFINE), 0.5 * KM), np.full(len(SCOARSE), 2.0 * KM)] * 1000
+    write_mesh(tmp_path / "mesh.nc", centres, areas=np.sqrt(3) / 2 * w ** 2)
+    ds = xr.open_dataset(tmp_path / "mesh.nc").load()
+    n = ds.sizes["nCells"]
+    code = 100.0 * np.arange(3)[None, :] + np.arange(n)[:, None]
+    ds["t_isobaric"] = (("Time", "nCells", "nIsoLevelsT"), code[None], {"units": "K"})
+    ds["t_iso_levels"] = (("nIsoLevelsT",), PLEV, {"units": "Pa"})
+    ds["theta"] = (("Time", "nCells", "nVertLevels"), code[None])
+    ds["t2m"] = (("Time", "nCells"), np.arange(n, dtype=float)[None])
+    ds["u"] = (("Time", "nEdges"), np.zeros((1, ds.sizes["nEdges"])))
+    folder = tmp_path / "run"
+    folder.mkdir()
+    ds.to_netcdf(folder / "history.2012-02-01_00.00.00.nc")
+    s = Series(folder)
+    yield s
+    s.close()
+
+
+def _dense_cells(mesh, p0, p1, n=2_000_000):
+    """Brute force: the same path sampled at ~1-2 km, runs collapsed."""
+    pts, _, _ = native._great_circle(p0, p1, n)
+    ids = native._locate(mesh, pts)
+    return ids[np.r_[True, ids[1:] != ids[:-1]]]
+
+
+@pytest.mark.parametrize("p0, p1", [
+    ((0.0, 0.0), (29.0, 0.5)),              # fine into coarse along the strip
+    ((1.0, -3.5), (25.0, 3.0)),             # diagonal across both
+    ((9.0, -3.0), (13.0, 2.5)),             # short, across the transition
+])
+def test_the_section_crosses_exactly_the_cells_a_dense_sampling_does(sec_run, p0, p1):
+    sec = native.section_cells(sec_run.mesh, p0, p1)
+    dense = _dense_cells(sec_run.mesh, p0, p1)
+    # every cell dense sampling meets is there, in the same order...
+    got = iter(sec.cells.tolist())
+    assert all(c in got for c in dense.tolist())
+    # ...and any it stepped over is a corner thinner than its own spacing
+    spacing = sec.length / 2_000_000
+    extra = ~np.isin(sec.cells, dense)
+    assert np.all((sec.x1 - sec.x0)[extra] < 2 * spacing)
+    on = sec.cells[sec.cells >= 0]
+    assert on.size == np.unique(on).size                    # none repeated
+    assert np.all(sec.cells[1:] != sec.cells[:-1])           # runs merged
+    assert sec.x0[0] == 0 and sec.x1[-1] == pytest.approx(sec.length)
+    np.testing.assert_allclose(sec.x0[1:], sec.x1[:-1])      # columns tile the path
+    assert (sec.x1 - sec.x0).sum() == pytest.approx(sec.length)
+
+
+def test_columns_are_as_wide_as_the_cells_they_cross(sec_run):
+    """Variable resolution shows: narrow columns in the fine half, wide in the coarse."""
+    sec = native.section_cells(sec_run.mesh, (0.0, 0.1), (29.0, 0.1))
+    width = sec.x1 - sec.x0
+    fine, coarse = width[sec.lon < 9.5], width[sec.lon > 12]
+    assert np.median(fine) == pytest.approx(0.5 * KM, rel=0.15)
+    assert np.median(coarse) == pytest.approx(2.0 * KM, rel=0.15)
+
+
+def test_the_values_are_the_cells_own_on_the_pressure_axis_of_the_file(sec_run):
+    da = native.cross_section(sec_run, "t_isobaric", 0, (0.0, 0.1), (29.0, 0.1))
+    cells = da["cell"].values
+    assert (cells >= 0).all()
+    for k in range(3):
+        np.testing.assert_array_equal(da.values[k],
+                                      sec_run.values("t_isobaric", 0, level=k)[cells])
+    assert da["level"].values.tolist() == [500.0, 700.0, 850.0]
+    assert da["level"].attrs["units"] == "hPa" and da.attrs["pressure_down"] == 1
+
+
+def test_a_level_axis_without_coordinates_is_labelled_as_an_index(sec_run):
+    da = native.cross_section(sec_run, "theta", 0, (0.0, 0.1), (29.0, 0.1))
+    assert da["level"].attrs["long_name"] == "model level"
+    assert da["level"].values.tolist() == [0.0, 1.0, 2.0]
+
+
+@pytest.mark.parametrize("var, why", [
+    ("u", "cell fields only"),
+    ("t2m", "no vertical axis"),
+])
+def test_a_field_without_a_section_is_refused_by_name(sec_run, var, why):
+    with pytest.raises(ValueError, match=why):
+        native.cross_section(sec_run, var, 0, (0.0, 0.0), (20.0, 0.0))
+
+
+def test_a_path_leaving_a_regional_mesh_leaves_blank_columns(sec_run):
+    da = native.cross_section(sec_run, "t_isobaric", 0, (-15.0, 0.1), (29.0, 0.1))
+    off = da["cell"].values < 0
+    assert off.any() and np.isnan(da.values[:, off]).all()
+    assert not np.isnan(da.values[:, ~off]).any()
+
+
+def test_the_section_draws_and_travels_over_http(sec_run, tmp_path):
+    """describe offers it for multi-level fields; /api/plot draws it on the path
+    asked for; netCDF export carries the native columns."""
+    import threading
+    import urllib.request
+
+    from gmpas.viewer import PAGE, Viewer, _handler, bind
+
+    v = Viewer(sec_run.files[0].parent, nx=60, ny=40)
+    try:
+        rows = {r["name"]: r for r in v.describe()["variables"]}
+        assert "section" in rows["t_isobaric"]["kinds"]
+        assert "section" not in rows["t2m"]["kinds"]
+        srv = bind(_handler(v, PAGE), 0)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        url = (f"http://127.0.0.1:{srv.server_address[1]}/api/plot?var=t_isobaric"
+               f"&kind=section&time=0&level=0&extent=0,30,-4,4&w=600&h=300"
+               f"&s0lon=0&s0lat=0.1&s1lon=29&s1lat=0.1")
+        try:
+            assert urllib.request.urlopen(url).read()[:4] == b"\x89PNG"
+        finally:
+            srv.shutdown()
+        out = tmp_path / "sec.nc"
+        out.write_bytes(v.netcdf("t_isobaric", 0, 0, (0, 30, -4, 4), 60, 40,
+                                 kind="section", sec=((0, 0.1), (29, 0.1))))
+        back = xr.open_dataarray(out)
+        assert back.dims == ("level", "distance") and "native" in back.attrs["method"]
+    finally:
+        v.close()
