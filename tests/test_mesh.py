@@ -545,3 +545,61 @@ def test_streamed_cache_round_trips_exactly(tmp_path):
     for field in ("cell_verts", "cell_wrapped", "edge_segs", "edge_wrapped"):
         assert np.array_equal(np.asarray(getattr(cached, field)),
                               getattr(built, field), equal_nan=False)
+
+
+def _compressed_copy(src, dst, chunk_rows):
+    """`src` rewritten zlib-compressed, chunked per column `chunk_rows` long --
+    the layout nccopy/ncks/xarray leave a mesh file in (#157)."""
+    import netCDF4
+
+    with netCDF4.Dataset(src) as s, netCDF4.Dataset(dst, "w") as d:
+        s.set_auto_maskandscale(False)
+        d.setncatts({k: s.getncattr(k) for k in s.ncattrs()})
+        for name, dim in s.dimensions.items():
+            d.createDimension(name, len(dim))
+        for name, v in s.variables.items():
+            cs = [min(chunk_rows, v.shape[0])] + [1] * (v.ndim - 1) if v.ndim else None
+            w = d.createVariable(name, v.dtype, v.dimensions, zlib=bool(v.ndim),
+                                 chunksizes=cs)
+            w[...] = v[...]
+    return dst
+
+
+def test_a_compressed_chunked_mesh_builds_the_same_cache(tmp_path):
+    """Caching chunks changes how often they are decompressed, never what is
+    read: the cache from a compressed, column-chunked file is identical."""
+    from gmpas.mesh import _build_to_dir
+
+    rng = np.random.default_rng(3)
+    centres = np.stack([rng.uniform(-179, 179, 300),
+                        rng.uniform(-85, 85, 300)], axis=-1)
+    plain = write_mesh(tmp_path / "plain.nc", centres, n_verts=rng.integers(4, 7, 300))
+    packed = _compressed_copy(plain, tmp_path / "packed.nc", chunk_rows=500)
+
+    _build_to_dir(plain, tmp_path / "a", chunk=37)
+    _build_to_dir(packed, tmp_path / "b", chunk=37)
+    for f in sorted((tmp_path / "a").glob("*.npy")):
+        assert f.read_bytes() == (tmp_path / "b" / f.name).read_bytes(), f.name
+
+
+def test_the_chunk_cache_holds_every_chunk_a_block_touches(tmp_path):
+    """A block of rows reaches into one chunk per column, plus the next one
+    along when it straddles a boundary; all of them must fit, or each block
+    decompresses them again (220 s instead of 39 s at 3.75 km)."""
+    import netCDF4
+
+    from gmpas.mesh import _hold_chunks
+
+    plain = write_mesh(tmp_path / "plain.nc", [(float(i), 0.0) for i in range(40)])
+    packed = _compressed_copy(plain, tmp_path / "packed.nc", chunk_rows=500)
+    with netCDF4.Dataset(packed) as nc:
+        v = nc["verticesOnCell"]                      # 40 x 6, one chunk per column
+        _hold_chunks(v, block=37)
+        size, nelems, preemption = v.get_var_chunk_cache()
+        chunk_bytes = v.chunking()[0] * v.dtype.itemsize
+        assert size >= 6 * 2 * chunk_bytes and nelems >= 6 * 2
+        assert preemption == 1.0
+    with netCDF4.Dataset(plain) as nc:                # contiguous: left alone
+        before = nc["latCell"].get_var_chunk_cache()
+        _hold_chunks(nc["latCell"], block=37)
+        assert nc["latCell"].get_var_chunk_cache() == before
