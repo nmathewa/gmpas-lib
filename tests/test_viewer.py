@@ -1014,3 +1014,57 @@ def test_coastlines_carry_a_light_halo_under_the_dark_line():
     light = ink & (rgba[..., :3].min(axis=-1) > 200)
     dark = ink & (rgba[..., :3].max(axis=-1) < 80)
     assert light.sum() > 0 and dark.sum() > 0
+
+
+def _serve_viewer(viewer):
+    import threading
+
+    from gmpas.viewer import PAGE, _handler, bind
+
+    srv = bind(_handler(viewer, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def test_a_frame_says_what_range_of_data_it_was_drawn_from(tmp_path):
+    """Ferret's KEYMARK: the key marks the data's own min and max, so the frame
+    response carries them -- from the raster already in hand, nothing reread."""
+    import urllib.request
+
+    from gmpas.viewer import Viewer
+
+    v = Viewer("docs/demo/data/demo.nc", nx=200, ny=120)
+    srv, base = _serve_viewer(v)
+    try:
+        ext = v.home
+        r = urllib.request.urlopen(f"{base}/api/frame?var=mslp&time=0&level=0&extent="
+                                   f"{','.join(map(str, ext))}&nx=200&ny=120")
+        dlo, dhi = (float(x) for x in r.headers["X-Data-Range"].split(","))
+        img = v.view(ext, 200, 120).frame(v.values("mslp", 0, 0))
+        assert (dlo, dhi) == (float(np.nanmin(img)), float(np.nanmax(img)))
+        # the auto range is percentiles, inside the data: the key can show both
+        lo, hi = (float(x) for x in r.headers["X-Range"].split(","))
+        assert dlo <= lo < hi <= dhi
+    finally:
+        srv.shutdown()
+        v.close()
+
+
+def test_reporting_the_data_range_leaves_the_frame_bytes_alone(tmp_path):
+    from gmpas.viewer import Viewer
+
+    v = Viewer("docs/demo/data/demo.nc", nx=200, ny=120)
+    try:
+        plain = v.frame("mslp", 0, 0, v.home, "viridis", None, None, 200, 120)
+        meta: dict = {}
+        marked = v.frame("mslp", 0, 0, v.home, "viridis", None, None, 200, 120, meta=meta)
+        assert plain == marked and meta["data_range"] is not None
+    finally:
+        v.close()
+
+
+def test_an_empty_frame_has_no_data_range():
+    from gmpas.viewer import data_range
+
+    assert data_range(np.full((3, 4), np.nan)) is None
+    assert data_range(np.array([[np.nan, 2.0], [5.0, np.nan]])) == (2.0, 5.0)

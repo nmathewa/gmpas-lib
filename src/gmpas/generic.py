@@ -38,7 +38,7 @@ from . import layers as _layers
 from . import netcdf, palettes, timing
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
-from .viewer import _overlay, _png
+from .viewer import _overlay, _png, data_range
 
 # How each axis is recognised, strongest evidence first. These are the CF
 # conventions' own markers, the same ones cf_xarray keys on -- `standard_name`,
@@ -1136,10 +1136,14 @@ class GenericViewer:
             # the plain path does not need the mask, so it does not build one
             img = self._raster(var, time, level, extent, nx, ny)
             lo, hi = self._range(img, vmin, vmax)
+            if meta is not None:
+                meta["data_range"] = data_range(img)
             return _png(img, cmap, lo, hi, compress), lo, hi
 
         img, on_grid = self._raster_masked(var, time, level, extent, nx, ny)
         lo, hi = _colour.centred(*self._range(img, vmin, vmax), colour, vmin, vmax)
+        if meta is not None:
+            meta["data_range"] = data_range(img)
         return _colour.frame_png(img, cmap, lo, hi, compress, colour,
                                  outside=~on_grid, meta=meta), lo, hi
 
