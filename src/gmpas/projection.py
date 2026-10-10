@@ -28,6 +28,11 @@ NAMES = ("PlateCarree", "Robinson", "Mollweide", "EqualEarth", "Orthographic",
          "NorthPolarStereo", "SouthPolarStereo", "LambertConformal", "Mercator")
 
 
+#: what the page's projection select offers, after "lon/lat (default)"
+PAGE_CHOICES = ("auto", "Orthographic", "NorthPolarStereo", "SouthPolarStereo",
+                "LambertConformal", "Mercator", "Robinson", "EqualEarth")
+
+
 def _box(extent) -> tuple[float, float, float, float, float]:
     """(lon0, dlon, lat0, lat1, lonc) for a box whose longitudes may wrap."""
     lon0, lon1, lat0, lat1 = (float(v) for v in extent)
@@ -216,18 +221,21 @@ def home_view(name: str, params: dict | None, extent,
     return name, p, projected_extent(crs, box)
 
 
+def projected_lonlat(crs, xy_extent, nx: int, ny: int):
+    """(lon, lat, on) in degrees for every pixel centre of a projected view,
+    flattened, row 0 the bottom row. Off-map pixels hold no usable lon/lat."""
+    x0, x1, y0, y1 = (float(v) for v in xy_extent)
+    dx, dy = (x1 - x0) / nx, (y1 - y0) / ny
+    X, Y = np.meshgrid(x0 + dx * (np.arange(nx) + 0.5), y0 + dy * (np.arange(ny) + 0.5))
+    return unproject(crs, X.ravel(), Y.ravel(), 0.5 * max(abs(dx), abs(dy)))
+
+
 def projected_points(crs, xy_extent, nx: int, ny: int):
     """Unit vectors for every pixel centre of a projected view, and which are on
     the map: ((ny*nx, 3) array, (ny*nx,) bool). Row 0 is the bottom row, as in
     `raster.grid_points`."""
 
-    x0, x1, y0, y1 = (float(v) for v in xy_extent)
-    dx, dy = (x1 - x0) / nx, (y1 - y0) / ny
-    xs = x0 + dx * (np.arange(nx) + 0.5)
-    ys = y0 + dy * (np.arange(ny) + 0.5)
-    X, Y = np.meshgrid(xs, ys)
-    X, Y = X.ravel(), Y.ravel()
-    lon, lat, on = unproject(crs, X, Y, 0.5 * max(abs(dx), abs(dy)))
+    lon, lat, on = projected_lonlat(crs, xy_extent, nx, ny)
 
     lon_r = np.radians(np.where(on, lon, 0.0))
     lat_r = np.radians(np.where(on, lat, 0.0))

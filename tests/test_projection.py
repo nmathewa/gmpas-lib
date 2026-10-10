@@ -234,20 +234,6 @@ def test_the_api_draws_a_projected_frame_and_overlay(viewer):
         srv.shutdown()
 
 
-def test_the_lat_lon_viewer_refuses_a_projection(tmp_path):
-    import xarray as xr
-
-    from gmpas.generic import GenericViewer
-    from gmpas.viewer import _proj_params
-
-    xr.Dataset({"v": (("lat", "lon"), np.zeros((4, 5)))},
-               coords={"lat": np.linspace(-9, 9, 4), "lon": np.linspace(0, 20, 5)}
-               ).to_netcdf(tmp_path / "f.nc")
-    gv = GenericViewer(tmp_path / "f.nc", strict=True)
-    with pytest.raises(ValueError, match="MPAS viewer only"):
-        _proj_params({"proj": "Orthographic"}, gv)
-
-
 # --------------------------------------------------------- layers: "auto"
 
 

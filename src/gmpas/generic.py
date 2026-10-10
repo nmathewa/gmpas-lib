@@ -36,9 +36,10 @@ from . import derive as _derive
 from . import jobs as _jobs
 from . import layers as _layers
 from . import netcdf, palettes, timing
+from . import projection as _projection
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
-from .viewer import _overlay, _png, data_range
+from .viewer import _overlay, _png, _proj_key, data_range
 
 # How each axis is recognised, strongest evidence first. These are the CF
 # conventions' own markers, the same ones cf_xarray keys on -- `standard_name`,
@@ -526,6 +527,9 @@ class GenericViewer:
         self.setup_problem: str | None = None
         self._background_scan = background_scan
         palettes.register()           # cmo.*, ferret.*, grads.* for this viewer's picker
+        # pixel -> grid cell for projected views: the inverse projection is
+        # 60-500 ms a view, the gather that follows a few ms
+        self._proj_index: OrderedDict = OrderedDict()
         # Hovmöller results and the jobs reading them; see hovmoller_progress
         self._hov_jobs = _jobs.Jobs(name="gmpas-hovmoller")
 
@@ -1048,6 +1052,8 @@ class GenericViewer:
             "nx": self.nx,
             "ny": self.ny,
             **_colour.description(),
+            # the page's projection select; see `frame(proj=...)`
+            "projections": list(_projection.PAGE_CHOICES),
             "kind_labels": KIND_LABELS,
             "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),
@@ -1078,6 +1084,55 @@ class GenericViewer:
             arr = np.asarray(window.transpose(self.lat_dim, self.lon_dim).values,
                              dtype=np.float64)
         return arr[np.ix_(frow - r0, fcol - c0)]
+
+    def _gather_points(self, var, step, level, rows, cols) -> np.ndarray:
+        """Values at paired ascending-order (row, col) indices: `_gather` for
+        a projected view, whose pixels are not a lat x lon product."""
+        if var not in self.ds.data_vars:
+            plan = _derive.parse(var, self._spatial_vars())
+            return _derive.evaluate(
+                plan, step, lambda name, s: self._gather_points(name, s, level, rows, cols))
+        frow = (self.lat.size - 1 - rows) if self._lat_flip else rows
+        fcol = (self.lon.size - 1 - cols) if self._lon_flip else cols
+        r0, r1 = int(frow.min()), int(frow.max()) + 1
+        c0, c1 = int(fcol.min()), int(fcol.max()) + 1
+        with self._lock:
+            da = self._pick_levels(self._read(var, step), level)
+            window = da.isel({self.lat_dim: slice(r0, r1), self.lon_dim: slice(c0, c1)})
+            arr = np.asarray(window.transpose(self.lat_dim, self.lon_dim).values,
+                             dtype=np.float64)
+        return arr[frow - r0, fcol - c0]
+
+    def _projected_index(self, extent, nx, ny, proj):
+        """(rows, cols, on_grid) for every pixel of a projected view: the grid
+        cell each pixel centre falls in, by the same nearest-along-each-axis
+        rule as the lon/lat raster. Pixels off the map or beyond a regional
+        grid are off the grid."""
+        key = (tuple(float(v) for v in extent), nx, ny, _proj_key(proj))
+        got = self._proj_index.get(key)
+        if got is not None:
+            self._proj_index.move_to_end(key)
+            return got
+        lon, lat, on = _projection.projected_lonlat(
+            _projection.make_crs(*proj), extent, nx, ny)
+        lon, lat = np.where(on, lon, 0.0), np.where(on, lat, 0.0)
+        cols, col_in = _nearest_along(self.lon, lon, self.cyclic)
+        rows, row_in = _nearest_along(self.lat, lat, False)
+        got = (rows, cols, (on & row_in & col_in).reshape(ny, nx))
+        self._proj_index[key] = got
+        while len(self._proj_index) > 8:
+            self._proj_index.popitem(last=False)
+        return got
+
+    def _raster_projected(self, var, step, level, extent, nx, ny, proj):
+        """`_raster_masked` for a projected view; row 0 is the bottom row."""
+        rows, cols, on_grid = self._projected_index(extent, nx, ny, proj)
+        img = np.full((ny, nx), np.nan)
+        flat = on_grid.ravel()
+        if flat.any():
+            img.ravel()[flat] = self._gather_points(var, step, level,
+                                                    rows[flat], cols[flat])
+        return img, on_grid
 
     @staticmethod
     def clean_colour(colour) -> dict:
@@ -1120,10 +1175,11 @@ class GenericViewer:
         return self._gather(var, time, level, i, j)
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
-              nx=None, ny=None, compress=1, colour=None, meta=None):
+              nx=None, ny=None, compress=1, colour=None, meta=None, proj=None):
         """A map frame. With no `colour` options this is `viewer._png`, byte for
         byte; with them, `palettes.encode`, and `meta["colorbar"]` describes
-        the bar the page should draw beside it."""
+        the bar the page should draw beside it. With `proj`, (name, params)
+        from gmpas.projection, `extent` is in that projection's units."""
         nx, ny = nx or self.nx, ny or self.ny
         if var in self.ds.variables and var not in self._spatial_vars():
             # no colour range for a plain plot; 0..1 is an unused placeholder
@@ -1132,7 +1188,14 @@ class GenericViewer:
             # a derive-box expression; one it cannot read says which forms it can
             _derive.parse(var, self._spatial_vars())
 
-        if not clean_colour(colour):
+        if proj is not None:
+            img, on_grid = self._raster_projected(var, time, level, extent, nx, ny, proj)
+            if not clean_colour(colour):
+                lo, hi = self._range(img, vmin, vmax)
+                if meta is not None:
+                    meta["data_range"] = data_range(img)
+                return _png(img, cmap, lo, hi, compress), lo, hi
+        elif not clean_colour(colour):
             # the plain path does not need the mask, so it does not build one
             img = self._raster(var, time, level, extent, nx, ny)
             lo, hi = self._range(img, vmin, vmax)
@@ -1140,7 +1203,8 @@ class GenericViewer:
                 meta["data_range"] = data_range(img)
             return _png(img, cmap, lo, hi, compress), lo, hi
 
-        img, on_grid = self._raster_masked(var, time, level, extent, nx, ny)
+        else:
+            img, on_grid = self._raster_masked(var, time, level, extent, nx, ny)
         lo, hi = _colour.centred(*self._range(img, vmin, vmax), colour, vmin, vmax)
         if meta is not None:
             meta["data_range"] = data_range(img)
@@ -1161,8 +1225,30 @@ class GenericViewer:
             hi = lo + 1.0
         return lo, hi
 
-    def overlay(self, extent, nx=None, ny=None) -> bytes:
-        return _overlay(extent, nx or self.nx, ny or self.ny)
+    #: /api/frame and /api/overlay accept `proj`; see viewer._proj_params
+    supports_projection = True
+
+    def overlay(self, extent, nx=None, ny=None, proj=None) -> bytes:
+        crs = None if proj is None else _projection.make_crs(*proj)
+        return _overlay(extent, nx or self.nx, ny or self.ny, crs=crs)
+
+    def projected_home(self, name: str, params: dict | None = None) -> dict:
+        """The grid framed in a projection, as `viewer.Viewer.projected_home`;
+        a grid around the whole circle counts as the full 360 degrees."""
+        lon0, lon1, lat0, lat1 = self.home
+        box = (lon0, lon0 + 360.0, lat0, lat1) if self.cyclic else self.home
+        name, params, extent = _projection.home_view(
+            name, params, box, _projection.box_coverage(box))
+        return {"proj": name, "extent": list(extent),
+                "plon": params.get("central_longitude"),
+                "plat": params.get("central_latitude"),
+                "psp": list(params["standard_parallels"])
+                if "standard_parallels" in params else None}
+
+    def unproject(self, proj, x: float, y: float, tol: float) -> dict:
+        """Projected (x, y) back to lon/lat; `on` is False off the map."""
+        lon, lat, on = _projection.unproject(_projection.make_crs(*proj), [x], [y], tol)
+        return {"lon": float(lon[0]), "lat": float(lat[0]), "on": bool(on[0])}
 
     def _point(self, lon: float, lat: float) -> tuple[int, int]:
         """Ascending (row, col) of the cell nearest a point, or an error off-grid."""

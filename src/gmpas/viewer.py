@@ -43,6 +43,7 @@ from . import derive as _derive
 from . import timing
 from .cache import BuildCache
 from .mesh import MpasMesh
+from .projection import PAGE_CHOICES
 from .raster import grid_points, target_grid
 from .series import PARALLEL_MIN_FILES, Series, series_workers
 
@@ -458,9 +459,7 @@ class Viewer:
             "native": True,
             # the page's projection select: lon/lat is the default, the rest
             # go through /api/projview and the `proj` frame parameters
-            "projections": ["auto", "Orthographic", "NorthPolarStereo",
-                            "SouthPolarStereo", "LambertConformal", "Mercator",
-                            "Robinson", "EqualEarth"],
+            "projections": list(PAGE_CHOICES),
             "kind_labels": {"map": "map (native mesh)",
                             "hovmoller": "Hovmöller (time × lon, area-weighted)",
                             "section": "vertical section along a path"},
@@ -1054,12 +1053,12 @@ def _proj_key(proj) -> tuple:
 def _proj_params(q: dict, viewer) -> tuple[str, dict]:
     """The projection a request names: `proj`, and `plon`/`plat` for its
     centre, `psp` ("lat1,lat2") for Lambert conformal's standard parallels.
-    The extent of such a request is in the projection's own units. Only the
-    MPAS viewer draws projected frames so far."""
+    The extent of such a request is in the projection's own units. Only
+    viewers with `supports_projection` draw projected frames."""
     from .projection import NAMES
 
     if not getattr(viewer, "supports_projection", False):
-        raise ValueError("projected frames are drawn by the MPAS viewer only")
+        raise ValueError("this viewer does not draw projected frames")
     name = q["proj"]
     if name not in NAMES:
         raise ValueError(f"unknown projection {name!r}; one of {', '.join(NAMES)}")
@@ -2246,7 +2245,7 @@ async function setProjection(name){
     if(d.proj==="PlateCarree"){
       // "auto" keeps a global mesh on today's lon/lat map: draw that map itself,
       // in degrees, rather than a projection whose units are degrees too
-      P=null; $("#projhint").textContent="auto: lon/lat (the mesh is global)";
+      P=null; $("#projhint").textContent="auto: lon/lat (the data are global)";
       home=fit(M.home);
     }else{
       P={proj:d.proj, plon:d.plon, plat:d.plat, psp:d.psp};
@@ -2286,7 +2285,7 @@ async function boot(){
   home = fit(M.home); view = {...home}; rendered = null;
   if(M.projections){
     M.projections.forEach(n=>{ const o=document.createElement("option");
-      o.value=n; o.textContent=n==="auto" ? "auto (from the mesh)" : n; $("#proj").append(o); });
+      o.value=n; o.textContent=n==="auto" ? "auto (from the data)" : n; $("#proj").append(o); });
     $("#projsec").style.display="";
     $("#proj").onchange=e=>setProjection(e.target.value);
   }
