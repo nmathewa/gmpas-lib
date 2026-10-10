@@ -3726,8 +3726,12 @@ $("#wrap").onpointerup = async ev=>{
   ptOpen(lon, lat, d);
 };
 $("#grid").onchange = ()=>{ graticule(); ptMark(); };
-addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); ptMark();
-  ptClamp(); });
+function relayout(){ layout(); scalebar(); graticule(); ptMark(); ptClamp(); }
+addEventListener("resize", relayout);
+// The stage also changes size without the window doing so: the toolbar
+// wrapping to a second line, a panel opening. Sized only at load and on window
+// resize, the map box kept its first height and was cut off at top and bottom.
+if(window.ResizeObserver) new ResizeObserver(relayout).observe($("#stage"));
 // ------------------------------------------------------------ point panel
 // ncview's gesture: click the map, and this location's numbers are one button
 // away. The value is instant -- the step is already in hand -- but the series
