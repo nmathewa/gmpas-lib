@@ -107,7 +107,7 @@ _CONTOUR_HIGHLIGHT = {
     "zero_bold": {"type": "bool", "default": False,
                   "help": "draw the 0 contour at the highlight width (Ferret, GrADS)"},
 }
-_RESOLUTIONS = ["110m", "50m", "10m"]
+_RESOLUTIONS = ["auto", "110m", "50m", "10m"]   # auto: by the map's extent, as the fast map
 
 LAYER_KINDS: dict[str, dict] = {
     # -- fields ------------------------------------------------------------
@@ -210,7 +210,7 @@ LAYER_KINDS: dict[str, dict] = {
         "label": "coastlines", "group": "feature", "needs": [],
         "options": {"color": {"type": "color", "default": "black"},
                     "linewidth": {"type": "float", "default": 0.7, "min": 0.0},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "borders": {
@@ -219,33 +219,33 @@ LAYER_KINDS: dict[str, dict] = {
                     "linewidth": {"type": "float", "default": 0.5, "min": 0.0},
                     "linestyle": {"type": "choice", "default": "solid",
                                   "choices": _LINESTYLES},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "land": {
         "label": "land fill", "group": "feature", "needs": [],
         "options": {"facecolor": {"type": "color", "default": "#e8e2d0"},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "ocean": {
         "label": "ocean fill", "group": "feature", "needs": [],
         "options": {"facecolor": {"type": "color", "default": "#cfe3f0"},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "lakes": {
         "label": "lakes", "group": "feature", "needs": [],
         "options": {"facecolor": {"type": "color", "default": "#cfe3f0"},
                     "edgecolor": {"type": "color", "default": "#555555"},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "rivers": {
         "label": "rivers", "group": "feature", "needs": [],
         "options": {"color": {"type": "color", "default": "#3a7bbf"},
                     "linewidth": {"type": "float", "default": 0.5, "min": 0.0},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "gridlines": {
@@ -1144,6 +1144,11 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                 gl.geo_labels = False            # see plot._basemap: the y=inf title bug
         else:
             category, name = _NATURAL_EARTH[kind]
+            if opts["resolution"] == "auto":
+                # the fast map's rule (viewer.coast_scale): 50m down to 10
+                # degrees wide, 10m below, nothing fetched that is not on disk
+                from .viewer import coast_scale
+                opts = {**opts, "resolution": coast_scale(float(box[1] - box[0]))}
             _ensure_natural_earth(category, name, opts["resolution"])
             if kind == "coastlines":
                 ax.coastlines(resolution=opts["resolution"], color=opts["color"],

@@ -232,7 +232,10 @@ def _quantize(img: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
 
 #: Natural Earth coastline scale by the width of the view, in degrees of
 #: longitude: finer as the map zooms in, never finer than what is on disk
-COAST_SCALES = ((60.0, "110m"), (10.0, "50m"), (0.0, "10m"))
+#: 50m even for the whole globe: 110m loses islands and draws coasts as a
+#: handful of straight segments, and 50m costs ~40 ms more per view (78 vs 39 ms
+#: warm at 1196x591). 10m only once zoomed in: a global 10m overlay takes ~0.3 s.
+COAST_SCALES = ((10.0, "50m"), (0.0, "10m"))
 
 
 def _coast_on_disk(scale: str) -> bool:
@@ -258,8 +261,8 @@ def _coast_on_disk(scale: str) -> bool:
 def coast_scale(lon_span: float) -> str:
     """The coastline scale for a view `lon_span` degrees wide.
 
-    110m wide, 50m from 60 degrees down, 10m below 10; a finer scale that is
-    not on disk falls back to the next coarser one. 110m is always used as
+    50m down to 10 degrees wide, the whole globe included, and 10m below;
+    a finer scale that is not on disk falls back to the next coarser one. 110m is always used as
     the floor (cartopy fetches it on first use, as it always has). Pre-fetch
     the finer ones on a machine with internet:
     `python -c "from cartopy.io import shapereader as s;
