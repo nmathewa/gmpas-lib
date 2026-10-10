@@ -516,3 +516,29 @@ def test_streamlines_are_integrated_on_a_strided_field(gv, monkeypatch, stride, 
     finally:
         plt.close(fig)
     assert seen == [expect]
+
+
+@pytest.mark.parametrize("extent, scale", [
+    ((0, 360, -90, 90), "50m"),               # the globe: 110m lost islands
+    ((144, 150, -5, 1), "10m"),               # zoomed in: Manus and its reefs
+])
+def test_map_features_default_to_the_scale_of_the_view(gv, monkeypatch, extent, scale):
+    """At 110m New Guinea's coast is one straight segment and Manus is not
+    there at all; features follow the fast map's rule unless a scale is set."""
+    import matplotlib.pyplot as plt
+
+    import gmpas.viewer as V
+
+    monkeypatch.setattr(V, "_coast_on_disk", lambda s: True)
+    asked = []
+    monkeypatch.setattr(L, "_ensure_natural_earth", lambda c, n, r: asked.append((n, r)))
+    stack = gv.layer_stack({"layers": [{"kind": "land"}, {"kind": "coastlines"}]}, "t")
+    fig = plt.figure(figsize=(4, 3), dpi=40)
+    try:
+        L.draw(gv, fig, stack, 0, 0, extent)
+    finally:
+        plt.close(fig)
+    assert asked == [("land", scale), ("coastline", scale)]
+    pinned = gv.layer_stack({"layers": [{"kind": "coastlines",
+                                         "options": {"resolution": "110m"}}]}, "t")
+    assert pinned["layers"][0]["options"]["resolution"] == "110m"
