@@ -1799,6 +1799,8 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #cbover{clip-path:polygon(0 0,100% 50%,0 100%)}
 #ticks{display:flex;justify-content:space-between;margin-top:3px;color:var(--dim);
        font-size:11px;font-variant-numeric:tabular-nums}
+#ticks.edges{display:block;position:relative;height:1.3em}
+#ticks.edges span{position:absolute;white-space:nowrap}
 #cblabel{color:var(--dim);font-size:11px;margin-bottom:4px}
 button{background:#252932;color:var(--fg);border:1px solid var(--line);border-radius:4px;
        padding:5px 9px;font:inherit;cursor:pointer}
@@ -1975,8 +1977,9 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
   <div class="sec" id="coloursec" style="display:none"><label>colour options</label>
     <div id="colourForm"></div>
     <div class="row" style="margin-top:6px"><button id="colourReset">reset</button></div>
-    <div class="hint" id="colourhint">bands, out-of-range and missing colours, reverse,
-      and a power scale -- also used by figures and animations</div>
+    <div class="hint" id="colourhint">also used by figures and animations. Levels,
+      Ferret style: 20 &middot; (,,2.5) &middot; (-25,0,5)(0,25,1) &middot;
+      (-inf)(0,30,2)(inf)</div>
   </div>
 
   <div class="sec" id="rangesec"><label>colour range</label>
@@ -2408,7 +2411,7 @@ let lastData=null;         // [min,max] of the values the frame was drawn from
 // range clips them, a triangle in the end colour says so -- the image already
 // draws those values in the end colour, so the key now tells the truth about
 // it. A triangle the colour options set (under/over) is left as it is.
-function dataMarks(lo, hi, fmt, ends, explicit){
+function dataMarks(lo, hi, fmt, ends, explicit, pos){
   $("#ramp").querySelectorAll(".mark").forEach(m=>m.remove());
   $("#cbdata").textContent="";
   if(!lastData) return;
@@ -2418,7 +2421,8 @@ function dataMarks(lo, hi, fmt, ends, explicit){
   const [dmin, dmax]=lastData, span=hi-lo;
   const mark=(v, what)=>{ if(!(span>0) || v<lo || v>hi) return;
     const m=document.createElement("i"); m.className="mark";
-    m.style.left=(100*(v-lo)/span).toFixed(3)+"%"; m.title=`data ${what} ${fmt(v)}`;
+    m.style.left=(100*(pos ? pos(v) : (v-lo)/span)).toFixed(3)+"%";
+    m.title=`data ${what} ${fmt(v)}`;
     $("#ramp").append(m); };
   mark(dmin, "min"); mark(dmax, "max");
   // Only for an end the user fixed: the automatic range is the 2nd-98th
@@ -2444,7 +2448,7 @@ function colorbar(lo,hi){
     const v=lo+(hi-lo)*i/(n-1);
     out.push(`<span>${fmt(v)}</span>`);
   }
-  $("#ticks").innerHTML=out.join("");
+  $("#ticks").classList.remove("edges"); $("#ticks").innerHTML=out.join("");
   $("#cblabel").textContent=cur?cur.label:"";
   dataMarks(lo, hi, fmt, [stops[0], stops[stops.length-1]], {});
 }
@@ -2462,12 +2466,34 @@ function colorbarSpec(spec, fmt){
   const tri=(id, colour)=>{ const el=$(id);
     el.style.display=colour?"block":"none"; if(colour) el.style.background=colour; };
   tri("#cbunder", spec.under); tri("#cbover", spec.over);
-  const ticks = spec.edges && spec.edges.length<=13 ? spec.edges
-    : [0,1,2,3,4].map(i=>spec.lo+(spec.hi-spec.lo)*i/4);
-  $("#ticks").innerHTML=ticks.map(v=>`<span>${fmt(v)}</span>`).join("");
+  const e=spec.edges, tk=$("#ticks");
+  if(e){
+    // every step is as wide on the key as any other, uneven levels too, so
+    // a tick sits at its edge's index. Long lists label the ends and each
+    // edge where the step size changes, then every k-th edge between them.
+    const n=e.length-1, k=Math.ceil(n/12), d=i=>e[i+1]-e[i];
+    const near=(i, j)=>Math.abs(i-j)<k*0.75;
+    const keep=[0, n];
+    for(let i=1;i<n;i++) if(Math.abs(d(i)-d(i-1))>1e-9*Math.abs(d(i))
+                            && !keep.some(j=>near(i, j))) keep.push(i);
+    for(let i=0;i<=n;i+=k) if(!keep.some(j=>near(i, j))) keep.push(i);
+    const at=keep.sort((a, b)=>a-b);
+    tk.classList.add("edges");
+    tk.innerHTML=at.map(i=>{ const p=(100*i/n).toFixed(3);
+      return `<span style="left:${p}%;transform:translateX(-${p}%)">${fmt(e[i])}</span>`;
+    }).join("");
+  }else{
+    tk.classList.remove("edges");
+    tk.innerHTML=[0,1,2,3,4].map(i=>spec.lo+(spec.hi-spec.lo)*i/4)
+      .map(v=>`<span>${fmt(v)}</span>`).join("");
+  }
   $("#cblabel").textContent=cur?cur.label:"";
-  dataMarks(spec.lo, spec.hi, fmt, [s[0], s[s.length-1]],
-            {"#cbunder": !!spec.under, "#cbover": !!spec.over});
+  // a value's place on the key: within its step when the steps are edges
+  const pos = e ? v=>{ const n=e.length-1;
+    let i=0; while(i<n-1 && v>=e[i+1]) i++;
+    return (i+Math.min(1, Math.max(0, (v-e[i])/(e[i+1]-e[i]))))/n; } : null;
+  dataMarks(e ? e[0] : spec.lo, e ? e[e.length-1] : spec.hi, fmt, [s[0], s[s.length-1]],
+            {"#cbunder": !!spec.under, "#cbover": !!spec.over}, pos);
 }
 
 // ------------------------------------------------------- colour options
@@ -2488,7 +2514,8 @@ function colourOpen(){
 }
 function colourForm(){
   const host=$("#colourForm"); host.innerHTML="";
-  Object.entries(M.colour_options).forEach(([k, spec])=>lyField(host, k.replace("_"," "),
+  Object.entries(M.colour_options).filter(([k, spec])=>!spec.hidden
+      || COL[k]!=null).forEach(([k, spec])=>lyField(host, k.replace("_"," "),
     spec, COL[k], v=>{
       if(v===null) delete COL[k]; else COL[k]=v;
       try{ localStorage.setItem(colourKey(), JSON.stringify(COL)); }catch(e){}

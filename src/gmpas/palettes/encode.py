@@ -26,7 +26,7 @@ import io
 
 import numpy as np
 
-from . import scale
+from . import extend_of, scale
 
 DATA = 252
 UNDER, OVER, MISSING, CLEAR = 252, 253, 254, 255
@@ -89,15 +89,15 @@ def indices(img: np.ndarray, opts: dict, lo: float, hi: float, outside=None):
         palette[MISSING] = np.round(np.asarray(cmap.get_bad())[:3] * 255)
     idx[~on_grid] = CLEAR
 
-    extend = opts.get("extend") or "neither"
+    extend = extend_of(opts)
     spec = {"stops": stops,
             "edges": [float(e) for e in edges] if edges is not None else None,
             "under": _hex(cmap.get_under()) if extend in ("min", "both") else None,
             "over": _hex(cmap.get_over()) if extend in ("max", "both") else None,
             "extend": extend, "lo": float(lo), "hi": float(hi)}
     if edges is not None:
-        # label the top edge itself, not the nudge: hi for bands, the rounded
-        # step for an interval
+        # label the top edge itself, not the nudge: hi for bands, the last
+        # level for levels
         spec["edges"][-1] = float(np.nextafter(edges[-1], -np.inf))
     return idx, palette, spec
 

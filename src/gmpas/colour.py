@@ -27,14 +27,17 @@ from . import palettes
 #: The fast map's colour options: the layer colour-scale options that make
 #: sense for a raster, checked by the same code as a layer's.
 OPTIONS = {
+    "levels": {"type": "str", "default": None,
+               "help": "colour steps, Ferret style: 20 equal steps; (,,2.5) every 2.5 on "
+                       "its multiples; (-25,0,5)(0,25,1) steps of different sizes; "
+                       "(-inf)...(inf) open ends"},
     **{k: _layers._COLOUR_SCALE[k] for k in ("reverse", "norm", "gamma", "linthresh",
                                              "extend", "under_color", "over_color",
                                              "center")},
-    "bands": {**_layers._RASTER_COLOUR["bands"], "max": 252},   # 252 data palette entries
-    "interval": {"type": "float", "default": None, "min": 0.0,
-                 "help": "a colour step every this much, on its multiples "
-                         "(e.g. 2.5: ... 0, 2.5, 5 ...)"},
     "missing_color": _layers._RASTER_COLOUR["missing_color"],
+    # `levels` replaced `bands` on the page; bands still works from a saved
+    # option set or a URL, and means what levels=N means
+    "bands": {**_layers._RASTER_COLOUR["bands"], "max": 252, "hidden": True},
 }
 
 #: A colour option set arrives as one query parameter. It is checked, never
@@ -57,17 +60,17 @@ def clean(colour) -> dict:
     palettes.register()
     opts = _layers._clean_options(colour, OPTIONS, "colour: ")
     _layers._check_colour_options(opts, "colour: ")
-    # the colour interval is the fast map's own; a contour layer's `interval`
-    # (its line spacing) has its own checks in layers
-    if opts.get("interval") is not None:
-        if not opts["interval"] > 0:
-            raise ValueError("colour: interval must be positive")
+    if opts.get("levels") is not None:
+        try:
+            palettes.parse_levels(opts["levels"])
+        except ValueError as exc:
+            raise ValueError(f"colour: {exc}") from None
         if opts.get("bands"):
-            raise ValueError("colour: interval and bands cannot be combined: both set "
-                             "the colour steps; choose one")
+            raise ValueError("colour: levels and bands cannot be combined: both set "
+                             "the colour steps; levels=N is bands=N")
         if opts.get("norm", "linear") != "linear":
-            raise ValueError(f"colour: interval and norm={opts['norm']} cannot be "
-                             f"combined: steps of a fixed size need a linear scale")
+            raise ValueError(f"colour: levels and norm={opts['norm']} cannot be "
+                             f"combined: levels set the steps themselves")
     return opts
 
 
@@ -78,16 +81,23 @@ def centred(lo: float, hi: float, colour=None, vmin=None, vmax=None):
     is the larger distance from the centre to either end, so the centre -- 0
     for an anomaly, a difference, w or u/v -- sits at the middle of the
     palette. A range the user typed in both ends of is theirs and is left as
-    it is, as it is for a layer. Without `center` this returns (lo, hi)
-    untouched, so nothing changes for anyone who does not ask.
+    it is, as it is for a layer. Levels that name their ends,
+    (-25,0,5)(0,25,1), are the range whatever was typed. Without either this
+    returns (lo, hi) untouched, so nothing changes for anyone who does not ask.
     """
-    center = clean(colour).get("center")
-    if center is None or (vmin is not None and vmax is not None):
-        return lo, hi
-    half = max(abs(lo - center), abs(hi - center))
-    if half <= 0:
-        half = 1.0
-    return center - half, center + half
+    opts = clean(colour)
+    center = opts.get("center")
+    if center is not None and not (vmin is not None and vmax is not None):
+        half = max(abs(lo - center), abs(hi - center))
+        if half <= 0:
+            half = 1.0
+        lo, hi = center - half, center + half
+    if opts.get("levels"):
+        # levels that name their ends, (-25,0,5)(0,25,1), are the range
+        fixed_lo, fixed_hi = palettes.levels_ends(palettes.parse_levels(opts["levels"]))
+        lo = lo if fixed_lo is None else fixed_lo
+        hi = hi if fixed_hi is None else fixed_hi
+    return lo, hi
 
 
 def groups() -> dict[str, list[str]]:
@@ -166,4 +176,4 @@ def figure_scale(cmap: str, lo: float, hi: float, colour=None):
     if not opts:
         return cmap or "viridis", None, "neither"
     cm, norm, _ = palettes.scale({**opts, "cmap": cmap or "viridis"}, lo, hi)
-    return cm, norm, opts.get("extend") or "neither"
+    return cm, norm, palettes.extend_of(opts)
