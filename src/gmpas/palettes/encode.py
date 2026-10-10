@@ -96,7 +96,9 @@ def indices(img: np.ndarray, opts: dict, lo: float, hi: float, outside=None):
             "over": _hex(cmap.get_over()) if extend in ("max", "both") else None,
             "extend": extend, "lo": float(lo), "hi": float(hi)}
     if edges is not None:
-        spec["edges"][-1] = float(hi)                     # label the range, not the nudge
+        # label the top edge itself, not the nudge: hi for bands, the rounded
+        # step for an interval
+        spec["edges"][-1] = float(np.nextafter(edges[-1], -np.inf))
     return idx, palette, spec
 
 

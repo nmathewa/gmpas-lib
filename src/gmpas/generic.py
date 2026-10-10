@@ -1625,10 +1625,13 @@ class GenericViewer:
                     *self._range(np.asarray(da.values, float), vmin, vmax),
                     colour, vmin, vmax)
                 levels = None
-                if colours.get("bands") and method in ("contour", "contourf"):
+                if (colours.get("bands") or colours.get("interval")) \
+                        and method in ("contour", "contourf"):
                     # contours band by their levels, not by a norm
-                    levels = list(palettes.band_edges(lo, hi, colours["bands"]))
-                    colours = {**colours, "bands": None}
+                    levels = list(palettes.interval_edges(lo, hi, colours["interval"])
+                                  if colours.get("interval")
+                                  else palettes.band_edges(lo, hi, colours["bands"]))
+                    colours = {**colours, "bands": None, "interval": None}
                 cm, norm, _ = palettes.scale({**colours, "cmap": cmap or "viridis"}, lo, hi)
                 opts = dict(cmap=cm, norm=norm, extend=colours.get("extend") or "neither")
                 if levels is not None:

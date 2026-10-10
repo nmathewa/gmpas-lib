@@ -132,6 +132,34 @@ def band_edges(lo: float, hi: float, bands: int) -> np.ndarray:
     return edges
 
 
+#: most colour steps one palette PNG can hold (4 of 256 entries are reserved)
+MAX_STEPS = 252
+
+
+def interval_edges(lo: float, hi: float, step: float) -> np.ndarray:
+    """Colour edges every `step`, on its multiples, covering lo..hi.
+
+    The GrADS/Ferret contour-interval rule applied to colours: 0, 2.5, 5, ...
+    rather than equal fractions of the range, so an edge means the same value
+    in every frame and every run. The ends round outwards to whole steps; the
+    top edge is nudged past its value, as in `band_edges`.
+    """
+    step = float(step)
+    if not step > 0:
+        raise ValueError(f"colour interval {step:g} must be positive")
+    i0 = int(np.floor(lo / step + 1e-9))
+    i1 = int(np.ceil(hi / step - 1e-9))
+    if i1 <= i0:
+        i1 = i0 + 1
+    if i1 - i0 > MAX_STEPS:
+        raise ValueError(
+            f"colour interval {step:g} over {lo:g}..{hi:g} makes {i1 - i0} steps; "
+            f"at most {MAX_STEPS} fit -- use a larger interval or a narrower range")
+    edges = np.arange(i0, i1 + 1, dtype=np.float64) * step
+    edges[-1] = np.nextafter(edges[-1], np.inf)
+    return edges
+
+
 def scale(opts: dict, lo: float, hi: float):
     """(colormap, norm, band edges or None) for a colour-scale option set.
 
@@ -143,8 +171,12 @@ def scale(opts: dict, lo: float, hi: float):
     cmap = get(opts.get("cmap") or "viridis", bool(opts.get("reverse")),
                opts.get("under_color"), opts.get("over_color"), opts.get("missing_color"))
     bands = opts.get("bands")
-    if bands:
+    if opts.get("interval"):
+        edges = interval_edges(lo, hi, opts["interval"])
+        bands = edges.size - 1
+    elif bands:
         edges = band_edges(lo, hi, bands)
+    if bands:
         if bands > cmap.N:
             # more bands than colours -- GrADS' 13-colour rainbow over 20
             # levels -- repeats colours, as GrADS does, instead of failing

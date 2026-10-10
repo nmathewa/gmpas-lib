@@ -31,6 +31,9 @@ OPTIONS = {
                                              "extend", "under_color", "over_color",
                                              "center")},
     "bands": {**_layers._RASTER_COLOUR["bands"], "max": 252},   # 252 data palette entries
+    "interval": {"type": "float", "default": None, "min": 0.0,
+                 "help": "a colour step every this much, on its multiples "
+                         "(e.g. 2.5: ... 0, 2.5, 5 ...)"},
     "missing_color": _layers._RASTER_COLOUR["missing_color"],
 }
 
@@ -54,6 +57,17 @@ def clean(colour) -> dict:
     palettes.register()
     opts = _layers._clean_options(colour, OPTIONS, "colour: ")
     _layers._check_colour_options(opts, "colour: ")
+    # the colour interval is the fast map's own; a contour layer's `interval`
+    # (its line spacing) has its own checks in layers
+    if opts.get("interval") is not None:
+        if not opts["interval"] > 0:
+            raise ValueError("colour: interval must be positive")
+        if opts.get("bands"):
+            raise ValueError("colour: interval and bands cannot be combined: both set "
+                             "the colour steps; choose one")
+        if opts.get("norm", "linear") != "linear":
+            raise ValueError(f"colour: interval and norm={opts['norm']} cannot be "
+                             f"combined: steps of a fixed size need a linear scale")
     return opts
 
 
