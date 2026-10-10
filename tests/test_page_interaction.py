@@ -356,3 +356,118 @@ def test_the_key_marks_the_data_and_flags_a_clipping_range(page):
     redraw("", "")
     assert not page.is_visible("#cbunder") and not page.is_visible("#cbover")
     assert page.inner_text("#cbdata").startswith("data ")
+
+
+# ------------------------------------------------------------ projections
+
+
+def _frames_during(page, action, wait=600):
+    """The api/frame URLs requested while `action` runs, and shortly after."""
+    from urllib.parse import parse_qs, urlparse
+
+    seen = []
+    on = lambda r: seen.append(r.url) if "api/frame" in r.url else None  # noqa: E731
+    page.on("request", on)
+    try:
+        action()
+        page.wait_for_timeout(wait)
+    finally:
+        page.remove_listener("request", on)
+    return [{k: v[0] for k, v in parse_qs(urlparse(u).query).items()} for u in seen]
+
+
+def _lonlat(page):
+    page.select_option("#proj", "")
+    page.wait_for_timeout(400)
+    page.click("#home")
+    page.wait_for_timeout(400)
+
+
+def test_a_flat_projection_frames_the_mesh_in_metres_unstretched(page):
+    _lonlat(page)
+    reqs = _frames_during(page, lambda: page.select_option("#proj", "Robinson"))
+    assert reqs, "no frame requested"
+    q = reqs[-1]
+    assert q["proj"] == "Robinson" and "plon" in q
+    x0, x1, y0, y1 = map(float, q["extent"].split(","))
+    assert abs(x1 - x0) > 1e6                     # metres, not degrees
+    # the box keeps the image's aspect: a projected metre is square on screen
+    assert (x1 - x0) / (y1 - y0) == pytest.approx(int(q["nx"]) / int(q["ny"]), rel=0.01)
+    assert page.get_attribute("#over", "src").count("proj=Robinson") == 1
+    assert page.is_disabled("#grid") and page.is_disabled("#expnc")
+    _lonlat(page)
+
+
+def test_dragging_in_a_projection_pans_the_projected_box(page):
+    _lonlat(page)
+    page.select_option("#proj", "Robinson")
+    page.wait_for_timeout(500)
+    _zoom_in(page)
+    before = page.evaluate("() => ({...view})")
+    reqs = _frames_during(page, lambda: _drag(page, 120, 0))
+    after = page.evaluate("() => ({...view})")
+    assert after["clon"] < before["clon"] - 1e5   # moved west, in metres
+    assert reqs and all(r["proj"] == "Robinson" for r in reqs)
+    _lonlat(page)
+
+
+def test_dragging_the_globe_turns_it_and_asks_for_one_frame(page):
+    _lonlat(page)
+    page.select_option("#proj", "Orthographic")
+    page.wait_for_timeout(500)
+    p0 = page.evaluate("() => ({...P})")
+    reqs = _frames_during(page, lambda: _drag(page, 150, 60), wait=900)
+    p1 = page.evaluate("() => ({...P})")
+    assert p1["plon"] != pytest.approx(p0["plon"])
+    assert p1["plat"] != pytest.approx(p0["plat"])
+    # nothing redrawn while dragging, one exact frame when let go
+    assert len(reqs) == 1
+    assert float(reqs[0]["plon"]) == pytest.approx(p1["plon"])
+    assert float(reqs[0]["plat"]) == pytest.approx(p1["plat"])
+    _lonlat(page)
+
+
+def test_a_probe_in_a_projection_finds_the_cell_under_the_click(page):
+    _lonlat(page)
+    page.select_option("#proj", "Orthographic")
+    page.wait_for_timeout(600)
+    box = page.locator("#wrap").bounding_box()
+    with page.expect_response(lambda r: "api/probe" in r.url):
+        page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.wait_for_timeout(200)
+    pt = page.evaluate("() => probePt")
+    # the centre of the globe is its centre point, by definition
+    p = page.evaluate("() => ({...P})")
+    assert pt["lon"] == pytest.approx(p["plon"], abs=1.0)
+    assert pt["lat"] == pytest.approx(p["plat"], abs=1.0)
+    want = page.evaluate(f"""async () => (await (await fetch(
+        "api/probe?lon={pt['lon']}&lat={pt['lat']}&var=theta&time=0&level=0")).json()).cell""")
+    assert f"cell {want}" in page.inner_text("#probe2")
+    _lonlat(page)
+
+
+def test_back_to_lon_lat_asks_for_exactly_the_old_frame(page):
+    _lonlat(page)
+    first = _frames_during(page, lambda: page.click("#home"))
+    page.select_option("#proj", "NorthPolarStereo")
+    page.wait_for_timeout(500)
+    back = _frames_during(page, lambda: page.select_option("#proj", ""))
+    assert back and "proj" not in back[-1]
+    if first:
+        assert back[-1]["extent"] == first[-1]["extent"]
+    assert not page.is_disabled("#grid")
+
+
+def test_auto_on_a_global_mesh_is_the_lon_lat_map(page):
+    """auto keeps a global mesh on PlateCarree, which is today's map: it must
+    be drawn as that map (degrees), not as a projection whose box is degrees
+    the page would read as metres."""
+    _lonlat(page)
+    first = _frames_during(page, lambda: page.click("#home"))
+    reqs = _frames_during(page, lambda: page.select_option("#proj", "auto"))
+    assert page.evaluate("() => P") is None
+    assert "lon/lat" in page.inner_text("#projhint")
+    assert reqs and "proj" not in reqs[-1]
+    if first:
+        assert reqs[-1]["extent"] == first[-1]["extent"]
+    _lonlat(page)

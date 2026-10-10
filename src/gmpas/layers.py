@@ -280,7 +280,9 @@ PROJECTIONS = ["PlateCarree", "Robinson", "Mollweide", "EqualEarth", "Orthograph
                "NorthPolarStereo", "SouthPolarStereo", "LambertConformal", "Mercator"]
 
 FIGURE_OPTIONS = {
-    "projection": {"type": "choice", "default": "PlateCarree", "choices": PROJECTIONS},
+    "projection": {"type": "choice", "default": "PlateCarree",
+                   "choices": [*PROJECTIONS, "auto"],
+                   "help": "auto picks one from the view (gmpas.projection.auto_projection)"},
     "central_longitude": {"type": "float", "default": None,
                           "help": "empty centres on the view"},
     "central_latitude": {"type": "float", "default": None,
@@ -776,6 +778,21 @@ def _auto_range(values, opts: dict) -> tuple[float, float]:
     return lo, hi
 
 
+def _resolve_auto(fig_opts: dict, box) -> dict:
+    """`projection: "auto"` made concrete for this view; an explicit centre in
+    the stack still wins over the one the rule picks."""
+    from .projection import auto_projection
+
+    name, params = auto_projection(box)
+    out = {**fig_opts, "projection": name}
+    for key in ("central_longitude", "central_latitude"):
+        if out.get(key) is None and key in params:
+            out[key] = params[key]
+    if "standard_parallels" in params:
+        out["standard_parallels"] = params["standard_parallels"]
+    return out
+
+
 def _projection(fig_opts: dict, box, ccrs):
     name = fig_opts.get("projection") or "PlateCarree"
     clon = fig_opts.get("central_longitude")
@@ -795,7 +812,8 @@ def _projection(fig_opts: dict, box, ccrs):
         # cartopy's default standard parallels are northern (33, 45) wherever
         # the map is centred, which leaves a southern map on a northern cone
         # -- singular at the very pole the map is looking at
-        parallels = (-33.0, -45.0) if lat0 < 0 else (33.0, 45.0)
+        parallels = fig_opts.get("standard_parallels") or \
+            ((-33.0, -45.0) if lat0 < 0 else (33.0, 45.0))
         proj = ccrs.LambertConformal(central_longitude=lon0, central_latitude=lat0,
                                      standard_parallels=parallels)
     elif name in ("NorthPolarStereo", "SouthPolarStereo"):
@@ -947,6 +965,8 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
     layers = [layer for layer in stack["layers"] if layer["visible"]]
     box = (float(extent[0]), float(extent[1]),
            max(-90.0, float(extent[2])), min(90.0, float(extent[3])))
+    if fig_opts.get("projection") == "auto":
+        fig_opts = _resolve_auto(fig_opts, box)
     proj, src, framed = _projection(fig_opts, box, ccrs)
     plate = isinstance(proj, ccrs.PlateCarree)
     # data in the map's own longitude frame when the map is PlateCarree: see

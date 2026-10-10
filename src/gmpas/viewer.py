@@ -82,6 +82,42 @@ KIND_CAPS = {
 OVERLAY_MAX_PX = 4096
 
 
+def _projected_axes(fig, extent, crs):
+    """A full-figure GeoAxes spanning projected `extent` edge to edge -- the
+    box the projected raster's pixels tile, so the two line up."""
+    x0, x1, y0, y1 = (float(v) for v in extent)
+    ax = fig.add_axes([0, 0, 1, 1], projection=crs)
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+    ax.set_aspect("auto")
+    return ax
+
+
+def _overlay_projected(extent, nx: int, ny: int, crs) -> bytes:
+    """`_overlay` in a projection: same strokes, axis limits in projected units
+    and aspect auto, so it lines up pixel for pixel with the projected raster."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import cartopy.feature as cfeature
+    import matplotlib.pyplot as plt
+
+    x0, x1, y0, y1 = (float(v) for v in extent)
+    fig = plt.figure(figsize=(nx / 100, ny / 100), dpi=100)
+    ax = _projected_axes(fig, extent, crs)
+    # the scale follows the width on the ground, about a degree per 111 km
+    coast = cfeature.NaturalEarthFeature("physical", "coastline",
+                                         coast_scale(abs(x1 - x0) / 111_000.0),
+                                         facecolor="none")
+    ax.add_feature(coast, linewidth=1.8, edgecolor="#ffffff", alpha=0.45)
+    ax.add_feature(coast, linewidth=0.7, edgecolor="#111")
+    ax.patch.set_alpha(0)
+    ax.spines["geo"].set_visible(False)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", transparent=True, dpi=100)
+    plt.close(fig)
+    return buf.getvalue()
+
+
 def ramp(name: str, n: int = 32) -> list[str]:
     """Hex stops for a colormap, so the browser's bar matches the image."""
     from matplotlib import colormaps
@@ -97,11 +133,19 @@ def ramp(name: str, n: int = 32) -> list[str]:
 class ViewIndex:
     """Pixel to cell lookup for one view box, reused across every frame."""
 
-    def __init__(self, mesh: MpasMesh, extent, nx: int, ny: int):
+    def __init__(self, mesh: MpasMesh, extent, nx: int, ny: int, crs=None):
+        """`extent` is a lon/lat box; with `crs` (a cartopy CRS, see
+        gmpas.projection) it is a projected (x0, x1, y0, y1) in that CRS's
+        units instead, and pixels off the projection's map are blank."""
         self.extent, self.nx, self.ny = tuple(extent), nx, ny
 
         with timing.step("view.build", px=nx * ny):
-            pts = grid_points(self.extent, nx, ny)
+            on_map = None
+            if crs is None:
+                pts = grid_points(self.extent, nx, ny)
+            else:
+                from .projection import projected_points
+                pts, on_map = projected_points(crs, self.extent, nx, ny)
 
             radius = np.sqrt(np.asarray(mesh.area_cell) / np.pi) / mesh.sphere_radius
             with timing.step("view.query", px=nx * ny):
@@ -110,9 +154,12 @@ class ViewIndex:
                 )
             missing = idx >= mesh.n_cells
             idx = np.where(missing, 0, idx)
+            blank = missing | (dist > 2.0 * radius[idx])
+            if on_map is not None:
+                blank |= ~on_map
 
             self.idx = idx
-            self.blank = (missing | (dist > 2.0 * radius[idx])).reshape(ny, nx)
+            self.blank = blank.reshape(ny, nx)
 
     @property
     def nbytes(self) -> int:
@@ -273,11 +320,13 @@ def coast_scale(lon_span: float) -> str:
     return "110m"
 
 
-def _overlay(extent, nx: int, ny: int) -> bytes:
+def _overlay(extent, nx: int, ny: int, crs=None) -> bytes:
     """Transparent coastline layer for one view box.
 
     Only coastlines: the graticule is drawn in the browser from the same
     extent, so it toggles without a round trip and its labels stay sharp.
+    With `crs`, `extent` is a projected (x0, x1, y0, y1) and the axis is in
+    that projection, its limits the same box the projected raster spans.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -285,6 +334,8 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
     import cartopy.feature as cfeature
     import matplotlib.pyplot as plt
 
+    if crs is not None:
+        return _overlay_projected(extent, nx, ny, crs)
     lon_min, lon_max, lat_min, lat_max = extent
     central = 0.5 * (lon_min + lon_max) if lon_max > 180.0 else 0.0
     src = ccrs.PlateCarree(central_longitude=central)
@@ -330,6 +381,9 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
 
 class Viewer:
     """Everything the request handlers need, built once at startup."""
+
+    #: /api/frame and /api/overlay accept `proj`; see _proj_params
+    supports_projection = True
 
     def __init__(self, data_path, mesh_path="", nx=1200, ny=700):
         # serve as soon as the mesh is ready; counting timesteps across
@@ -399,6 +453,11 @@ class Viewer:
             **_colour.description(),
             # the page's Hovmöller estimate: whole fields per step, mesh bins
             "native": True,
+            # the page's projection select: lon/lat is the default, the rest
+            # go through /api/projview and the `proj` frame parameters
+            "projections": ["auto", "Orthographic", "NorthPolarStereo",
+                            "SouthPolarStereo", "LambertConformal", "Mercator",
+                            "Robinson", "EqualEarth"],
             "kind_labels": {"map": "map (native mesh)",
                             "hovmoller": "Hovmöller (time × lon, area-weighted)",
                             "section": "vertical section along a path"},
@@ -408,15 +467,46 @@ class Viewer:
 
     # -- frames ----------------------------------------------------------
 
-    def view(self, extent, nx=None, ny=None) -> ViewIndex:
+    def view(self, extent, nx=None, ny=None, proj=None) -> ViewIndex:
+        """The pixel-to-cell index for a view. `proj` is (name, params) from
+        gmpas.projection; `extent` is then in that projection's units."""
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        return self._views.get(key, lambda: ViewIndex(self.mesh, extent, nx, ny))
+        if proj is None:
+            return self._views.get(key, lambda: ViewIndex(self.mesh, extent, nx, ny))
+        from .projection import make_crs
+        pkey = _proj_key(proj)
+        return self._views.get(key + pkey, lambda: ViewIndex(
+            self.mesh, extent, nx, ny, crs=make_crs(*proj)))
 
-    def overlay(self, extent, nx=None, ny=None) -> bytes:
+    def overlay(self, extent, nx=None, ny=None, proj=None) -> bytes:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
+        if proj is None:
+            return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
+        from .projection import make_crs
+        return self._overlays.get(key + _proj_key(proj), lambda: _overlay(
+            extent, nx, ny, crs=make_crs(*proj)))
+
+    def projected_home(self, name: str, params: dict | None = None) -> dict:
+        """The mesh framed in a projection, for the page's select: the full
+        parameters (so every later request names the same map) and the
+        projected box that holds the mesh."""
+        from .projection import home_view
+
+        name, params, extent = home_view(name, params, self.home, self.mesh.coverage)
+        return {"proj": name, "extent": list(extent),
+                "plon": params.get("central_longitude"),
+                "plat": params.get("central_latitude"),
+                "psp": list(params["standard_parallels"])
+                if "standard_parallels" in params else None}
+
+    def unproject(self, proj, x: float, y: float, tol: float) -> dict:
+        """Projected (x, y) back to lon/lat; `on` is False off the map."""
+        from .projection import make_crs, unproject
+
+        lon, lat, on = unproject(make_crs(*proj), [x], [y], tol)
+        return {"lon": float(lon[0]), "lat": float(lat[0]), "on": bool(on[0])}
 
     @staticmethod
     def _level_span(da) -> int:
@@ -465,11 +555,11 @@ class Viewer:
     clean_colour = staticmethod(_colour.clean)
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
-              nx=None, ny=None, compress=1, colour=None, meta=None):
+              nx=None, ny=None, compress=1, colour=None, meta=None, proj=None):
         """A map frame. Without `colour` options this is what it always was,
         byte for byte; with them the indexed encoder draws it and `meta` comes
         back holding the bar the page should draw beside it."""
-        view = self.view(extent, nx, ny)
+        view = self.view(extent, nx, ny, proj)
         values = self.values(var, time, level)
         # the plain path does not need the mask, so it does not build one
         on_grid = None
@@ -951,6 +1041,40 @@ def _plot_extras(q: dict) -> dict:
     return out
 
 
+def _proj_key(proj) -> tuple:
+    """A hashable key for a (name, params) projection, for the view caches."""
+    name, params = proj
+    return (name, *sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+                          for k, v in (params or {}).items()))
+
+
+def _proj_params(q: dict, viewer) -> tuple[str, dict]:
+    """The projection a request names: `proj`, and `plon`/`plat` for its
+    centre, `psp` ("lat1,lat2") for Lambert conformal's standard parallels.
+    The extent of such a request is in the projection's own units. Only the
+    MPAS viewer draws projected frames so far."""
+    from .projection import NAMES
+
+    if not getattr(viewer, "supports_projection", False):
+        raise ValueError("projected frames are drawn by the MPAS viewer only")
+    name = q["proj"]
+    if name not in NAMES:
+        raise ValueError(f"unknown projection {name!r}; one of {', '.join(NAMES)}")
+    params: dict = {}
+    for key, out in (("plon", "central_longitude"), ("plat", "central_latitude")):
+        if q.get(key):
+            v = float(q[key])
+            if not math.isfinite(v):
+                raise ValueError(f"{key} must be finite")
+            params[out] = v
+    if q.get("psp"):
+        sp = tuple(float(v) for v in q["psp"].split(","))
+        if len(sp) != 2 or not all(math.isfinite(v) for v in sp):
+            raise ValueError("psp takes two finite latitudes, e.g. psp=30,60")
+        params["standard_parallels"] = sp
+    return name, params
+
+
 def _hov_params(q: dict) -> dict:
     """A Hovmöller's band, longitudes, steps and drawing, checked as they arrive.
 
@@ -1195,6 +1319,8 @@ def _handler(viewer: Viewer, html: str = ""):
                     colours: dict = {"meta": {}}
                     if hasattr(viewer, "clean_colour") and q.get("colour"):
                         colours["colour"] = q["colour"]
+                    if q.get("proj"):
+                        colours["proj"] = _proj_params(q, viewer)
                     png, lo, hi = viewer.frame(
                         q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
                         extent, q.get("cmap", "viridis"),
@@ -1238,6 +1364,9 @@ def _handler(viewer: Viewer, html: str = ""):
                     # from asking matplotlib for an arbitrarily large canvas
                     size = [int(np.clip(int(q[k]), 16, OVERLAY_MAX_PX))
                             if q.get(k) else None for k in ("nx", "ny")]
+                    if q.get("proj"):
+                        return self._send(viewer.overlay(
+                            extent, *size, proj=_proj_params(q, viewer)), "image/png")
                     return self._send(viewer.overlay(extent, *size), "image/png")
                 if url.path.startswith("/api/export/"):
                     kind = url.path.rsplit("/", 1)[-1]
@@ -1283,6 +1412,17 @@ def _handler(viewer: Viewer, html: str = ""):
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     return self.wfile.write(body)
+                if url.path == "/api/projview" and \
+                        getattr(viewer, "supports_projection", False):
+                    name = q.get("proj", "auto")
+                    params = {} if name == "auto" else \
+                        _proj_params({**q, "proj": name}, viewer)[1]
+                    return self._send(json.dumps(viewer.projected_home(name, params)).encode(),
+                                      "application/json")
+                if url.path == "/api/unproject":
+                    out = viewer.unproject(_proj_params(q, viewer), float(q["x"]),
+                                           float(q["y"]), float(q.get("tol", 1.0)))
+                    return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/probe":
                     out = viewer.probe(float(q["lon"]), float(q["lat"]), q["var"],
                                        int(q.get("time", 0)), int(q.get("level", 0)))
@@ -1972,6 +2112,9 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
       columns, no interpolation</div>
   </div>
 
+  <div class="sec" id="projsec" style="display:none"><label>projection</label>
+    <select id="proj"><option value="">lon/lat (default)</option></select>
+    <div class="hint" id="projhint"></div></div>
   <div class="sec" id="cmapsec"><label>colormap</label><select id="cmap"></select></div>
 
   <div class="sec" id="coloursec" style="display:none"><label>colour options</label>
@@ -2035,6 +2178,22 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
 const $=s=>document.querySelector(s);
 let M=null, cur=null, drawCtrl=null;
 let view=null, home=null, rendered=null;      // geographic state
+// A projection, when one is chosen: {proj, plon, plat, psp}. The view box is
+// then in the projection's own metres -- still a linear box, so boxOf, fit,
+// clamp, outset, preview, wheel zoom and drag pan work unchanged in x/y, and
+// the server inverts each pixel to its cell (gmpas/projection.py). null is the
+// lon/lat map, exactly as it always was.
+let P=null;
+const EARTH_A=6378137;                        // cartopy's sphere for Orthographic
+function globe(){ return !!P && P.proj==="Orthographic"; }
+function projQ(p){
+  if(!P) return p;
+  p.set("proj", P.proj);
+  if(P.plon!=null) p.set("plon", P.plon);
+  if(P.plat!=null) p.set("plat", P.plat);
+  if(P.psp) p.set("psp", P.psp.join(","));
+  return p;
+}
 const ZMAX=800;                               // slider units, 100 per doubling
 
 function say(t){const m=$("#msg");m.textContent=t;m.style.opacity=t?1:0;}
@@ -2054,7 +2213,9 @@ function fit(box){
   // nothing beyond +-90 to pad into. Cap w (and so h=w/aspect, together, at
   // the same scale) at the point where h would just reach 180, rather than
   // clamping h alone after the fact and desyncing it from w's aspect.
-  const w = Math.min(Math.max(b-a, (d-c)*aspect()), 180*aspect());
+  // In a projection there are no poles to pad past: the box is metres.
+  const w = P ? Math.max(b-a, (d-c)*aspect())
+              : Math.min(Math.max(b-a, (d-c)*aspect()), 180*aspect());
   return {clon, clat, w};
 }
 function clamp(){
@@ -2067,6 +2228,34 @@ function clamp(){
   $("#zoom").value = Math.round(Math.log2(home.w/view.w)*100);
 }
 
+// The mesh framed in a projection comes from the server (/api/projview), with
+// every parameter filled in so later requests name the same map; "auto" lets
+// gmpas/projection.auto_projection choose. "" is the lon/lat map.
+async function setProjection(name){
+  stopPlayback();
+  if(!name){
+    P=null; $("#projhint").textContent="";
+    home=fit(M.home);
+  }else{
+    const r=await fetch("api/projview?proj="+encodeURIComponent(name));
+    const d=await r.json();
+    if(!r.ok){ say(d.error); $("#proj").value=P ? $("#proj").value : ""; return; }
+    if(d.proj==="PlateCarree"){
+      // "auto" keeps a global mesh on today's lon/lat map: draw that map itself,
+      // in degrees, rather than a projection whose units are degrees too
+      P=null; $("#projhint").textContent="auto: lon/lat (the mesh is global)";
+      home=fit(M.home);
+    }else{
+      P={proj:d.proj, plon:d.plon, plat:d.plat, psp:d.psp};
+      $("#projhint").textContent = name==="auto" ? `auto: ${d.proj}` :
+        (globe() ? "drag to turn the globe" : "");
+      home=fit(d.extent);
+    }
+  }
+  view={...home}; rendered=null; clamp();
+  if($("#kind") && $("#kind").value!=="map" && P){ $("#kind").value="map"; }
+  setMode(); overlay(); draw();
+}
 async function boot(){
   M = await (await fetch("api/meta")).json();
   $("#title").textContent = M.file;
@@ -2092,6 +2281,12 @@ async function boot(){
     document.body.append(dl);
   }
   home = fit(M.home); view = {...home}; rendered = null;
+  if(M.projections){
+    M.projections.forEach(n=>{ const o=document.createElement("option");
+      o.value=n; o.textContent=n==="auto" ? "auto (from the mesh)" : n; $("#proj").append(o); });
+    $("#projsec").style.display="";
+    $("#proj").onchange=e=>setProjection(e.target.value);
+  }
   layout();
   subtitle(); fillVars();
   if(M.scanning) setTimeout(pollScan, 400);
@@ -2213,10 +2408,14 @@ function plotMode(){
 // What the current plot kind uses, from the server's table (gmpas/generic.py
 // KIND_CAPS). The MPAS page sends none and only ever draws the fast map, so
 // the fallback is the map's own set.
+const LONLAT_ONLY="available in lon/lat view";
 const MAP_CAPS={colour:true, options:true, pan:true, frames:true, probe:true,
                 gif:true, data:true};
 function caps(){
   if(!M) return MAP_CAPS;
+  // a projected map: the fast map and the probe; frames, animations, exports
+  // and the plot kinds work in lon/lat boxes, so they wait for that view
+  if(P) return {...MAP_CAPS, frames:false, gif:false, data:false};
   const kind = (cur && cur.kinds && $("#kind").value) || "map";
   return (M.kind_caps||{})[kind] || MAP_CAPS;
 }
@@ -2234,7 +2433,11 @@ function setMode(){
   document.body.classList.toggle("layering", layering);
   $("#layersec").style.display = layering ? "" : "none";
   if(layering) lyOpen();
-  ["#zoom","#home","#grid"].forEach(id=>{ $(id).disabled=!c.pan; });
+  ["#zoom","#home","#grid"].forEach(id=>{ $(id).disabled=!c.pan || (id==="#grid" && !!P); });
+  $("#grid").title = P ? LONLAT_ONLY : "";
+  if($("#kind")){ $("#kind").disabled=!!P; $("#kind").title = P ? LONLAT_ONLY : ""; }
+  ["#applyext","#copyext"].forEach(id=>{ const b=$(id); if(b){ b.disabled=!!P;
+    b.title = P ? LONLAT_ONLY : ""; } });
   if(!c.frames) stopPlayback();
   show("#cmapsec", c.colour); show("#rangesec", c.colour);
   if(M.colour_options) show("#coloursec", c.options);
@@ -2253,8 +2456,9 @@ function exportModes(){
   const c=caps();
   const off=(sel, why)=>{ const b=$(sel); if(!b) return;
     b.disabled=!!why; b.title = why || ""; };
-  off("#expgif", c.gif ? "" : "this plot has no animated export");
-  off("#expnc", c.data ? "" : "netCDF export is for the map and the Hovmöller");
+  off("#expgif", P ? LONLAT_ONLY : c.gif ? "" : "this plot has no animated export");
+  off("#expnc", P ? LONLAT_ONLY : c.data ? "" : "netCDF export is for the map and the Hovmöller");
+  off("#expfig", P ? LONLAT_ONLY : "");
 }
 let probePt=null;       // last clicked map point: where series and profiles are taken
 // A field by name as the server resolves it (gmpas/derive.py): the exact
@@ -2314,6 +2518,7 @@ function overlaySize(){
 async function overlay(){
   const b=outset(boxOf(view)), [nx, ny]=overlaySize();
   $("#over").src=`api/overlay?extent=${b.join(",")}&nx=${nx}&ny=${ny}`;
+  if(P) $("#over").src+="&"+projQ(new URLSearchParams());
 }
 
 // show the frame we already have, transformed into place, until the real one
@@ -2328,7 +2533,9 @@ function preview(){
   $("#data").style.transform=t; $("#over").style.transform=t;
 }
 function scalebar(){
-  const b=boxOf(view), wkm=(b[1]-b[0])*111.320*Math.cos(view.clat*Math.PI/180);
+  const b=boxOf(view);
+  // projected metres: true at the projection's centre, which is what a bar says
+  const wkm = P ? (b[1]-b[0])/1000 : (b[1]-b[0])*111.320*Math.cos(view.clat*Math.PI/180);
   const px=$("#wrap").clientWidth||600;
   let target=wkm*0.25, mag=Math.pow(10,Math.floor(Math.log10(target)));
   const nice=[1,2,5,10].map(n=>n*mag).filter(n=>n<=wkm*0.45);
@@ -2386,7 +2593,7 @@ function fmtLat(v){
 function graticule(){
   const g=$("#grat"), la=$("#latax"), lo=$("#lonax");
   g.innerHTML=""; la.innerHTML=""; lo.innerHTML="";
-  if(!$("#grid").checked) return;
+  if(!$("#grid").checked || P) return;    // lon/lat lines are curves in a projection
   const b=boxOf(view);
   const w=$("#wrap").clientWidth, h=$("#wrap").clientHeight;
   la.style.height=h+"px"; lo.style.width=w+"px";
@@ -2546,6 +2753,7 @@ async function draw(){
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
   if(colourParam()) p.set("colour", colourParam());
+  projQ(p);
   const t0=performance.now();
   const r=await fetch("api/frame?"+p, {signal: ctrl.signal});
   if(!r.ok){ say((await r.json()).error); return; }
@@ -3438,6 +3646,7 @@ $("#wrap").onwheel = ev=>{
 };
 
 let drag=null;
+let lastClickPx=null;      // where a projected probe was clicked: see ptPlace
 // Letting go of a drag has to be handled everywhere it can happen, not just
 // on pointerup. A drag begun on the map used to become the browser's own
 // image drag: that fires pointercancel instead of pointerup, so `drag` was
@@ -3454,7 +3663,8 @@ $("#wrap").onpointerdown = ev=>{
   if(ev.button !== 0) return;         // right/middle: not a pan, and the
                                       // context menu would swallow the up
   ev.preventDefault();                // no text selection, no image drag
-  drag={x:ev.clientX, y:ev.clientY, clon:view.clon, clat:view.clat, moved:false};
+  drag={x:ev.clientX, y:ev.clientY, clon:view.clon, clat:view.clat, moved:false,
+        plon:P&&P.plon, plat:P&&P.plat};
   try{ $("#wrap").setPointerCapture(ev.pointerId); }catch(e){}   // may refuse
   $("#wrap").classList.add("drag");
 };
@@ -3468,6 +3678,15 @@ $("#wrap").onpointermove = ev=>{
   const dx=(ev.clientX-drag.x)/r.width*(b[1]-b[0]);
   const dy=(ev.clientY-drag.y)/r.height*(b[3]-b[2]);
   if(Math.abs(ev.clientX-drag.x)+Math.abs(ev.clientY-drag.y)>3) drag.moved=true;
+  if(globe()){
+    // the globe turns under the cursor: metres at the centre -> degrees of arc.
+    // Nothing is previewed (a rotation is not an image transform); the exact
+    // frame comes when the button is let go.
+    const deg=180/Math.PI/EARTH_A;
+    P.plon=((drag.plon - dx*deg + 540)%360)-180;
+    P.plat=Math.max(-90, Math.min(90, drag.plat - dy*deg));
+    return;
+  }
   view.clon=drag.clon-dx; view.clat=drag.clat+dy;
   clamp(); preview(); scalebar(); graticule(); ptMark();
   if(!covers(rendered, boxOf(view))) schedule(90);   // ran past the margin
@@ -3476,11 +3695,18 @@ $("#wrap").onpointercancel = ()=>{ if(endDrag()) schedule(0); };
 $("#wrap").ondragstart = ev=>ev.preventDefault();
 $("#wrap").onpointerup = async ev=>{
   const moved=endDrag();
-  if(moved){ schedule(0); return; }
+  if(moved){ schedule(globe() ? 150 : 0); return; }
   if(!cur) return;
   const r=$("#wrap").getBoundingClientRect(), b=boxOf(view);
-  const lon=b[0]+((ev.clientX-r.left)/r.width)*(b[1]-b[0]);
-  const lat=b[3]-((ev.clientY-r.top)/r.height)*(b[3]-b[2]);
+  let lon=b[0]+((ev.clientX-r.left)/r.width)*(b[1]-b[0]);
+  let lat=b[3]-((ev.clientY-r.top)/r.height)*(b[3]-b[2]);
+  lastClickPx={x:ev.clientX, y:ev.clientY};
+  if(P){                        // lon/lat above are metres: invert on the server
+    const q=projQ(new URLSearchParams({x:lon, y:lat, tol:(b[1]-b[0])/r.width}));
+    const u=await (await fetch("api/unproject?"+q)).json();
+    if(!u.on){ $("#probe2").textContent="off the map"; return; }
+    lon=u.lon; lat=u.lat;
+  }
   probePt={lon, lat};
   const q=new URLSearchParams({lon,lat,var:cur.name,
     time:$("#time").value,level:$("#level").value});
@@ -3553,6 +3779,7 @@ function ptPlace(lon, lat){
   const w=box.offsetWidth||330, h=box.offsetHeight||170, pad=12;
   let px=wr.left-st.left+(lon-b[0])/(b[1]-b[0])*wr.width;
   let py=wr.top-st.top+(b[3]-lat)/(b[3]-b[2])*wr.height;
+  if(P && lastClickPx){ px=lastClickPx.x-st.left; py=lastClickPx.y-st.top; }
   if(!isFinite(px)||!isFinite(py)){ px=pad; py=pad; }
   let x=px+pad, y=py+pad;
   if(x+w>st.width-pad) x=px-w-pad;            // flip to the other side
@@ -3623,7 +3850,7 @@ $("#ptstop").onclick=()=>{
 // the clicked point, marked on the map: a cross, redrawn wherever the view goes
 function ptMark(){
   const m=$("#ptmark");
-  if(!PT || plotMode() || !$("#wrap").clientWidth){ m.style.display="none"; return; }
+  if(!PT || plotMode() || P || !$("#wrap").clientWidth){ m.style.display="none"; return; }
   const b=boxOf(view), w=$("#wrap").clientWidth, h=$("#wrap").clientHeight;
   let lon=PT.lon;
   while(lon<b[0]-180) lon+=360;              // the same point, one turn along
