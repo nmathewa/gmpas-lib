@@ -212,6 +212,28 @@ range so it stops rescaling as you move through time (important when
 comparing timesteps: an auto-scaling colourbar makes everything look the
 same).
 
+**Colour steps** — the `levels` box under "colour options" takes a Ferret-style
+expression, so one field replaces a row of controls:
+
+| `levels` | Meaning |
+|---|---|
+| `20` | twenty equal steps over the colour range |
+| `(,,2.5)` | a step every 2.5, on its multiples, over the colour range |
+| `(-25,0,5)(0,25,1)` | steps of different sizes: every 5 below zero, every 1 above |
+| `(0)(1)(2)(5)(10)` | the levels themselves |
+| `(-inf)(0,30,2)(inf)` | open ends: values beyond them take the under/over colour |
+
+Each step takes an equal share of the colormap and of the key, whatever its
+width. Levels that name both ends set the colour range.
+
+**Map projection** — the "projection" list redraws the fast map in another
+projection: orthographic (drag to turn the globe), polar stereographic,
+Lambert conformal, Mercator, Robinson or Equal Earth. "auto" picks one from
+the data: Mercator for a small tropical region, Lambert conformal at mid
+latitudes, polar stereographic near a pole, orthographic for a large region,
+and the plain lon/lat map for global data. Zoom, pan and the probe work the
+same; the graticule is drawn on the lon/lat map only.
+
 **Click the map to probe** — gives you the exact cell number, its lat/lon,
 and the value there.
 

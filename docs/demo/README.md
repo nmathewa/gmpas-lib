@@ -14,12 +14,21 @@ So it is the real interface, not a screenshot of one. Pan, zoom, every
 colormap, the colour range, the level sliders and the probe all work, at full
 resolution, because the browser is doing the same gather the server would.
 
+The colour options work too, `levels` included — `20`, `(,,250)`,
+`(-inf)(0,500,100)(500,3000,500)(inf)` — and so do the map projections with a
+short closed form: orthographic (drag to turn the globe), polar
+stereographic, Lambert conformal and Mercator. `shim.js` carries its own copy
+of that arithmetic, and `tests/test_demo.py` compares its frames with the
+Python renderer's.
+
 ## What it cannot do
 
 - **No time slider or animation** — the demo run is a single timestep.
 - **No contour, layers or Hovmöller, and no exports** — those are drawn by
   matplotlib, which needs Python. The page reports this instead of failing
   silently.
+- **No Robinson or Equal Earth** — world maps with long tabulated inverses,
+  of little use on a regional mesh; `gmpas view` offers them.
 
 ## The data
 

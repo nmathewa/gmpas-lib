@@ -107,6 +107,58 @@ def coastlines(extent, margin: float = 5.0) -> list[list[list[float]]]:
     return out
 
 
+#: The world's coastlines (Natural Earth 110m), for a projected map: a globe
+#: turned away from the region, or a polar map of it, shows far more of the
+#: world than `coast.json` holds. Committed beside the data for the same
+#: reason, and fetched by the page only after first paint.
+WORLD_CACHE = HERE / "data" / "coast_world.json"
+
+
+def world_coastlines() -> list[list[list[float]]]:
+    if WORLD_CACHE.exists():
+        return json.loads(WORLD_CACHE.read_text())
+    try:
+        import cartopy.feature as cfeature
+    except ImportError as exc:
+        raise SystemExit(f"bake: no {WORLD_CACHE.name} and no cartopy ({exc})") from None
+    out = []
+    for geom in cfeature.COASTLINE.with_scale("110m").geometries():
+        for part in getattr(geom, "geoms", [geom]):
+            if len(part.coords) > 1:
+                out.append([[round(float(x), 2), round(float(y), 2)]
+                            for x, y in part.coords])
+    WORLD_CACHE.write_text(json.dumps(out, separators=(",", ":")))
+    print(f"  wrote {WORLD_CACHE} ({len(out)} polylines) -- commit it")
+    return out
+
+
+#: The projections the demo offers: the ones `shim.js` has the formulas for.
+#: Robinson and Equal Earth are world maps with long tabulated inverses, of
+#: little use on a regional mesh, and stay with the server.
+PROJECTIONS = ("auto", "Orthographic", "NorthPolarStereo", "SouthPolarStereo",
+               "LambertConformal", "Mercator")
+
+
+def projected_homes(viewer) -> dict[str, dict]:
+    """What /api/projview answers for each offered projection: the mesh framed
+    in it, worked out here so the browser need not."""
+    homes = {name: viewer.projected_home(name) for name in PROJECTIONS}
+    known = set(PROJECTIONS) | {"PlateCarree"}
+    for name, home in homes.items():
+        if home["proj"] not in known:
+            raise SystemExit(f"bake: {name} resolves to {home['proj']}, which "
+                             f"shim.js cannot draw")
+    return homes
+
+
+def cmap_sizes(names) -> dict[str, int]:
+    """Colours in each colormap that is not the usual 256: the browser needs
+    the count to index a short one (GrADS' 13) as matplotlib does."""
+    from matplotlib import colormaps
+
+    return {n: int(colormaps[n].N) for n in names if colormaps[n].N != RAMP_STOPS}
+
+
 def ramps(names, stops: int = RAMP_STOPS) -> dict[str, list[str]]:
     from gmpas.viewer import ramp
 
@@ -119,7 +171,7 @@ def ramps(names, stops: int = RAMP_STOPS) -> dict[str, list[str]]:
 #: and asserts it found it, so an upstream edit breaks the build loudly
 #: instead of quietly publishing a map with no coastlines.
 OVERLAY_SRC = '  $("#over").src=`api/overlay?extent=${b.join(",")}&nx=${nx}&ny=${ny}`;'
-OVERLAY_HOOK = ('  if(window.GMPAS_OVERLAY) return window.GMPAS_OVERLAY(b);\n'
+OVERLAY_HOOK = ('  if(window.GMPAS_OVERLAY) return window.GMPAS_OVERLAY(b, P);\n'
                 + OVERLAY_SRC)
 
 
@@ -150,7 +202,10 @@ def bake(source: Path, out: Path) -> None:
         meta["file"] = TITLE
         meta["scanning"] = False          # or the page polls api/status for ever
         meta.pop("setup", None)           # no dimension chooser without a server
-        meta.pop("projections", None)     # projected frames need the server too
+        # only the projections shim.js can draw; their home views are baked
+        homes = projected_homes(viewer)
+        meta["projections"] = [n for n in meta.get("projections", [])
+                               if n in PROJECTIONS]
         for row in meta["variables"]:
             # `kinds` is what puts the page into matplotlib plot mode, which
             # needs a server. Without it the page is the fast map and the
@@ -183,7 +238,10 @@ def bake(source: Path, out: Path) -> None:
         (out / "data" / "fields.json").write_text(json.dumps(fields))
         (out / "data" / "coast.json").write_text(
             json.dumps(coastlines(meta["home"])))
-        (out / "data" / "mesh.json").write_text(json.dumps({"cells": n}))
+        (out / "data" / "mesh.json").write_text(json.dumps(
+            {"cells": n, "proj": homes, "cmap_n": cmap_sizes(meta["cmaps"])}))
+        (out / "data" / "coast_world.json").write_text(
+            json.dumps(world_coastlines(), separators=(",", ":")))
 
         # One file per colormap, fetched when it is chosen. All of them at
         # 256 stops is 174 KB, which is a quarter of first paint spent on 62
