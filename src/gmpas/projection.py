@@ -33,6 +33,11 @@ PAGE_CHOICES = ("auto", "Orthographic", "NorthPolarStereo", "SouthPolarStereo",
                 "LambertConformal", "Mercator", "Robinson", "EqualEarth")
 
 
+#: how far past the equator a polar stereographic home view follows a mesh:
+#: one reaching further is cut at the equator, as a polar map usually is
+POLAR_FAR_LAT = 45.0
+
+
 def _box(extent) -> tuple[float, float, float, float, float]:
     """(lon0, dlon, lat0, lat1, lonc) for a box whose longitudes may wrap."""
     lon0, lon1, lat0, lat1 = (float(v) for v in extent)
@@ -191,8 +196,10 @@ def home_view(name: str, params: dict | None, extent,
     projected box that frames the mesh in it: (name, params, (x0, x1, y0, y1)).
 
     `name` may be "auto" (see `auto_projection`). Unset centres default to the
-    middle of the mesh's box; polar stereographic keeps only its own
-    hemisphere (the far pole is at infinity), Mercator stops at 80 degrees.
+    middle of the mesh's box; polar stereographic shows a mesh whole while it
+    stays within `POLAR_FAR_LAT` of the equator on the far side, and only its
+    own hemisphere past that (the far pole is at infinity); Mercator stops at
+    80 degrees.
     """
     p = dict(params or {})
     if name == "auto":
@@ -208,10 +215,10 @@ def home_view(name: str, params: dict | None, extent,
         sp = (lat0 + span / 6.0, lat0 + 5.0 * span / 6.0)
         p["standard_parallels"] = (tuple(max(v, 1.0) for v in sp) if latc > 0
                                    else tuple(min(v, -1.0) for v in sp))
-    if name == "NorthPolarStereo":
-        lat0 = max(lat0, 0.0)
-    elif name == "SouthPolarStereo":
-        lat1 = min(lat1, 0.0)
+    if name == "NorthPolarStereo" and lat0 < -POLAR_FAR_LAT:
+        lat0 = 0.0
+    elif name == "SouthPolarStereo" and lat1 > POLAR_FAR_LAT:
+        lat1 = 0.0
     elif name == "Mercator":
         lat0, lat1 = max(lat0, -80.0), min(lat1, 80.0)
     if lat1 <= lat0:

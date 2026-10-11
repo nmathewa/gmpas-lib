@@ -2243,9 +2243,10 @@ async function setProjection(name){
     const d=await r.json();
     if(!r.ok){ say(d.error); $("#proj").value=P ? $("#proj").value : ""; return; }
     if(d.proj==="PlateCarree"){
-      // "auto" keeps a global mesh on today's lon/lat map: draw that map itself,
-      // in degrees, rather than a projection whose units are degrees too
-      P=null; $("#projhint").textContent="auto: lon/lat (the data are global)";
+      // "auto" keeps a global mesh (and a tall tropical box) on today's lon/lat
+      // map: draw that map itself, in degrees, rather than a projection whose
+      // units are degrees too
+      P=null; $("#projhint").textContent="auto: lon/lat";
       home=fit(M.home);
     }else{
       P={proj:d.proj, plon:d.plon, plat:d.plat, psp:d.psp};

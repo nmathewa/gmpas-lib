@@ -281,8 +281,8 @@ def test_the_projected_home_frames_the_mesh_and_fills_every_parameter(tmp_path):
         off = v.unproject(("Orthographic", {"central_longitude": 0.0}), 9e6, 9e6, 1.0)
         assert not off["on"]
         from gmpas.projection import home_view
-        with pytest.raises(ValueError, match="no part"):     # wholly southern
-            home_view("NorthPolarStereo", {}, (140, 150, -40, -10), 0.01)
+        with pytest.raises(ValueError, match="no part"):     # deep in the south
+            home_view("NorthPolarStereo", {}, (140, 150, -80, -50), 0.01)
     finally:
         v.close()
 
@@ -313,3 +313,28 @@ def test_the_projection_routes_answer_over_http(tmp_path):
     finally:
         srv.shutdown()
         v.close()
+
+
+
+@pytest.mark.parametrize("name", ["NorthPolarStereo", "SouthPolarStereo"])
+def test_polar_stereo_shows_a_tropical_mesh_whole(name):
+    """A mesh across the equator is not cut at it: the home box holds both
+    halves. Only a mesh reaching far into the other hemisphere is cut."""
+    import cartopy.crs as ccrs
+
+    from gmpas.projection import home_view, make_crs
+
+    box = (125.0, 170.0, -25.0, 20.0)
+    got, params, (x0, x1, y0, y1) = home_view(name, {}, box, 0.03)
+    crs = make_crs(got, params)
+    lon, lat = np.meshgrid(np.linspace(125, 170, 9), np.linspace(-25, 20, 9))
+    xy = crs.transform_points(ccrs.PlateCarree(), lon.ravel(), lat.ravel())
+    tol = 1e-3 * max(x1 - x0, y1 - y0)       # the box is found by sampling
+    assert (xy[:, 0] >= x0 - tol).all() and (xy[:, 0] <= x1 + tol).all()
+    assert (xy[:, 1] >= y0 - tol).all() and (xy[:, 1] <= y1 + tol).all()
+
+    # a global mesh keeps the usual polar map: its own hemisphere
+    _, gp, gbox = home_view(name, {}, (-180, 180, -90, 90), 1.0)
+    edge = make_crs(name, gp).transform_points(
+        ccrs.PlateCarree(), np.array([0.0]), np.array([0.0]))[0]
+    assert max(abs(v) for v in gbox) == pytest.approx(np.hypot(edge[0], edge[1]), rel=1e-6)
