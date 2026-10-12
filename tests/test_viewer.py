@@ -972,7 +972,8 @@ def test_an_overlay_request_cannot_ask_for_an_unbounded_canvas(small_viewer):
 
 
 @pytest.mark.parametrize("span, on_disk, scale", [
-    (360.0, {"10m", "50m"}, "110m"),       # a wide view never needs more
+    (360.0, {"10m", "50m"}, "50m"),        # the globe: 110m lost islands
+    (360.0, set(), "110m"),                # 50m not on disk: the floor
     (40.0, {"10m", "50m"}, "50m"),
     (6.0, {"10m", "50m"}, "10m"),
     (6.0, {"50m"}, "50m"),                 # 10m missing: the next coarser one

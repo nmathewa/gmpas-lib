@@ -93,7 +93,7 @@ def test_the_mpas_viewer_still_describes_its_own_shape(tmp_path):
     assert set(meta) == {"file", "mesh", "cells", "regional", "coverage", "files", "steps",
                          "labels", "scanning", "home", "nx", "ny", "cmaps", "ramps",
                          "palettes", "colour_options", "kind_labels", "kind_caps",
-                         "native", "variables"}
+                         "native", "projections", "variables"}
     assert set(meta["kind_labels"]) == set(meta["kind_caps"]) \
         == {"map", "hovmoller", "section"}
     assert "layer_schema" not in meta

@@ -334,6 +334,41 @@ def _vertical_axis(series, var: str, step: int, levdim: str, n: int, cells):
     return name, "index", idx, _bounds(idx), False
 
 
+def profile(series, var: str, step: int, cell: int, sel=None) -> dict:
+    """`var` at one cell on every level of the file: the column, as written.
+
+    One hyperslab -- the cell's column -- rather than a field per level, so a
+    click costs the same on a 41M-cell mesh as on a small one. The vertical
+    coordinate is the one a section uses (`_vertical_axis`): the file's own
+    level variable, heights from zgrid, or the bare level index.
+    """
+    from . import data as _data
+
+    da = series.dataarray(var, step)
+    where = _data.spatial_dim(da)
+    if where != "nCells":
+        raise ValueError(f"{var!r} lives on {where}; a profile takes cell fields only")
+    levels = _data.level_dims(da)
+    if not levels:
+        raise ValueError(f"{var!r} has no vertical axis, so it has no profile")
+    levdim = levels[0]
+    n = int(da.sizes[levdim])
+    if not 0 <= cell < int(da.sizes["nCells"]):
+        raise IndexError(f"cell {cell} is outside nCells={da.sizes['nCells']}")
+    path, local = series.steps[step]
+    with timing.step("native.profile", levels=n), series._lock:
+        src = series._dataset(path)[var]
+        picks = {"nCells": int(cell), **{d: 0 for d in levels[1:]}, **(sel or {})}
+        t_axis = _data.time_axis(src)
+        if t_axis is not None:
+            picks[t_axis] = int(local)
+        values = np.asarray(src.isel(picks).values, dtype=np.float64)
+    name, units, centres, _, down = _vertical_axis(
+        series, var, step, levdim, n, np.array([int(cell)]))
+    return {"dim": levdim, "axis": name, "axis_units": units, "down": bool(down),
+            "levels": centres, "values": values}
+
+
 def _bounds(c: np.ndarray) -> np.ndarray:
     """Cell boundaries for centres `c`: midway between, half a step past the ends."""
     c = np.asarray(c, dtype=np.float64)

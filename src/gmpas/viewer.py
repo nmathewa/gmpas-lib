@@ -40,9 +40,11 @@ from . import colour as _colour
 from . import jobs as _jobs
 from . import data as _data
 from . import derive as _derive
+from . import script as _script
 from . import timing
 from .cache import BuildCache
 from .mesh import MpasMesh
+from .projection import PAGE_CHOICES
 from .raster import grid_points, target_grid
 from .series import PARALLEL_MIN_FILES, Series, series_workers
 
@@ -82,6 +84,42 @@ KIND_CAPS = {
 OVERLAY_MAX_PX = 4096
 
 
+def _projected_axes(fig, extent, crs):
+    """A full-figure GeoAxes spanning projected `extent` edge to edge -- the
+    box the projected raster's pixels tile, so the two line up."""
+    x0, x1, y0, y1 = (float(v) for v in extent)
+    ax = fig.add_axes([0, 0, 1, 1], projection=crs)
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+    ax.set_aspect("auto")
+    return ax
+
+
+def _overlay_projected(extent, nx: int, ny: int, crs) -> bytes:
+    """`_overlay` in a projection: same strokes, axis limits in projected units
+    and aspect auto, so it lines up pixel for pixel with the projected raster."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import cartopy.feature as cfeature
+    import matplotlib.pyplot as plt
+
+    x0, x1, y0, y1 = (float(v) for v in extent)
+    fig = plt.figure(figsize=(nx / 100, ny / 100), dpi=100)
+    ax = _projected_axes(fig, extent, crs)
+    # the scale follows the width on the ground, about a degree per 111 km
+    coast = cfeature.NaturalEarthFeature("physical", "coastline",
+                                         coast_scale(abs(x1 - x0) / 111_000.0),
+                                         facecolor="none")
+    ax.add_feature(coast, linewidth=1.8, edgecolor="#ffffff", alpha=0.45)
+    ax.add_feature(coast, linewidth=0.7, edgecolor="#111")
+    ax.patch.set_alpha(0)
+    ax.spines["geo"].set_visible(False)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", transparent=True, dpi=100)
+    plt.close(fig)
+    return buf.getvalue()
+
+
 def ramp(name: str, n: int = 32) -> list[str]:
     """Hex stops for a colormap, so the browser's bar matches the image."""
     from matplotlib import colormaps
@@ -97,11 +135,19 @@ def ramp(name: str, n: int = 32) -> list[str]:
 class ViewIndex:
     """Pixel to cell lookup for one view box, reused across every frame."""
 
-    def __init__(self, mesh: MpasMesh, extent, nx: int, ny: int):
+    def __init__(self, mesh: MpasMesh, extent, nx: int, ny: int, crs=None):
+        """`extent` is a lon/lat box; with `crs` (a cartopy CRS, see
+        gmpas.projection) it is a projected (x0, x1, y0, y1) in that CRS's
+        units instead, and pixels off the projection's map are blank."""
         self.extent, self.nx, self.ny = tuple(extent), nx, ny
 
         with timing.step("view.build", px=nx * ny):
-            pts = grid_points(self.extent, nx, ny)
+            on_map = None
+            if crs is None:
+                pts = grid_points(self.extent, nx, ny)
+            else:
+                from .projection import projected_points
+                pts, on_map = projected_points(crs, self.extent, nx, ny)
 
             radius = np.sqrt(np.asarray(mesh.area_cell) / np.pi) / mesh.sphere_radius
             with timing.step("view.query", px=nx * ny):
@@ -110,9 +156,12 @@ class ViewIndex:
                 )
             missing = idx >= mesh.n_cells
             idx = np.where(missing, 0, idx)
+            blank = missing | (dist > 2.0 * radius[idx])
+            if on_map is not None:
+                blank |= ~on_map
 
             self.idx = idx
-            self.blank = (missing | (dist > 2.0 * radius[idx])).reshape(ny, nx)
+            self.blank = blank.reshape(ny, nx)
 
     @property
     def nbytes(self) -> int:
@@ -232,7 +281,10 @@ def _quantize(img: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
 
 #: Natural Earth coastline scale by the width of the view, in degrees of
 #: longitude: finer as the map zooms in, never finer than what is on disk
-COAST_SCALES = ((60.0, "110m"), (10.0, "50m"), (0.0, "10m"))
+#: 50m even for the whole globe: 110m loses islands and draws coasts as a
+#: handful of straight segments, and 50m costs ~40 ms more per view (78 vs 39 ms
+#: warm at 1196x591). 10m only once zoomed in: a global 10m overlay takes ~0.3 s.
+COAST_SCALES = ((10.0, "50m"), (0.0, "10m"))
 
 
 def _coast_on_disk(scale: str) -> bool:
@@ -258,8 +310,8 @@ def _coast_on_disk(scale: str) -> bool:
 def coast_scale(lon_span: float) -> str:
     """The coastline scale for a view `lon_span` degrees wide.
 
-    110m wide, 50m from 60 degrees down, 10m below 10; a finer scale that is
-    not on disk falls back to the next coarser one. 110m is always used as
+    50m down to 10 degrees wide, the whole globe included, and 10m below;
+    a finer scale that is not on disk falls back to the next coarser one. 110m is always used as
     the floor (cartopy fetches it on first use, as it always has). Pre-fetch
     the finer ones on a machine with internet:
     `python -c "from cartopy.io import shapereader as s;
@@ -273,11 +325,13 @@ def coast_scale(lon_span: float) -> str:
     return "110m"
 
 
-def _overlay(extent, nx: int, ny: int) -> bytes:
+def _overlay(extent, nx: int, ny: int, crs=None) -> bytes:
     """Transparent coastline layer for one view box.
 
     Only coastlines: the graticule is drawn in the browser from the same
     extent, so it toggles without a round trip and its labels stay sharp.
+    With `crs`, `extent` is a projected (x0, x1, y0, y1) and the axis is in
+    that projection, its limits the same box the projected raster spans.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -285,6 +339,8 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
     import cartopy.feature as cfeature
     import matplotlib.pyplot as plt
 
+    if crs is not None:
+        return _overlay_projected(extent, nx, ny, crs)
     lon_min, lon_max, lat_min, lat_max = extent
     central = 0.5 * (lon_min + lon_max) if lon_max > 180.0 else 0.0
     src = ccrs.PlateCarree(central_longitude=central)
@@ -330,6 +386,9 @@ def _overlay(extent, nx: int, ny: int) -> bytes:
 
 class Viewer:
     """Everything the request handlers need, built once at startup."""
+
+    #: /api/frame and /api/overlay accept `proj`; see _proj_params
+    supports_projection = True
 
     def __init__(self, data_path, mesh_path="", nx=1200, ny=700):
         # serve as soon as the mesh is ready; counting timesteps across
@@ -399,6 +458,9 @@ class Viewer:
             **_colour.description(),
             # the page's Hovmöller estimate: whole fields per step, mesh bins
             "native": True,
+            # the page's projection select: lon/lat is the default, the rest
+            # go through /api/projview and the `proj` frame parameters
+            "projections": list(PAGE_CHOICES),
             "kind_labels": {"map": "map (native mesh)",
                             "hovmoller": "Hovmöller (time × lon, area-weighted)",
                             "section": "vertical section along a path"},
@@ -408,15 +470,46 @@ class Viewer:
 
     # -- frames ----------------------------------------------------------
 
-    def view(self, extent, nx=None, ny=None) -> ViewIndex:
+    def view(self, extent, nx=None, ny=None, proj=None) -> ViewIndex:
+        """The pixel-to-cell index for a view. `proj` is (name, params) from
+        gmpas.projection; `extent` is then in that projection's units."""
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        return self._views.get(key, lambda: ViewIndex(self.mesh, extent, nx, ny))
+        if proj is None:
+            return self._views.get(key, lambda: ViewIndex(self.mesh, extent, nx, ny))
+        from .projection import make_crs
+        pkey = _proj_key(proj)
+        return self._views.get(key + pkey, lambda: ViewIndex(
+            self.mesh, extent, nx, ny, crs=make_crs(*proj)))
 
-    def overlay(self, extent, nx=None, ny=None) -> bytes:
+    def overlay(self, extent, nx=None, ny=None, proj=None) -> bytes:
         nx, ny = nx or self.nx, ny or self.ny
         key = (*(round(float(v), 6) for v in extent), nx, ny)
-        return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
+        if proj is None:
+            return self._overlays.get(key, lambda: _overlay(extent, nx, ny))
+        from .projection import make_crs
+        return self._overlays.get(key + _proj_key(proj), lambda: _overlay(
+            extent, nx, ny, crs=make_crs(*proj)))
+
+    def projected_home(self, name: str, params: dict | None = None) -> dict:
+        """The mesh framed in a projection, for the page's select: the full
+        parameters (so every later request names the same map) and the
+        projected box that holds the mesh."""
+        from .projection import home_view
+
+        name, params, extent = home_view(name, params, self.home, self.mesh.coverage)
+        return {"proj": name, "extent": list(extent),
+                "plon": params.get("central_longitude"),
+                "plat": params.get("central_latitude"),
+                "psp": list(params["standard_parallels"])
+                if "standard_parallels" in params else None}
+
+    def unproject(self, proj, x: float, y: float, tol: float) -> dict:
+        """Projected (x, y) back to lon/lat; `on` is False off the map."""
+        from .projection import make_crs, unproject
+
+        lon, lat, on = unproject(make_crs(*proj), [x], [y], tol)
+        return {"lon": float(lon[0]), "lat": float(lat[0]), "on": bool(on[0])}
 
     @staticmethod
     def _level_span(da) -> int:
@@ -465,11 +558,11 @@ class Viewer:
     clean_colour = staticmethod(_colour.clean)
 
     def frame(self, var, time, level, extent, cmap, vmin, vmax,
-              nx=None, ny=None, compress=1, colour=None, meta=None):
+              nx=None, ny=None, compress=1, colour=None, meta=None, proj=None):
         """A map frame. Without `colour` options this is what it always was,
         byte for byte; with them the indexed encoder draws it and `meta` comes
         back holding the bar the page should draw beside it."""
-        view = self.view(extent, nx, ny)
+        view = self.view(extent, nx, ny, proj)
         values = self.values(var, time, level)
         # the plain path does not need the mask, so it does not build one
         on_grid = None
@@ -779,6 +872,20 @@ class Viewer:
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
                 "lat": round(float(self.mesh.lat_cell[cell]), 4)}
 
+    def profile_at_point(self, lon, lat, var, time) -> dict:
+        """The clicked cell's column: its value on every level, at one step."""
+        from . import native
+
+        if var not in self.plottable_cell_vars():
+            raise ValueError(f"{var!r} is a derived expression; take the profile "
+                             f"of the underlying variable(s) instead")
+        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        prof = native.profile(self.series, var, int(time), cell, sel=self._pins(var))
+        point = {"cell": cell, "lon": round(float(self.mesh.lon_cell[cell]), 4),
+                 "lat": round(float(self.mesh.lat_cell[cell]), 4)}
+        return profile_body(point, _data.field_label(self.series.dataarray(var, time)),
+                            self.series.labels[int(time)], prof)
+
     def series_at_point(self, lon, lat, var, level=0, blocking=False) -> dict:
         """The clicked cell's value at every step: state, or the series itself.
 
@@ -853,6 +960,17 @@ class Viewer:
 
 
 # ----------------------------------------------------------------- serving
+
+
+def profile_body(point: dict, label: str, when: str, prof: dict) -> dict:
+    """A profile as the page wants it: plain lists, null for no data. Shared
+    with the lat/lon viewer, so both answer /api/profile in one shape."""
+    return {**point, "label": label, "time": when,
+            "dim": prof["dim"], "axis": prof["axis"],
+            "axis_units": prof["axis_units"], "down": bool(prof["down"]),
+            "levels": [float(v) for v in prof["levels"]],
+            "values": [None if not np.isfinite(v) else float(v)
+                       for v in prof["values"]]}
 
 
 def _safe_header_value(value: str) -> str:
@@ -949,6 +1067,40 @@ def _plot_extras(q: dict) -> dict:
             raise ValueError("section end points must be finite, latitude within 90")
         out["sec"] = ((p[0], p[1]), (p[2], p[3]))
     return out
+
+
+def _proj_key(proj) -> tuple:
+    """A hashable key for a (name, params) projection, for the view caches."""
+    name, params = proj
+    return (name, *sorted((k, tuple(v) if isinstance(v, (list, tuple)) else v)
+                          for k, v in (params or {}).items()))
+
+
+def _proj_params(q: dict, viewer) -> tuple[str, dict]:
+    """The projection a request names: `proj`, and `plon`/`plat` for its
+    centre, `psp` ("lat1,lat2") for Lambert conformal's standard parallels.
+    The extent of such a request is in the projection's own units. Only
+    viewers with `supports_projection` draw projected frames."""
+    from .projection import NAMES
+
+    if not getattr(viewer, "supports_projection", False):
+        raise ValueError("this viewer does not draw projected frames")
+    name = q["proj"]
+    if name not in NAMES:
+        raise ValueError(f"unknown projection {name!r}; one of {', '.join(NAMES)}")
+    params: dict = {}
+    for key, out in (("plon", "central_longitude"), ("plat", "central_latitude")):
+        if q.get(key):
+            v = float(q[key])
+            if not math.isfinite(v):
+                raise ValueError(f"{key} must be finite")
+            params[out] = v
+    if q.get("psp"):
+        sp = tuple(float(v) for v in q["psp"].split(","))
+        if len(sp) != 2 or not all(math.isfinite(v) for v in sp):
+            raise ValueError("psp takes two finite latitudes, e.g. psp=30,60")
+        params["standard_parallels"] = sp
+    return name, params
 
 
 def _hov_params(q: dict) -> dict:
@@ -1172,8 +1324,12 @@ def _handler(viewer: Viewer, html: str = ""):
                         "labels": viewer.series.labels,
                     }).encode(), "application/json")
                 if url.path == "/api/meta":
-                    return self._send(json.dumps(viewer.describe()).encode(),
-                                      "application/json")
+                    # the script box is the server's: the static demo, which
+                    # bakes describe() alone, has no parser and shows no box
+                    meta = {**viewer.describe(),
+                            "script": {"keys": _script.keys(),
+                                       "startup": _script.startup()}}
+                    return self._send(json.dumps(meta).encode(), "application/json")
                 if url.path == "/api/dims":
                     return _serve_dims(self, viewer, q)
                 if url.path == "/api/layers/bind" and hasattr(viewer, "bind_preset"):
@@ -1195,6 +1351,8 @@ def _handler(viewer: Viewer, html: str = ""):
                     colours: dict = {"meta": {}}
                     if hasattr(viewer, "clean_colour") and q.get("colour"):
                         colours["colour"] = q["colour"]
+                    if q.get("proj"):
+                        colours["proj"] = _proj_params(q, viewer)
                     png, lo, hi = viewer.frame(
                         q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
                         extent, q.get("cmap", "viridis"),
@@ -1238,6 +1396,9 @@ def _handler(viewer: Viewer, html: str = ""):
                     # from asking matplotlib for an arbitrarily large canvas
                     size = [int(np.clip(int(q[k]), 16, OVERLAY_MAX_PX))
                             if q.get(k) else None for k in ("nx", "ny")]
+                    if q.get("proj"):
+                        return self._send(viewer.overlay(
+                            extent, *size, proj=_proj_params(q, viewer)), "image/png")
                     return self._send(viewer.overlay(extent, *size), "image/png")
                 if url.path.startswith("/api/export/"):
                     kind = url.path.rsplit("/", 1)[-1]
@@ -1283,9 +1444,40 @@ def _handler(viewer: Viewer, html: str = ""):
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     return self.wfile.write(body)
+                if url.path == "/api/projview" and \
+                        getattr(viewer, "supports_projection", False):
+                    name = q.get("proj", "auto")
+                    params = {} if name == "auto" else \
+                        _proj_params({**q, "proj": name}, viewer)[1]
+                    return self._send(json.dumps(viewer.projected_home(name, params)).encode(),
+                                      "application/json")
+                if url.path == "/api/script":
+                    try:
+                        state = _script.resolve(_script.parse(q.get("text", "")),
+                                                viewer.describe())
+                    except _script.ScriptError as exc:
+                        return self._send(json.dumps({"error": str(exc)}).encode(),
+                                          "application/json", 400)
+                    return self._send(json.dumps(state).encode(), "application/json")
+                if url.path == "/api/projbox":
+                    # a lon/lat region as the box that holds it in a projection
+                    from .projection import make_crs, projected_extent
+
+                    region = [float(v) for v in q["region"].split(",")]
+                    box = projected_extent(make_crs(*_proj_params(q, viewer)), region)
+                    return self._send(json.dumps({"extent": list(box)}).encode(),
+                                      "application/json")
+                if url.path == "/api/unproject":
+                    out = viewer.unproject(_proj_params(q, viewer), float(q["x"]),
+                                           float(q["y"]), float(q.get("tol", 1.0)))
+                    return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/probe":
                     out = viewer.probe(float(q["lon"]), float(q["lat"]), q["var"],
                                        int(q.get("time", 0)), int(q.get("level", 0)))
+                    return self._send(json.dumps(out).encode(), "application/json")
+                if url.path == "/api/profile" and hasattr(viewer, "profile_at_point"):
+                    out = viewer.profile_at_point(float(q["lon"]), float(q["lat"]),
+                                                  q["var"], int(q.get("time", 0)))
                     return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/series" and hasattr(viewer, "series_at_point"):
                     return _serve_series(self, viewer, q)
@@ -1717,6 +1909,18 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
        width:100%;box-sizing:border-box;font-size:11px;padding:2px 4px}
 #lyEdit .f .pair{display:flex;gap:4px}
 #lyEdit .f input[type=color]{width:26px;padding:0;flex:none}
+/* the right panel's sections fold to their heading, as the script box does */
+#right .sec>label.fold{cursor:pointer;user-select:none}
+#right .sec>label.fold::before{content:"\u25be";display:inline-block;width:12px}
+#right .sec.min>label.fold::before{content:"\u25b8"}
+#right .sec.min>label.fold{margin-bottom:0}
+#right .sec.min>:not(label.fold){display:none!important}
+#scriptsec summary{cursor:pointer;color:var(--dim);font-size:11px;
+                   text-transform:uppercase;letter-spacing:.06em}
+#scriptBox{width:100%;box-sizing:border-box;height:150px;font:11px monospace;
+           margin-top:6px;resize:vertical;white-space:pre}
+#scriptsec .row{display:flex;gap:6px}
+#scripthint.bad{color:#e88}
 #lyJsonBox{width:100%;box-sizing:border-box;height:180px;font:11px monospace;margin-top:6px}
 #lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
 #hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
@@ -1767,6 +1971,7 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #ptchart{width:100%;height:150px;display:none}
 #ptchart .ax{stroke:var(--line);stroke-width:1}
 #ptchart .ln{fill:none;stroke:var(--accent);stroke-width:1.5}
+#ptchart .lev{fill:#fff;stroke:none;opacity:.8}
 #ptchart .now{stroke:#fff;stroke-width:1;opacity:.5;stroke-dasharray:3 3}
 #ptchart .hit{stroke:none;fill:transparent}
 #ptchart .pt{fill:var(--accent);stroke:none}
@@ -1799,6 +2004,8 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #cbover{clip-path:polygon(0 0,100% 50%,0 100%)}
 #ticks{display:flex;justify-content:space-between;margin-top:3px;color:var(--dim);
        font-size:11px;font-variant-numeric:tabular-nums}
+#ticks.edges{display:block;position:relative;height:1.3em}
+#ticks.edges span{position:absolute;white-space:nowrap}
 #cblabel{color:var(--dim);font-size:11px;margin-bottom:4px}
 button{background:#252932;color:var(--fg);border:1px solid var(--line);border-radius:4px;
        padding:5px 9px;font:inherit;cursor:pointer}
@@ -1830,6 +2037,15 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
       <button id="deriveBtn">show</button>
     </div>
   </div>
+  <details class="sec" id="scriptsec" style="display:none"><summary>script</summary>
+    <textarea id="scriptBox" spellcheck="false"
+      placeholder="var = t2m&#10;time = 0&#10;levels = (0,30,2)&#10;proj = Mercator"></textarea>
+    <div class="row" style="margin-top:6px"><button id="scriptApply" style="flex:1">apply</button>
+      <button id="scriptFrom" title="write this view as a script">from view</button>
+      <button id="scriptCopy">copy</button></div>
+    <div class="hint" id="scripthint">one <i>key = value</i> per line; # starts a
+      comment. Only what is named changes.</div>
+  </details>
 </div>
 <div id="keyhelp"><div><b>keys</b><br>
   <kbd>\u2190</kbd><kbd>\u2192</kbd>previous / next time step<br>
@@ -1872,7 +2088,9 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
         <button id="ptclose" title="close">\u00d7</button></div>
       <div id="ptbody">
         <div id="ptnow"></div>
-        <div class="row"><button id="ptgo" style="flex:1">time series</button></div>
+        <div class="row"><button id="ptgo" style="flex:1">time series</button>
+          <button id="ptprof" style="flex:1"
+            title="this point on every level">profile</button></div>
         <svg id="ptchart" preserveAspectRatio="none"></svg>
         <div id="ptfoot">
           <div class="hint" id="pthint">the value here, through the run</div>
@@ -1970,13 +2188,17 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
       columns, no interpolation</div>
   </div>
 
+  <div class="sec" id="projsec" style="display:none"><label>projection</label>
+    <select id="proj"><option value="">lon/lat (default)</option></select>
+    <div class="hint" id="projhint"></div></div>
   <div class="sec" id="cmapsec"><label>colormap</label><select id="cmap"></select></div>
 
   <div class="sec" id="coloursec" style="display:none"><label>colour options</label>
     <div id="colourForm"></div>
     <div class="row" style="margin-top:6px"><button id="colourReset">reset</button></div>
-    <div class="hint" id="colourhint">bands, out-of-range and missing colours, reverse,
-      and a power scale -- also used by figures and animations</div>
+    <div class="hint" id="colourhint">also used by figures and animations. Levels,
+      Ferret style: 20 &middot; (,,2.5) &middot; (-25,0,5)(0,25,1) &middot;
+      (-inf)(0,30,2)(inf)</div>
   </div>
 
   <div class="sec" id="rangesec"><label>colour range</label>
@@ -2032,6 +2254,22 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
 const $=s=>document.querySelector(s);
 let M=null, cur=null, drawCtrl=null;
 let view=null, home=null, rendered=null;      // geographic state
+// A projection, when one is chosen: {proj, plon, plat, psp}. The view box is
+// then in the projection's own metres -- still a linear box, so boxOf, fit,
+// clamp, outset, preview, wheel zoom and drag pan work unchanged in x/y, and
+// the server inverts each pixel to its cell (gmpas/projection.py). null is the
+// lon/lat map, exactly as it always was.
+let P=null;
+const EARTH_A=6378137;                        // cartopy's sphere for Orthographic
+function globe(){ return !!P && P.proj==="Orthographic"; }
+function projQ(p){
+  if(!P) return p;
+  p.set("proj", P.proj);
+  if(P.plon!=null) p.set("plon", P.plon);
+  if(P.plat!=null) p.set("plat", P.plat);
+  if(P.psp) p.set("psp", P.psp.join(","));
+  return p;
+}
 const ZMAX=800;                               // slider units, 100 per doubling
 
 function say(t){const m=$("#msg");m.textContent=t;m.style.opacity=t?1:0;}
@@ -2051,7 +2289,9 @@ function fit(box){
   // nothing beyond +-90 to pad into. Cap w (and so h=w/aspect, together, at
   // the same scale) at the point where h would just reach 180, rather than
   // clamping h alone after the fact and desyncing it from w's aspect.
-  const w = Math.min(Math.max(b-a, (d-c)*aspect()), 180*aspect());
+  // In a projection there are no poles to pad past: the box is metres.
+  const w = P ? Math.max(b-a, (d-c)*aspect())
+              : Math.min(Math.max(b-a, (d-c)*aspect()), 180*aspect());
   return {clon, clat, w};
 }
 function clamp(){
@@ -2064,6 +2304,39 @@ function clamp(){
   $("#zoom").value = Math.round(Math.log2(home.w/view.w)*100);
 }
 
+// The mesh framed in a projection comes from the server (/api/projview), with
+// every parameter filled in so later requests name the same map; "auto" lets
+// gmpas/projection.auto_projection choose. "" is the lon/lat map.
+async function setProjection(name, centre){
+  stopPlayback();
+  if(!name){
+    P=null; $("#projhint").textContent="";
+    home=fit(M.home);
+  }else{
+    const q=new URLSearchParams({proj:name});
+    // a script names the centre it was written with: a turned globe comes back
+    if(centre && name!=="auto") ["plon","plat"].forEach(k=>{
+      if(centre[k]!=null) q.set(k, centre[k]); });
+    const r=await fetch("api/projview?"+q);
+    const d=await r.json();
+    if(!r.ok){ say(d.error); $("#proj").value=P ? P.proj : ""; return; }
+    if(d.proj==="PlateCarree"){
+      // "auto" keeps a global mesh (and a tall tropical box) on today's lon/lat
+      // map: draw that map itself, in degrees, rather than a projection whose
+      // units are degrees too
+      P=null; $("#projhint").textContent="auto: lon/lat";
+      home=fit(M.home);
+    }else{
+      P={proj:d.proj, plon:d.plon, plat:d.plat, psp:d.psp};
+      $("#projhint").textContent = name==="auto" ? `auto: ${d.proj}` :
+        (globe() ? "drag to turn the globe" : "");
+      home=fit(d.extent);
+    }
+  }
+  view={...home}; rendered=null; clamp();
+  if($("#kind") && $("#kind").value!=="map" && P){ $("#kind").value="map"; }
+  setMode(); overlay(); draw();
+}
 async function boot(){
   M = await (await fetch("api/meta")).json();
   $("#title").textContent = M.file;
@@ -2089,6 +2362,12 @@ async function boot(){
     document.body.append(dl);
   }
   home = fit(M.home); view = {...home}; rendered = null;
+  if(M.projections){
+    M.projections.forEach(n=>{ const o=document.createElement("option");
+      o.value=n; o.textContent=n==="auto" ? "auto (from the data)" : n; $("#proj").append(o); });
+    $("#projsec").style.display="";
+    $("#proj").onchange=e=>setProjection(e.target.value);
+  }
   layout();
   subtitle(); fillVars();
   if(M.scanning) setTimeout(pollScan, 400);
@@ -2098,8 +2377,137 @@ async function boot(){
   // "loading…" with no explanation
   const first = M.variables.find(v=>!v.static) ?? M.variables[0];
   if(!first){ say("this file has no variables to draw"); return; }
-  pick(first.name);
+  scriptBoot();
+  if(M.script && M.script.startup){      // gmpas view --script
+    $("#scriptBox").value=M.script.startup; $("#scriptsec").open=true;
+    if(await scriptRun(M.script.startup, first.name)) return;
+  }
+  if(!cur) pick(first.name);
 }
+// ------------------------------------------------------------------- fold
+// A section of the right panel folds to its heading on a click, and stays
+// folded on the next visit. Only what is drawn changes: a folded section's
+// controls keep their values and still apply.
+const FOLD_KEY="gmpas.fold";
+function foldBoot(){
+  let shut=[];
+  try{ shut=JSON.parse(localStorage.getItem(FOLD_KEY)||"[]")||[]; }catch(e){}
+  if(!Array.isArray(shut)) shut=[];
+  for(const sec of document.querySelectorAll("#right > .sec")){
+    const head=sec.querySelector(":scope > label");
+    if(!head || !sec.id) continue;
+    head.classList.add("fold"); head.tabIndex=0; head.setAttribute("role","button");
+    const set=min=>{ sec.classList.toggle("min",min);
+                     head.setAttribute("aria-expanded", String(!min)); };
+    set(shut.includes(sec.id));
+    const flip=()=>{
+      set(!sec.classList.contains("min"));
+      const ids=[...document.querySelectorAll("#right > .sec.min")].map(s=>s.id);
+      try{ localStorage.setItem(FOLD_KEY, JSON.stringify(ids)); }catch(e){}
+    };
+    head.onclick=flip;
+    head.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); flip(); } };
+  }
+}
+// ------------------------------------------------------------------ script
+// The view as a few lines of text (gmpas/script.py). The server parses and
+// checks a script against the open file and answers with plain settings; this
+// only puts them where the controls already keep them, so a script can do
+// nothing the controls cannot. Writing one from the view is the same in
+// reverse, and the two are tested against each other.
+function scriptBoot(){
+  if(!M.script) return;
+  $("#scriptsec").style.display="";
+  $("#scripthint").title=Object.entries(M.script.keys)
+    .map(([k,h])=>`${k}: ${h}`).join("\\n");
+}
+function scriptSay(text, bad){
+  const h=$("#scripthint"); h.textContent=text; h.classList.toggle("bad", !!bad);
+}
+// A script changes several things at once, and each control would ask for
+// its own frame. Held, they ask for none; one frame is drawn at the end.
+let HOLD=false;
+function scriptNum(v){ return String(+(+v).toPrecision(10)); }
+function scriptText(){
+  const rows=[["var", cur.name], ["time", $("#time").value],
+              ["level", $("#level").value], ["cmap", $("#cmap").value],
+              ["vmin", $("#vmin").value.trim()], ["vmax", $("#vmax").value.trim()]];
+  if(M.projections){
+    rows.push(["proj", P ? P.proj : "lonlat"]);
+    if(P && P.plon!=null) rows.push(["plon", scriptNum(P.plon)]);
+    if(P && P.plat!=null) rows.push(["plat", scriptNum(P.plat)]);
+  }
+  rows.push([P ? "box" : "region", boxOf(view).map(scriptNum).join(", ")]);
+  if(M.colour_options) Object.keys(M.colour_options).forEach(k=>{
+    if(COL[k]!=null) rows.push([k, String(COL[k])]); });
+  const w=Math.max(...rows.map(r=>r[0].length));
+  return rows.map(([k,v])=>`${k.padEnd(w)} = ${v}`.trimEnd()).join("\\n")+"\\n";
+}
+async function scriptRun(text, first){
+  const r=await fetch("api/script?"+new URLSearchParams({text}));
+  const s=await r.json();
+  if(!r.ok){ scriptSay(String(s.error).replace(/^[A-Za-z]*Error: /, ""), true); return false; }
+  HOLD=true;
+  try{ return await scriptSet(s, first); }
+  finally{ HOLD=false; rendered=null; overlay(); draw(); panel(); }
+}
+async function scriptSet(s, first){
+  stopPlayback();
+  if(!cur) pick(s.var!=null && varNamed(s.var) ? s.var : first);
+  if(s.var!=null && s.var!==cur.name){
+    // the level and the plot kind follow the variable, as on a click
+    const keep=$("#level").value;
+    if(varNamed(s.var)) pick(s.var); else pickDerived(s.var);
+    if(!("level" in s)){ $("#level").value=Math.min(keep, cur.levels-1);
+      $("#llab").textContent=$("#level").value; }
+  }
+  if(s.time!=null){ $("#time").value=s.time; $("#tlab").textContent=M.labels[s.time]; }
+  if("level" in s){
+    const lev=s.level==null ? 0 : s.level;
+    if(lev>cur.levels-1){ scriptSay(`level: ${lev} is outside ${cur.name}'s `+
+      `${cur.levels} level(s)`, true); return false; }
+    $("#level").value=lev; $("#llab").textContent=lev;
+  }
+  if(s.cmap!=null) $("#cmap").value=s.cmap;
+  ["vmin","vmax"].forEach(k=>{ if(k in s) $("#"+k).value = s[k]==null ? "" : s[k]; });
+  if(s.colour){
+    Object.entries(s.colour).forEach(([k,v])=>{ if(v==null) delete COL[k]; else COL[k]=v; });
+    try{ localStorage.setItem(colourKey(), JSON.stringify(COL)); }catch(e){}
+    colourForm();
+  }
+  if("proj" in s || (P && (s.plon!=null || s.plat!=null))){
+    const name="proj" in s ? s.proj : P.proj;
+    $("#proj").value=name;
+    await setProjection(name, {plon:s.plon, plat:s.plat});
+  }
+  let box=s.box;
+  if(s.region){
+    box=s.region;
+    if(P){
+      const q=projQ(new URLSearchParams({region:s.region.join(",")}));
+      const got=await fetch("api/projbox?"+q), d=await got.json();
+      if(!got.ok){ scriptSay(String(d.error).replace(/^[A-Za-z]*Error: /, ""), true);
+        return false; }
+      box=d.extent;
+    }
+  }
+  if(box){ view=fit(box); clamp(); }
+  else if("region" in s || "box" in s){ view={...home}; clamp(); }
+  if(PT) ptStale("the view changed");
+  scriptSay("applied");
+  return true;
+}
+$("#scriptApply").onclick = ()=>scriptRun($("#scriptBox").value);
+$("#scriptFrom").onclick = ()=>{ if(!cur) return;
+  $("#scriptBox").value=scriptText(); scriptSay("this view, as a script"); };
+$("#scriptCopy").onclick = ()=>{
+  navigator.clipboard?.writeText($("#scriptBox").value); scriptSay("copied"); };
+$("#scriptBox").addEventListener("keydown", e=>{
+  e.stopPropagation();                 // typing is not the map's arrow keys
+  if(e.key==="Enter" && (e.ctrlKey||e.metaKey)){ e.preventDefault();
+    $("#scriptApply").click(); }
+});
+
 // ------------------------------------------------------- dimension mapping
 // Which dimension is x, y, time and level. Shown when the server could not
 // work it out, when it had to guess, and on demand -- the guess that draws a
@@ -2210,10 +2618,14 @@ function plotMode(){
 // What the current plot kind uses, from the server's table (gmpas/generic.py
 // KIND_CAPS). The MPAS page sends none and only ever draws the fast map, so
 // the fallback is the map's own set.
+const LONLAT_ONLY="available in lon/lat view";
 const MAP_CAPS={colour:true, options:true, pan:true, frames:true, probe:true,
                 gif:true, data:true};
 function caps(){
   if(!M) return MAP_CAPS;
+  // a projected map: the fast map and the probe; frames, animations, exports
+  // and the plot kinds work in lon/lat boxes, so they wait for that view
+  if(P) return {...MAP_CAPS, frames:false, gif:false, data:false};
   const kind = (cur && cur.kinds && $("#kind").value) || "map";
   return (M.kind_caps||{})[kind] || MAP_CAPS;
 }
@@ -2231,7 +2643,11 @@ function setMode(){
   document.body.classList.toggle("layering", layering);
   $("#layersec").style.display = layering ? "" : "none";
   if(layering) lyOpen();
-  ["#zoom","#home","#grid"].forEach(id=>{ $(id).disabled=!c.pan; });
+  ["#zoom","#home","#grid"].forEach(id=>{ $(id).disabled=!c.pan || (id==="#grid" && !!P); });
+  $("#grid").title = P ? LONLAT_ONLY : "";
+  if($("#kind")){ $("#kind").disabled=!!P; $("#kind").title = P ? LONLAT_ONLY : ""; }
+  ["#applyext","#copyext"].forEach(id=>{ const b=$(id); if(b){ b.disabled=!!P;
+    b.title = P ? LONLAT_ONLY : ""; } });
   if(!c.frames) stopPlayback();
   show("#cmapsec", c.colour); show("#rangesec", c.colour);
   if(M.colour_options) show("#coloursec", c.options);
@@ -2250,8 +2666,9 @@ function exportModes(){
   const c=caps();
   const off=(sel, why)=>{ const b=$(sel); if(!b) return;
     b.disabled=!!why; b.title = why || ""; };
-  off("#expgif", c.gif ? "" : "this plot has no animated export");
-  off("#expnc", c.data ? "" : "netCDF export is for the map and the Hovmöller");
+  off("#expgif", P ? LONLAT_ONLY : c.gif ? "" : "this plot has no animated export");
+  off("#expnc", P ? LONLAT_ONLY : c.data ? "" : "netCDF export is for the map and the Hovmöller");
+  off("#expfig", P ? LONLAT_ONLY : "");
 }
 let probePt=null;       // last clicked map point: where series and profiles are taken
 // A field by name as the server resolves it (gmpas/derive.py): the exact
@@ -2309,8 +2726,11 @@ function overlaySize(){
   return [fit(r.width||M.nx), fit(r.height||M.ny)];
 }
 async function overlay(){
+  if(HOLD) return;
   const b=outset(boxOf(view)), [nx, ny]=overlaySize();
-  $("#over").src=`api/overlay?extent=${b.join(",")}&nx=${nx}&ny=${ny}`;
+  // one assignment: setting src twice starts a request only to abandon it
+  $("#over").src=`api/overlay?extent=${b.join(",")}&nx=${nx}&ny=${ny}`+
+    (P ? "&"+projQ(new URLSearchParams()) : "");
 }
 
 // show the frame we already have, transformed into place, until the real one
@@ -2325,7 +2745,9 @@ function preview(){
   $("#data").style.transform=t; $("#over").style.transform=t;
 }
 function scalebar(){
-  const b=boxOf(view), wkm=(b[1]-b[0])*111.320*Math.cos(view.clat*Math.PI/180);
+  const b=boxOf(view);
+  // projected metres: true at the projection's centre, which is what a bar says
+  const wkm = P ? (b[1]-b[0])/1000 : (b[1]-b[0])*111.320*Math.cos(view.clat*Math.PI/180);
   const px=$("#wrap").clientWidth||600;
   let target=wkm*0.25, mag=Math.pow(10,Math.floor(Math.log10(target)));
   const nice=[1,2,5,10].map(n=>n*mag).filter(n=>n<=wkm*0.45);
@@ -2383,7 +2805,7 @@ function fmtLat(v){
 function graticule(){
   const g=$("#grat"), la=$("#latax"), lo=$("#lonax");
   g.innerHTML=""; la.innerHTML=""; lo.innerHTML="";
-  if(!$("#grid").checked) return;
+  if(!$("#grid").checked || P) return;    // lon/lat lines are curves in a projection
   const b=boxOf(view);
   const w=$("#wrap").clientWidth, h=$("#wrap").clientHeight;
   la.style.height=h+"px"; lo.style.width=w+"px";
@@ -2408,7 +2830,7 @@ let lastData=null;         // [min,max] of the values the frame was drawn from
 // range clips them, a triangle in the end colour says so -- the image already
 // draws those values in the end colour, so the key now tells the truth about
 // it. A triangle the colour options set (under/over) is left as it is.
-function dataMarks(lo, hi, fmt, ends, explicit){
+function dataMarks(lo, hi, fmt, ends, explicit, pos){
   $("#ramp").querySelectorAll(".mark").forEach(m=>m.remove());
   $("#cbdata").textContent="";
   if(!lastData) return;
@@ -2418,7 +2840,8 @@ function dataMarks(lo, hi, fmt, ends, explicit){
   const [dmin, dmax]=lastData, span=hi-lo;
   const mark=(v, what)=>{ if(!(span>0) || v<lo || v>hi) return;
     const m=document.createElement("i"); m.className="mark";
-    m.style.left=(100*(v-lo)/span).toFixed(3)+"%"; m.title=`data ${what} ${fmt(v)}`;
+    m.style.left=(100*(pos ? pos(v) : (v-lo)/span)).toFixed(3)+"%";
+    m.title=`data ${what} ${fmt(v)}`;
     $("#ramp").append(m); };
   mark(dmin, "min"); mark(dmax, "max");
   // Only for an end the user fixed: the automatic range is the 2nd-98th
@@ -2444,7 +2867,7 @@ function colorbar(lo,hi){
     const v=lo+(hi-lo)*i/(n-1);
     out.push(`<span>${fmt(v)}</span>`);
   }
-  $("#ticks").innerHTML=out.join("");
+  $("#ticks").classList.remove("edges"); $("#ticks").innerHTML=out.join("");
   $("#cblabel").textContent=cur?cur.label:"";
   dataMarks(lo, hi, fmt, [stops[0], stops[stops.length-1]], {});
 }
@@ -2462,12 +2885,34 @@ function colorbarSpec(spec, fmt){
   const tri=(id, colour)=>{ const el=$(id);
     el.style.display=colour?"block":"none"; if(colour) el.style.background=colour; };
   tri("#cbunder", spec.under); tri("#cbover", spec.over);
-  const ticks = spec.edges && spec.edges.length<=13 ? spec.edges
-    : [0,1,2,3,4].map(i=>spec.lo+(spec.hi-spec.lo)*i/4);
-  $("#ticks").innerHTML=ticks.map(v=>`<span>${fmt(v)}</span>`).join("");
+  const e=spec.edges, tk=$("#ticks");
+  if(e){
+    // every step is as wide on the key as any other, uneven levels too, so
+    // a tick sits at its edge's index. Long lists label the ends and each
+    // edge where the step size changes, then every k-th edge between them.
+    const n=e.length-1, k=Math.ceil(n/12), d=i=>e[i+1]-e[i];
+    const near=(i, j)=>Math.abs(i-j)<k*0.75;
+    const keep=[0, n];
+    for(let i=1;i<n;i++) if(Math.abs(d(i)-d(i-1))>1e-9*Math.abs(d(i))
+                            && !keep.some(j=>near(i, j))) keep.push(i);
+    for(let i=0;i<=n;i+=k) if(!keep.some(j=>near(i, j))) keep.push(i);
+    const at=keep.sort((a, b)=>a-b);
+    tk.classList.add("edges");
+    tk.innerHTML=at.map(i=>{ const p=(100*i/n).toFixed(3);
+      return `<span style="left:${p}%;transform:translateX(-${p}%)">${fmt(e[i])}</span>`;
+    }).join("");
+  }else{
+    tk.classList.remove("edges");
+    tk.innerHTML=[0,1,2,3,4].map(i=>spec.lo+(spec.hi-spec.lo)*i/4)
+      .map(v=>`<span>${fmt(v)}</span>`).join("");
+  }
   $("#cblabel").textContent=cur?cur.label:"";
-  dataMarks(spec.lo, spec.hi, fmt, [s[0], s[s.length-1]],
-            {"#cbunder": !!spec.under, "#cbover": !!spec.over});
+  // a value's place on the key: within its step when the steps are edges
+  const pos = e ? v=>{ const n=e.length-1;
+    let i=0; while(i<n-1 && v>=e[i+1]) i++;
+    return (i+Math.min(1, Math.max(0, (v-e[i])/(e[i+1]-e[i]))))/n; } : null;
+  dataMarks(e ? e[0] : spec.lo, e ? e[e.length-1] : spec.hi, fmt, [s[0], s[s.length-1]],
+            {"#cbunder": !!spec.under, "#cbover": !!spec.over}, pos);
 }
 
 // ------------------------------------------------------- colour options
@@ -2488,7 +2933,8 @@ function colourOpen(){
 }
 function colourForm(){
   const host=$("#colourForm"); host.innerHTML="";
-  Object.entries(M.colour_options).forEach(([k, spec])=>lyField(host, k.replace("_"," "),
+  Object.entries(M.colour_options).filter(([k, spec])=>!spec.hidden
+      || COL[k]!=null).forEach(([k, spec])=>lyField(host, k.replace("_"," "),
     spec, COL[k], v=>{
       if(v===null) delete COL[k]; else COL[k]=v;
       try{ localStorage.setItem(colourKey(), JSON.stringify(COL)); }catch(e){}
@@ -2501,7 +2947,7 @@ $("#colourReset").onclick=()=>{
 };
 
 async function draw(){
-  if(!cur) return;
+  if(!cur || HOLD) return;
   if(plotMode()) return drawPlot();
   // Selecting something new mid-render used to queue behind the render
   // already in flight, so switching variable/time/level while a frame was
@@ -2519,6 +2965,7 @@ async function draw(){
   if($("#vmin").value) p.set("vmin",$("#vmin").value);
   if($("#vmax").value) p.set("vmax",$("#vmax").value);
   if(colourParam()) p.set("colour", colourParam());
+  projQ(p);
   const t0=performance.now();
   const r=await fetch("api/frame?"+p, {signal: ctrl.signal});
   if(!r.ok){ say((await r.json()).error); return; }
@@ -3332,6 +3779,7 @@ function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); ptMar
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
   if(PT){ ptFollow(); if(PT.series) ptChart(); }   // the panel is about a moment
+  if(PT && PT.show==="profile" && PT.profile) ptProfFollow();
   // a Hovmöller already holds every step: moving time only moves its marker
   if(plotMode() && $("#kind").value==="hovmoller"){ hovMark(); return; }
   if(plotMode()){ clearTimeout(redrawTimer); redrawTimer=setTimeout(draw, 120); return; }
@@ -3340,7 +3788,11 @@ $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
   if(entry && entry.urls[e.target.value]){ $("#data").src=entry.urls[e.target.value]; return; }
   draw(); };
 $("#level").oninput = e=>{ $("#llab").textContent=e.target.value; stopPlayback();
-  ptStale("level changed"); draw(); };
+  // a profile holds every level already: only its marker moves
+  if(PT && PT.show==="profile" && PT.profile){ PT.series=null; PT.key=null;
+    ptValue(PT.profile.values[+e.target.value]); ptChart(); }
+  else ptStale("level changed");
+  draw(); };
 $("#cmap").onchange = ()=>{ stopPlayback(); draw(); };
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
@@ -3411,6 +3863,7 @@ $("#wrap").onwheel = ev=>{
 };
 
 let drag=null;
+let lastClickPx=null;      // where a projected probe was clicked: see ptPlace
 // Letting go of a drag has to be handled everywhere it can happen, not just
 // on pointerup. A drag begun on the map used to become the browser's own
 // image drag: that fires pointercancel instead of pointerup, so `drag` was
@@ -3427,7 +3880,8 @@ $("#wrap").onpointerdown = ev=>{
   if(ev.button !== 0) return;         // right/middle: not a pan, and the
                                       // context menu would swallow the up
   ev.preventDefault();                // no text selection, no image drag
-  drag={x:ev.clientX, y:ev.clientY, clon:view.clon, clat:view.clat, moved:false};
+  drag={x:ev.clientX, y:ev.clientY, clon:view.clon, clat:view.clat, moved:false,
+        plon:P&&P.plon, plat:P&&P.plat};
   try{ $("#wrap").setPointerCapture(ev.pointerId); }catch(e){}   // may refuse
   $("#wrap").classList.add("drag");
 };
@@ -3441,6 +3895,15 @@ $("#wrap").onpointermove = ev=>{
   const dx=(ev.clientX-drag.x)/r.width*(b[1]-b[0]);
   const dy=(ev.clientY-drag.y)/r.height*(b[3]-b[2]);
   if(Math.abs(ev.clientX-drag.x)+Math.abs(ev.clientY-drag.y)>3) drag.moved=true;
+  if(globe()){
+    // the globe turns under the cursor: metres at the centre -> degrees of arc.
+    // Nothing is previewed (a rotation is not an image transform); the exact
+    // frame comes when the button is let go.
+    const deg=180/Math.PI/EARTH_A;
+    P.plon=((drag.plon - dx*deg + 540)%360)-180;
+    P.plat=Math.max(-90, Math.min(90, drag.plat - dy*deg));
+    return;
+  }
   view.clon=drag.clon-dx; view.clat=drag.clat+dy;
   clamp(); preview(); scalebar(); graticule(); ptMark();
   if(!covers(rendered, boxOf(view))) schedule(90);   // ran past the margin
@@ -3449,11 +3912,18 @@ $("#wrap").onpointercancel = ()=>{ if(endDrag()) schedule(0); };
 $("#wrap").ondragstart = ev=>ev.preventDefault();
 $("#wrap").onpointerup = async ev=>{
   const moved=endDrag();
-  if(moved){ schedule(0); return; }
+  if(moved){ schedule(globe() ? 150 : 0); return; }
   if(!cur) return;
   const r=$("#wrap").getBoundingClientRect(), b=boxOf(view);
-  const lon=b[0]+((ev.clientX-r.left)/r.width)*(b[1]-b[0]);
-  const lat=b[3]-((ev.clientY-r.top)/r.height)*(b[3]-b[2]);
+  let lon=b[0]+((ev.clientX-r.left)/r.width)*(b[1]-b[0]);
+  let lat=b[3]-((ev.clientY-r.top)/r.height)*(b[3]-b[2]);
+  lastClickPx={x:ev.clientX, y:ev.clientY};
+  if(P){                        // lon/lat above are metres: invert on the server
+    const q=projQ(new URLSearchParams({x:lon, y:lat, tol:(b[1]-b[0])/r.width}));
+    const u=await (await fetch("api/unproject?"+q)).json();
+    if(!u.on){ $("#probe2").textContent="off the map"; return; }
+    lon=u.lon; lat=u.lat;
+  }
   probePt={lon, lat};
   const q=new URLSearchParams({lon,lat,var:cur.name,
     time:$("#time").value,level:$("#level").value});
@@ -3471,8 +3941,14 @@ $("#wrap").onpointerup = async ev=>{
   ptOpen(lon, lat, d);
 };
 $("#grid").onchange = ()=>{ graticule(); ptMark(); };
-addEventListener("resize", ()=>{ layout(); scalebar(); graticule(); ptMark();
-  ptClamp(); });
+function relayout(){
+  if(!M || !view) return;      // the observer fires once before the page has booted
+  layout(); scalebar(); graticule(); ptMark(); ptClamp(); }
+addEventListener("resize", relayout);
+// The stage also changes size without the window doing so: the toolbar
+// wrapping to a second line, a panel opening. Sized only at load and on window
+// resize, the map box kept its first height and was cut off at top and bottom.
+if(window.ResizeObserver) new ResizeObserver(relayout).observe($("#stage"));
 // ------------------------------------------------------------ point panel
 // ncview's gesture: click the map, and this location's numbers are one button
 // away. The value is instant -- the step is already in hand -- but the series
@@ -3491,8 +3967,12 @@ function ptOpen(lon, lat, d){
   if(!caps().probe) return;
   const box=$("#point");
   const moved=PT && PT.placed;
+  // a profile on screen follows the click: the next point's column replaces it
+  const again=PT && PT.show==="profile" && PT.profile;
   PT={lon, lat, cell:d.cell, series:null, log:PT?PT.log:false, key:null,
-      placed:moved, snapped:{lon:+d.lon, lat:+d.lat}, var:cur.name};
+      placed:moved, snapped:{lon:+d.lon, lat:+d.lat}, var:cur.name,
+      profile:null, show:"series"};
+  ptProfOffer();
   box.style.display="block";
   $("#pttitle").textContent=`${d.lat}\u00b0, ${d.lon}\u00b0`+
                             (d.cell>=0 ? ` \u00b7 cell ${d.cell}` : "");
@@ -3506,6 +3986,7 @@ function ptOpen(lon, lat, d){
   ptClamp();
   ptMark();
   ptWarm();
+  if(again && cur.levels>1) ptProfile();
 }
 // The reader processes take about half a second to start, and that used to
 // land on the first series asked for. The panel being open is the earliest
@@ -3526,6 +4007,7 @@ function ptPlace(lon, lat){
   const w=box.offsetWidth||330, h=box.offsetHeight||170, pad=12;
   let px=wr.left-st.left+(lon-b[0])/(b[1]-b[0])*wr.width;
   let py=wr.top-st.top+(b[3]-lat)/(b[3]-b[2])*wr.height;
+  if(P && lastClickPx){ px=lastClickPx.x-st.left; py=lastClickPx.y-st.top; }
   if(!isFinite(px)||!isFinite(py)){ px=pad; py=pad; }
   let x=px+pad, y=py+pad;
   if(x+w>st.width-pad) x=px-w-pad;            // flip to the other side
@@ -3596,7 +4078,7 @@ $("#ptstop").onclick=()=>{
 // the clicked point, marked on the map: a cross, redrawn wherever the view goes
 function ptMark(){
   const m=$("#ptmark");
-  if(!PT || plotMode() || !$("#wrap").clientWidth){ m.style.display="none"; return; }
+  if(!PT || plotMode() || P || !$("#wrap").clientWidth){ m.style.display="none"; return; }
   const b=boxOf(view), w=$("#wrap").clientWidth, h=$("#wrap").clientHeight;
   let lon=PT.lon;
   while(lon<b[0]-180) lon+=360;              // the same point, one turn along
@@ -3623,7 +4105,7 @@ async function ptSeries(){
       // a preview arrives long before the full read: draw it rather than
       // making the user watch a counter
       if(body.values){
-        PT.series=body; ptChart();
+        PT.series=body; PT.show="series"; ptChart();
         const n=body.values.filter(v=>v!==null).length;
         $("#pthint").textContent=`preview: ${n} of ${total} steps\u2026`;
       }else{
@@ -3651,7 +4133,7 @@ async function ptSeries(){
       $("#ptgo").disabled=false; return;         // the server knew, not a
     }                                            // TypeError from undefined
     if(!PT || ptKey()!==key) return;         // moved on while it read
-    PT.series=body;
+    PT.series=body; PT.show="series";
     $("#pthint").textContent=ptSummary(body);
     $("#ptgo").disabled=false;
     $("#ptstop").style.display="none";
@@ -3661,7 +4143,115 @@ async function ptSeries(){
     $("#ptgo").disabled=false;
   }
 }
+// ---- the column under the point: every level at this step, value across and
+// level up, drawn in the series' own chart. One small read, so it follows the
+// time slider and the next click without being asked again.
+function ptProfOffer(){
+  // a derived expression and a single-level field have no column to read
+  const on=!!cur && cur.levels>1 && !!varNamed(cur.name);
+  $("#ptprof").style.display = on ? "" : "none";
+}
+let ptProfTimer=null;
+async function ptProfile(){
+  if(!PT || !cur) return;
+  const step=+$("#time").value, name=cur.name, at=[PT.lon, PT.lat];
+  const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:name, time:step});
+  try{
+    const r=await fetch("api/profile?"+q);
+    const body=await r.json();
+    if(!r.ok){ $("#pthint").textContent=
+      String(body.error).replace(/^[A-Za-z]*Error: /, ""); return; }
+    // the point, the field or the step moved on while it read
+    if(!PT || !cur || cur.name!==name || PT.lon!==at[0] || PT.lat!==at[1] ||
+       +$("#time").value!==step) return;
+    clearTimeout(ptPoll); $("#ptgo").disabled=false; $("#ptstop").style.display="none";
+    PT.profile=body; PT.show="profile";
+    $("#pthint").textContent=ptSummary(body);
+    ptChart();
+  }catch(e){ $("#pthint").textContent="profile failed: "+e; }
+}
+function ptProfFollow(){                 // the time slider moved
+  clearTimeout(ptProfTimer);
+  ptProfTimer=setTimeout(ptProfile, 120);
+}
+function ptShownData(){ return PT && (PT.show==="profile" ? PT.profile : PT.series); }
+function ptProfChart(){
+  const svg=$("#ptchart"), body=PT.profile;
+  const W=314, H=150, L=52, R=8, T=8, B=18;
+  const vals=body.values, levs=body.levels;
+  const finite=vals.filter(x=>x!==null);
+  if(!finite.length){ svg.style.display="none";
+    $("#pthint").textContent="no data in this column"; return; }
+  let lo=Math.min(...finite), hi=Math.max(...finite);
+  const logOK=PT.log && lo>0;
+  if(PT.log && !logOK) $("#pthint").textContent=
+    "log needs values above zero \u2014 drawn linear";
+  const tr=v=>logOK ? Math.log10(v) : v;
+  let tlo=tr(lo), thi=tr(hi);
+  if(thi-tlo < 1e-12){ tlo-=0.5; thi+=0.5; }
+  let zlo=Math.min(...levs), zhi=Math.max(...levs);
+  if(zhi-zlo < 1e-12){ zlo-=0.5; zhi+=0.5; }
+  const x=v=>L+(tr(v)-tlo)/(thi-tlo)*(W-L-R);
+  // up is up: a pressure axis (down) puts its largest value at the bottom
+  const y=z=>{ const t=(z-zlo)/(zhi-zlo); return T+(body.down ? t : 1-t)*(H-T-B); };
+  const f=n=>Math.abs(n)>=1e4||(n!==0&&Math.abs(n)<1e-3)
+    ? n.toExponential(1) : (+n.toPrecision(4)).toString();
+  let d="", pen=false;
+  vals.forEach((v,i)=>{
+    if(v===null){ pen=false; return; }
+    d+=(pen?"L":"M")+x(v).toFixed(1)+" "+y(levs[i]).toFixed(1)+" "; pen=true;
+  });
+  const ticks=[0, 0.5, 1].map(t=>{
+    const z=zlo+(zhi-zlo)*t, yy=y(z);
+    return `<text x="${L-5}" y="${(yy+3).toFixed(1)}" text-anchor="end">${f(z)}</text>`+
+           `<line class="ax" x1="${L}" y1="${yy.toFixed(1)}" `+
+           `x2="${L+3}" y2="${yy.toFixed(1)}"/>`;
+  });
+  // the level the map is showing, as a rule across and a dot on the line
+  const k=+$("#level").value, onLine=k<vals.length && vals[k]!==null;
+  const ky=k<levs.length ? y(levs[k]) : null;
+  const ends=logOK ? [lo, hi] : [tlo, thi];
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML=
+    `<line class="ax" x1="${L}" y1="${T}" x2="${L}" y2="${H-B}"/>`+
+    `<line class="ax" x1="${L}" y1="${H-B}" x2="${W-R}" y2="${H-B}"/>`+
+    ticks.join("")+
+    `<text x="${L}" y="${H-6}">${f(ends[0])}</text>`+
+    `<text x="${W-R}" y="${H-6}" text-anchor="end">${f(ends[1])}</text>`+
+    `<text x="${(L+W-R)/2}" y="${H-6}" text-anchor="middle">`+
+      `${esc(body.axis)}${body.axis_units ? " ["+esc(body.axis_units)+"]" : ""}`+
+      ` \u2191</text>`+
+    (ky!==null ? `<line class="now" x1="${L}" y1="${ky.toFixed(1)}" `+
+                 `x2="${W-R}" y2="${ky.toFixed(1)}"/>` : "")+
+    `<path class="ln" d="${d.trim()}"/>`+
+    (onLine ? `<circle class="lev" cx="${x(vals[k]).toFixed(1)}" `+
+              `cy="${ky.toFixed(1)}" r="2.6"/>` : "")+
+    `<rect class="hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}"/>`;
+  svg.style.display="block";
+  const nearest=ev=>{
+    const r=svg.getBoundingClientRect();
+    const py=(ev.clientY-r.top)/r.height*H;
+    let best=0, gap=Infinity;
+    levs.forEach((z,i)=>{ const g=Math.abs(y(z)-py); if(g<gap){ gap=g; best=i; } });
+    return best;
+  };
+  const hit=svg.querySelector(".hit");
+  hit.onmousemove=ev=>{ const i=nearest(ev), v=vals[i];
+    $("#pthint").textContent=`level ${i} \u00b7 ${f(levs[i])} ${body.axis_units} \u00b7 `+
+                             (v===null ? "no data" : f(v)); };
+  hit.onmouseleave=()=>{ $("#pthint").textContent=ptSummary(body); };
+  // click a level on the profile and the map goes there
+  hit.onclick=ev=>{ nudge("#level", 0, nearest(ev)); };
+}
 function ptSummary(body){
+  if(body.levels){
+    const v=body.values.filter(x=>x!==null);
+    if(!v.length) return "no data in this column";
+    const g=x=>Math.abs(x)>=1e4||(x!==0&&Math.abs(x)<1e-3)
+      ? x.toExponential(2) : x.toPrecision(4);
+    return `${v.length} levels \u00b7 ${body.time} \u00b7 min ${g(Math.min(...v))} `+
+           `\u00b7 max ${g(Math.max(...v))}`;
+  }
   const v=body.values.filter(x=>x!==null);
   if(!v.length) return "no data at this point";
   const mean=v.reduce((a,b)=>a+b,0)/v.length;
@@ -3679,6 +4269,7 @@ function ptSummary(body){
 // A small SVG rather than a plotted PNG: it redraws on hover and on the time
 // slider without asking the server for anything.
 function ptChart(){
+  if(PT && PT.show==="profile" && PT.profile) return ptProfChart();
   const svg=$("#ptchart"), body=PT&&PT.series;
   if(!body){ svg.style.display="none"; return; }
   const W=314, H=150, L=52, R=6, T=8, B=18;   // L fits "0.008264", which
@@ -3758,7 +4349,7 @@ function ptShown(on){
 function ptStale(why){
   clearTimeout(ptPoll);
   if(!PT) return;
-  PT.series=null; PT.key=null;
+  PT.series=null; PT.key=null; PT.profile=null; PT.show="series";
   $("#ptchart").style.display="none";
   $("#ptgo").disabled=false;                 // a read in flight is abandoned,
   $("#ptstop").style.display="none";         // so the button must come back
@@ -3768,8 +4359,11 @@ function ptStale(why){
 // were all about the old one. Re-probe the same place for the new field.
 async function ptRefresh(){
   if(!PT || !cur || plotMode()) return;
+  const again=PT.show==="profile" && PT.profile;
   ptStale("variable changed");
   PT.var=cur.name;
+  ptProfOffer();
+  if(again && cur.levels>1 && varNamed(cur.name)) ptProfile();
   $("#ptnow").innerHTML=`${cur.label}<br><b>\u2026</b>`;
   const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
                                time:$("#time").value, level:$("#level").value});
@@ -3786,13 +4380,15 @@ async function ptRefresh(){
   }catch(e){ $("#pthint").textContent="probe failed: "+e; }
 }
 $("#ptgo").onclick=ptSeries;
+$("#ptprof").onclick=ptProfile;
 $("#ptclose").onclick=ptClose;
 $("#ptlog").onclick=()=>{
-  if(!PT || !PT.series) return;
-  const v=PT.series.values.filter(x=>x!==null);
+  const shown=ptShownData();
+  if(!shown) return;
+  const v=shown.values.filter(x=>x!==null);
   if(!PT.log && (!v.length || Math.min(...v)<=0)){
     // lighting the button over a linear line is the lie; decline out loud
-    $("#pthint").textContent="log needs values above zero \u2014 this series "+
+    $("#pthint").textContent="log needs values above zero \u2014 this one "+
                              "reaches "+(v.length?Math.min(...v):"nothing");
     return;
   }
@@ -3801,8 +4397,16 @@ $("#ptlog").onclick=()=>{
   ptChart();
 };
 function ptRows(){
-  const body=PT && PT.series;
+  const body=ptShownData();
   if(!body) return null;
+  if(body.levels){
+    const unit=body.axis_units ? ` [${body.axis_units}]` : "";
+    const head=`# ${cur.label} at ${body.lat}, ${body.lon}, ${body.time}\\n`+
+               `level,${body.axis}${unit},value\\n`;
+    const rows=body.levels.map((z,i)=>
+      `${i},${z},${body.values[i]===null?"":body.values[i]}`);
+    return {text:head+rows.join("\\n")+"\\n", n:rows.length, what:"profile"};
+  }
   if(body.preview){
     // 1400 empty rows labelled "1500 rows copied" is not an export
     $("#pthint").textContent="still a preview \u2014 wait for the full series";
@@ -3817,6 +4421,7 @@ function ptRows(){
 $("#ptsave").onclick=()=>{
   const out=ptRows(); if(!out) return;
   const name=`${(cur.name||"series").replace(/[^A-Za-z0-9._-]+/g,"_")}_`+
+             (out.what ? out.what+"_" : "")+
              `${PT.snapped.lat}_${PT.snapped.lon}.csv`;
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([out.text], {type:"text/csv"}));
@@ -3825,8 +4430,6 @@ $("#ptsave").onclick=()=>{
   $("#pthint").textContent=`${out.n} rows \u2192 ${name}`;
 };
 $("#ptcsv").onclick=async ()=>{
-  if(!PT || !PT.series) return;
-  const body=PT.series;
   const out=ptRows(); if(!out) return;
   try{
     if(!navigator.clipboard) throw new Error("no clipboard over plain HTTP");
@@ -3879,6 +4482,7 @@ async function dimsAfter(){
 }
 const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");
 
+foldBoot();
 boot();
 </script></body></html>
 """

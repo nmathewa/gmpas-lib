@@ -212,8 +212,73 @@ range so it stops rescaling as you move through time (important when
 comparing timesteps: an auto-scaling colourbar makes everything look the
 same).
 
+**Colour steps** — the `levels` box under "colour options" takes a Ferret-style
+expression, so one field replaces a row of controls:
+
+| `levels` | Meaning |
+|---|---|
+| `20` | twenty equal steps over the colour range |
+| `(,,2.5)` | a step every 2.5, on its multiples, over the colour range |
+| `(-25,0,5)(0,25,1)` | steps of different sizes: every 5 below zero, every 1 above |
+| `(0)(1)(2)(5)(10)` | the levels themselves |
+| `(-inf)(0,30,2)(inf)` | open ends: values beyond them take the under/over colour |
+
+Each step takes an equal share of the colormap and of the key, whatever its
+width. Levels that name both ends set the colour range.
+
+**Map projection** — the "projection" list redraws the fast map in another
+projection: orthographic (drag to turn the globe), polar stereographic,
+Lambert conformal, Mercator, Robinson or Equal Earth. "auto" picks one from
+the data: Mercator for a small tropical region, Lambert conformal at mid
+latitudes, polar stereographic near a pole, orthographic for a large region,
+and the plain lon/lat map for global data. Zoom, pan and the probe work the
+same; the graticule is drawn on the lon/lat map only.
+
+**Scripts** — the "script" box under the variable list holds a view as a few
+lines of text. "from view" writes the current view; "apply" (or Ctrl-Enter)
+sets it. Only the keys a script names change, and a key with nothing after
+the `=` clears that setting.
+
+```
+# 2 m temperature over the Maritime Continent
+var    = t2m
+time   = -1
+cmap   = RdBu_r
+levels = (-inf)(290,304,1)(inf)
+proj   = Mercator
+region = 95, 125, -10, 10
+```
+
+| key | what it takes |
+|---|---|
+| `var` | a variable, or a derived expression such as `a - b` |
+| `time` | a step number (0 first, -1 last) or the step's label |
+| `level` | a level number, 0 first |
+| `cmap`, `vmin`, `vmax` | the palette and the colour range |
+| `levels`, `reverse`, `norm`, `extend`, `center`, ... | the colour options, as in the form |
+| `proj` | `lonlat`, `auto`, or a projection name; `plon` and `plat` set its centre |
+| `region` | west, east, south, north in degrees |
+| `box` | the view box in a projection's own units (what "from view" writes there) |
+
+A line starting with `#` or `!` is a comment. A script is checked against the
+open file before anything changes, and a mistake is reported with its line
+number. `gmpas view run/ --script view.txt` opens the viewer on a saved view.
+
 **Click the map to probe** — gives you the exact cell number, its lat/lon,
-and the value there.
+and the value there. The panel that opens has two buttons: "time series"
+reads that point through the run, and "profile" draws the column under it —
+the value on every level at the current step, on the file's own vertical
+coordinate (pressure, height from `zgrid`, or the level index). The profile
+follows the time slider and the next click; click a level on it to move the
+map there. "copy" and "save" give the numbers as CSV.
+
+**Vertical section** — for a field with levels, the "plot" list has "vertical
+section along a path". Give the two end points (or "use view" for west to
+east through the middle of the map) and it draws the field along the great
+circle between them: one column per cell the path crosses, as wide as the
+path inside it, one row per level in the file. Nothing is interpolated. It
+works on MPAS output and on lat/lon files, and "data" exports the numbers as
+netCDF.
 
 **A graticule and scale bar**, both toggleable. The graticule is drawn in the
 browser, so it toggles without a round trip.
@@ -251,6 +316,10 @@ in the background and plays them when ready. Several can load independently.
   inspection, wrong for budgets. Use `gmpas remap` when the numbers must add
   up.
 - **animation (GIF)**
+
+**Fold a section** of the options panel by clicking its heading; click again
+to open it. A folded section keeps its settings, and stays folded the next
+time the page opens in the same browser.
 
 **Keys**, as in ncview. They do what the matching control does, and are
 ignored while typing in a field. `?` shows them on the page.

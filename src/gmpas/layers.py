@@ -107,7 +107,7 @@ _CONTOUR_HIGHLIGHT = {
     "zero_bold": {"type": "bool", "default": False,
                   "help": "draw the 0 contour at the highlight width (Ferret, GrADS)"},
 }
-_RESOLUTIONS = ["110m", "50m", "10m"]
+_RESOLUTIONS = ["auto", "110m", "50m", "10m"]   # auto: by the map's extent, as the fast map
 
 LAYER_KINDS: dict[str, dict] = {
     # -- fields ------------------------------------------------------------
@@ -210,7 +210,7 @@ LAYER_KINDS: dict[str, dict] = {
         "label": "coastlines", "group": "feature", "needs": [],
         "options": {"color": {"type": "color", "default": "black"},
                     "linewidth": {"type": "float", "default": 0.7, "min": 0.0},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "borders": {
@@ -219,33 +219,33 @@ LAYER_KINDS: dict[str, dict] = {
                     "linewidth": {"type": "float", "default": 0.5, "min": 0.0},
                     "linestyle": {"type": "choice", "default": "solid",
                                   "choices": _LINESTYLES},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "land": {
         "label": "land fill", "group": "feature", "needs": [],
         "options": {"facecolor": {"type": "color", "default": "#e8e2d0"},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "ocean": {
         "label": "ocean fill", "group": "feature", "needs": [],
         "options": {"facecolor": {"type": "color", "default": "#cfe3f0"},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "lakes": {
         "label": "lakes", "group": "feature", "needs": [],
         "options": {"facecolor": {"type": "color", "default": "#cfe3f0"},
                     "edgecolor": {"type": "color", "default": "#555555"},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "rivers": {
         "label": "rivers", "group": "feature", "needs": [],
         "options": {"color": {"type": "color", "default": "#3a7bbf"},
                     "linewidth": {"type": "float", "default": 0.5, "min": 0.0},
-                    "resolution": {"type": "choice", "default": "110m",
+                    "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
     "gridlines": {
@@ -280,7 +280,9 @@ PROJECTIONS = ["PlateCarree", "Robinson", "Mollweide", "EqualEarth", "Orthograph
                "NorthPolarStereo", "SouthPolarStereo", "LambertConformal", "Mercator"]
 
 FIGURE_OPTIONS = {
-    "projection": {"type": "choice", "default": "PlateCarree", "choices": PROJECTIONS},
+    "projection": {"type": "choice", "default": "PlateCarree",
+                   "choices": [*PROJECTIONS, "auto"],
+                   "help": "auto picks one from the view (gmpas.projection.auto_projection)"},
     "central_longitude": {"type": "float", "default": None,
                           "help": "empty centres on the view"},
     "central_latitude": {"type": "float", "default": None,
@@ -776,6 +778,21 @@ def _auto_range(values, opts: dict) -> tuple[float, float]:
     return lo, hi
 
 
+def _resolve_auto(fig_opts: dict, box) -> dict:
+    """`projection: "auto"` made concrete for this view; an explicit centre in
+    the stack still wins over the one the rule picks."""
+    from .projection import auto_projection
+
+    name, params = auto_projection(box)
+    out = {**fig_opts, "projection": name}
+    for key in ("central_longitude", "central_latitude"):
+        if out.get(key) is None and key in params:
+            out[key] = params[key]
+    if "standard_parallels" in params:
+        out["standard_parallels"] = params["standard_parallels"]
+    return out
+
+
 def _projection(fig_opts: dict, box, ccrs):
     name = fig_opts.get("projection") or "PlateCarree"
     clon = fig_opts.get("central_longitude")
@@ -795,7 +812,8 @@ def _projection(fig_opts: dict, box, ccrs):
         # cartopy's default standard parallels are northern (33, 45) wherever
         # the map is centred, which leaves a southern map on a northern cone
         # -- singular at the very pole the map is looking at
-        parallels = (-33.0, -45.0) if lat0 < 0 else (33.0, 45.0)
+        parallels = fig_opts.get("standard_parallels") or \
+            ((-33.0, -45.0) if lat0 < 0 else (33.0, 45.0))
         proj = ccrs.LambertConformal(central_longitude=lon0, central_latitude=lat0,
                                      standard_parallels=parallels)
     elif name in ("NorthPolarStereo", "SouthPolarStereo"):
@@ -947,6 +965,8 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
     layers = [layer for layer in stack["layers"] if layer["visible"]]
     box = (float(extent[0]), float(extent[1]),
            max(-90.0, float(extent[2])), min(90.0, float(extent[3])))
+    if fig_opts.get("projection") == "auto":
+        fig_opts = _resolve_auto(fig_opts, box)
     proj, src, framed = _projection(fig_opts, box, ccrs)
     plate = isinstance(proj, ccrs.PlateCarree)
     # data in the map's own longitude frame when the map is PlateCarree: see
@@ -1144,6 +1164,11 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                 gl.geo_labels = False            # see plot._basemap: the y=inf title bug
         else:
             category, name = _NATURAL_EARTH[kind]
+            if opts["resolution"] == "auto":
+                # the fast map's rule (viewer.coast_scale): 50m down to 10
+                # degrees wide, 10m below, nothing fetched that is not on disk
+                from .viewer import coast_scale
+                opts = {**opts, "resolution": coast_scale(float(box[1] - box[0]))}
             _ensure_natural_earth(category, name, opts["resolution"])
             if kind == "coastlines":
                 ax.coastlines(resolution=opts["resolution"], color=opts["color"],
