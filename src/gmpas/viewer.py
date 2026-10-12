@@ -1909,6 +1909,12 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
        width:100%;box-sizing:border-box;font-size:11px;padding:2px 4px}
 #lyEdit .f .pair{display:flex;gap:4px}
 #lyEdit .f input[type=color]{width:26px;padding:0;flex:none}
+/* the right panel's sections fold to their heading, as the script box does */
+#right .sec>label.fold{cursor:pointer;user-select:none}
+#right .sec>label.fold::before{content:"\u25be";display:inline-block;width:12px}
+#right .sec.min>label.fold::before{content:"\u25b8"}
+#right .sec.min>label.fold{margin-bottom:0}
+#right .sec.min>:not(label.fold){display:none!important}
 #scriptsec summary{cursor:pointer;color:var(--dim);font-size:11px;
                    text-transform:uppercase;letter-spacing:.06em}
 #scriptBox{width:100%;box-sizing:border-box;height:150px;font:11px monospace;
@@ -2377,6 +2383,31 @@ async function boot(){
     if(await scriptRun(M.script.startup, first.name)) return;
   }
   if(!cur) pick(first.name);
+}
+// ------------------------------------------------------------------- fold
+// A section of the right panel folds to its heading on a click, and stays
+// folded on the next visit. Only what is drawn changes: a folded section's
+// controls keep their values and still apply.
+const FOLD_KEY="gmpas.fold";
+function foldBoot(){
+  let shut=[];
+  try{ shut=JSON.parse(localStorage.getItem(FOLD_KEY)||"[]")||[]; }catch(e){}
+  if(!Array.isArray(shut)) shut=[];
+  for(const sec of document.querySelectorAll("#right > .sec")){
+    const head=sec.querySelector(":scope > label");
+    if(!head || !sec.id) continue;
+    head.classList.add("fold"); head.tabIndex=0; head.setAttribute("role","button");
+    const set=min=>{ sec.classList.toggle("min",min);
+                     head.setAttribute("aria-expanded", String(!min)); };
+    set(shut.includes(sec.id));
+    const flip=()=>{
+      set(!sec.classList.contains("min"));
+      const ids=[...document.querySelectorAll("#right > .sec.min")].map(s=>s.id);
+      try{ localStorage.setItem(FOLD_KEY, JSON.stringify(ids)); }catch(e){}
+    };
+    head.onclick=flip;
+    head.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); flip(); } };
+  }
 }
 // ------------------------------------------------------------------ script
 // The view as a few lines of text (gmpas/script.py). The server parses and
@@ -4451,6 +4482,7 @@ async function dimsAfter(){
 }
 const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");
 
+foldBoot();
 boot();
 </script></body></html>
 """

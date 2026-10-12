@@ -317,6 +317,10 @@ in the background and plays them when ready. Several can load independently.
   up.
 - **animation (GIF)**
 
+**Fold a section** of the options panel by clicking its heading; click again
+to open it. A folded section keeps its settings, and stays folded the next
+time the page opens in the same browser.
+
 **Keys**, as in ncview. They do what the matching control does, and are
 ignored while typing in a field. `?` shows them on the page.
 
