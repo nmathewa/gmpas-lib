@@ -234,6 +234,36 @@ latitudes, polar stereographic near a pole, orthographic for a large region,
 and the plain lon/lat map for global data. Zoom, pan and the probe work the
 same; the graticule is drawn on the lon/lat map only.
 
+**Scripts** — the "script" box under the variable list holds a view as a few
+lines of text. "from view" writes the current view; "apply" (or Ctrl-Enter)
+sets it. Only the keys a script names change, and a key with nothing after
+the `=` clears that setting.
+
+```
+# 2 m temperature over the Maritime Continent
+var    = t2m
+time   = -1
+cmap   = RdBu_r
+levels = (-inf)(290,304,1)(inf)
+proj   = Mercator
+region = 95, 125, -10, 10
+```
+
+| key | what it takes |
+|---|---|
+| `var` | a variable, or a derived expression such as `a - b` |
+| `time` | a step number (0 first, -1 last) or the step's label |
+| `level` | a level number, 0 first |
+| `cmap`, `vmin`, `vmax` | the palette and the colour range |
+| `levels`, `reverse`, `norm`, `extend`, `center`, ... | the colour options, as in the form |
+| `proj` | `lonlat`, `auto`, or a projection name; `plon` and `plat` set its centre |
+| `region` | west, east, south, north in degrees |
+| `box` | the view box in a projection's own units (what "from view" writes there) |
+
+A line starting with `#` or `!` is a comment. A script is checked against the
+open file before anything changes, and a mistake is reported with its line
+number. `gmpas view run/ --script view.txt` opens the viewer on a saved view.
+
 **Click the map to probe** — gives you the exact cell number, its lat/lon,
 and the value there.
 

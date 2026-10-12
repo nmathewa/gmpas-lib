@@ -40,6 +40,7 @@ from . import colour as _colour
 from . import jobs as _jobs
 from . import data as _data
 from . import derive as _derive
+from . import script as _script
 from . import timing
 from .cache import BuildCache
 from .mesh import MpasMesh
@@ -1298,8 +1299,12 @@ def _handler(viewer: Viewer, html: str = ""):
                         "labels": viewer.series.labels,
                     }).encode(), "application/json")
                 if url.path == "/api/meta":
-                    return self._send(json.dumps(viewer.describe()).encode(),
-                                      "application/json")
+                    # the script box is the server's: the static demo, which
+                    # bakes describe() alone, has no parser and shows no box
+                    meta = {**viewer.describe(),
+                            "script": {"keys": _script.keys(),
+                                       "startup": _script.startup()}}
+                    return self._send(json.dumps(meta).encode(), "application/json")
                 if url.path == "/api/dims":
                     return _serve_dims(self, viewer, q)
                 if url.path == "/api/layers/bind" and hasattr(viewer, "bind_preset"):
@@ -1420,6 +1425,22 @@ def _handler(viewer: Viewer, html: str = ""):
                     params = {} if name == "auto" else \
                         _proj_params({**q, "proj": name}, viewer)[1]
                     return self._send(json.dumps(viewer.projected_home(name, params)).encode(),
+                                      "application/json")
+                if url.path == "/api/script":
+                    try:
+                        state = _script.resolve(_script.parse(q.get("text", "")),
+                                                viewer.describe())
+                    except _script.ScriptError as exc:
+                        return self._send(json.dumps({"error": str(exc)}).encode(),
+                                          "application/json", 400)
+                    return self._send(json.dumps(state).encode(), "application/json")
+                if url.path == "/api/projbox":
+                    # a lon/lat region as the box that holds it in a projection
+                    from .projection import make_crs, projected_extent
+
+                    region = [float(v) for v in q["region"].split(",")]
+                    box = projected_extent(make_crs(*_proj_params(q, viewer)), region)
+                    return self._send(json.dumps({"extent": list(box)}).encode(),
                                       "application/json")
                 if url.path == "/api/unproject":
                     out = viewer.unproject(_proj_params(q, viewer), float(q["x"]),
@@ -1859,6 +1880,12 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
        width:100%;box-sizing:border-box;font-size:11px;padding:2px 4px}
 #lyEdit .f .pair{display:flex;gap:4px}
 #lyEdit .f input[type=color]{width:26px;padding:0;flex:none}
+#scriptsec summary{cursor:pointer;color:var(--dim);font-size:11px;
+                   text-transform:uppercase;letter-spacing:.06em}
+#scriptBox{width:100%;box-sizing:border-box;height:150px;font:11px monospace;
+           margin-top:6px;resize:vertical;white-space:pre}
+#scriptsec .row{display:flex;gap:6px}
+#scripthint.bad{color:#e88}
 #lyJsonBox{width:100%;box-sizing:border-box;height:180px;font:11px monospace;margin-top:6px}
 #lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
 #hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
@@ -1974,6 +2001,15 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
       <button id="deriveBtn">show</button>
     </div>
   </div>
+  <details class="sec" id="scriptsec" style="display:none"><summary>script</summary>
+    <textarea id="scriptBox" spellcheck="false"
+      placeholder="var = t2m&#10;time = 0&#10;levels = (0,30,2)&#10;proj = Mercator"></textarea>
+    <div class="row" style="margin-top:6px"><button id="scriptApply" style="flex:1">apply</button>
+      <button id="scriptFrom" title="write this view as a script">from view</button>
+      <button id="scriptCopy">copy</button></div>
+    <div class="hint" id="scripthint">one <i>key = value</i> per line; # starts a
+      comment. Only what is named changes.</div>
+  </details>
 </div>
 <div id="keyhelp"><div><b>keys</b><br>
   <kbd>\u2190</kbd><kbd>\u2192</kbd>previous / next time step<br>
@@ -2233,15 +2269,19 @@ function clamp(){
 // The mesh framed in a projection comes from the server (/api/projview), with
 // every parameter filled in so later requests name the same map; "auto" lets
 // gmpas/projection.auto_projection choose. "" is the lon/lat map.
-async function setProjection(name){
+async function setProjection(name, centre){
   stopPlayback();
   if(!name){
     P=null; $("#projhint").textContent="";
     home=fit(M.home);
   }else{
-    const r=await fetch("api/projview?proj="+encodeURIComponent(name));
+    const q=new URLSearchParams({proj:name});
+    // a script names the centre it was written with: a turned globe comes back
+    if(centre && name!=="auto") ["plon","plat"].forEach(k=>{
+      if(centre[k]!=null) q.set(k, centre[k]); });
+    const r=await fetch("api/projview?"+q);
     const d=await r.json();
-    if(!r.ok){ say(d.error); $("#proj").value=P ? $("#proj").value : ""; return; }
+    if(!r.ok){ say(d.error); $("#proj").value=P ? P.proj : ""; return; }
     if(d.proj==="PlateCarree"){
       // "auto" keeps a global mesh (and a tall tropical box) on today's lon/lat
       // map: draw that map itself, in degrees, rather than a projection whose
@@ -2299,8 +2339,112 @@ async function boot(){
   // "loading…" with no explanation
   const first = M.variables.find(v=>!v.static) ?? M.variables[0];
   if(!first){ say("this file has no variables to draw"); return; }
-  pick(first.name);
+  scriptBoot();
+  if(M.script && M.script.startup){      // gmpas view --script
+    $("#scriptBox").value=M.script.startup; $("#scriptsec").open=true;
+    if(await scriptRun(M.script.startup, first.name)) return;
+  }
+  if(!cur) pick(first.name);
 }
+// ------------------------------------------------------------------ script
+// The view as a few lines of text (gmpas/script.py). The server parses and
+// checks a script against the open file and answers with plain settings; this
+// only puts them where the controls already keep them, so a script can do
+// nothing the controls cannot. Writing one from the view is the same in
+// reverse, and the two are tested against each other.
+function scriptBoot(){
+  if(!M.script) return;
+  $("#scriptsec").style.display="";
+  $("#scripthint").title=Object.entries(M.script.keys)
+    .map(([k,h])=>`${k}: ${h}`).join("\\n");
+}
+function scriptSay(text, bad){
+  const h=$("#scripthint"); h.textContent=text; h.classList.toggle("bad", !!bad);
+}
+// A script changes several things at once, and each control would ask for
+// its own frame. Held, they ask for none; one frame is drawn at the end.
+let HOLD=false;
+function scriptNum(v){ return String(+(+v).toPrecision(10)); }
+function scriptText(){
+  const rows=[["var", cur.name], ["time", $("#time").value],
+              ["level", $("#level").value], ["cmap", $("#cmap").value],
+              ["vmin", $("#vmin").value.trim()], ["vmax", $("#vmax").value.trim()]];
+  if(M.projections){
+    rows.push(["proj", P ? P.proj : "lonlat"]);
+    if(P && P.plon!=null) rows.push(["plon", scriptNum(P.plon)]);
+    if(P && P.plat!=null) rows.push(["plat", scriptNum(P.plat)]);
+  }
+  rows.push([P ? "box" : "region", boxOf(view).map(scriptNum).join(", ")]);
+  if(M.colour_options) Object.keys(M.colour_options).forEach(k=>{
+    if(COL[k]!=null) rows.push([k, String(COL[k])]); });
+  const w=Math.max(...rows.map(r=>r[0].length));
+  return rows.map(([k,v])=>`${k.padEnd(w)} = ${v}`.trimEnd()).join("\\n")+"\\n";
+}
+async function scriptRun(text, first){
+  const r=await fetch("api/script?"+new URLSearchParams({text}));
+  const s=await r.json();
+  if(!r.ok){ scriptSay(String(s.error).replace(/^[A-Za-z]*Error: /, ""), true); return false; }
+  HOLD=true;
+  try{ return await scriptSet(s, first); }
+  finally{ HOLD=false; rendered=null; overlay(); draw(); panel(); }
+}
+async function scriptSet(s, first){
+  stopPlayback();
+  if(!cur) pick(s.var!=null && varNamed(s.var) ? s.var : first);
+  if(s.var!=null && s.var!==cur.name){
+    // the level and the plot kind follow the variable, as on a click
+    const keep=$("#level").value;
+    if(varNamed(s.var)) pick(s.var); else pickDerived(s.var);
+    if(!("level" in s)){ $("#level").value=Math.min(keep, cur.levels-1);
+      $("#llab").textContent=$("#level").value; }
+  }
+  if(s.time!=null){ $("#time").value=s.time; $("#tlab").textContent=M.labels[s.time]; }
+  if("level" in s){
+    const lev=s.level==null ? 0 : s.level;
+    if(lev>cur.levels-1){ scriptSay(`level: ${lev} is outside ${cur.name}'s `+
+      `${cur.levels} level(s)`, true); return false; }
+    $("#level").value=lev; $("#llab").textContent=lev;
+  }
+  if(s.cmap!=null) $("#cmap").value=s.cmap;
+  ["vmin","vmax"].forEach(k=>{ if(k in s) $("#"+k).value = s[k]==null ? "" : s[k]; });
+  if(s.colour){
+    Object.entries(s.colour).forEach(([k,v])=>{ if(v==null) delete COL[k]; else COL[k]=v; });
+    try{ localStorage.setItem(colourKey(), JSON.stringify(COL)); }catch(e){}
+    colourForm();
+  }
+  if("proj" in s || (P && (s.plon!=null || s.plat!=null))){
+    const name="proj" in s ? s.proj : P.proj;
+    $("#proj").value=name;
+    await setProjection(name, {plon:s.plon, plat:s.plat});
+  }
+  let box=s.box;
+  if(s.region){
+    box=s.region;
+    if(P){
+      const q=projQ(new URLSearchParams({region:s.region.join(",")}));
+      const got=await fetch("api/projbox?"+q), d=await got.json();
+      if(!got.ok){ scriptSay(String(d.error).replace(/^[A-Za-z]*Error: /, ""), true);
+        return false; }
+      box=d.extent;
+    }
+  }
+  if(box){ view=fit(box); clamp(); }
+  else if("region" in s || "box" in s){ view={...home}; clamp(); }
+  if(PT) ptStale("the view changed");
+  scriptSay("applied");
+  return true;
+}
+$("#scriptApply").onclick = ()=>scriptRun($("#scriptBox").value);
+$("#scriptFrom").onclick = ()=>{ if(!cur) return;
+  $("#scriptBox").value=scriptText(); scriptSay("this view, as a script"); };
+$("#scriptCopy").onclick = ()=>{
+  navigator.clipboard?.writeText($("#scriptBox").value); scriptSay("copied"); };
+$("#scriptBox").addEventListener("keydown", e=>{
+  e.stopPropagation();                 // typing is not the map's arrow keys
+  if(e.key==="Enter" && (e.ctrlKey||e.metaKey)){ e.preventDefault();
+    $("#scriptApply").click(); }
+});
+
 // ------------------------------------------------------- dimension mapping
 // Which dimension is x, y, time and level. Shown when the server could not
 // work it out, when it had to guess, and on demand -- the guess that draws a
@@ -2519,9 +2663,11 @@ function overlaySize(){
   return [fit(r.width||M.nx), fit(r.height||M.ny)];
 }
 async function overlay(){
+  if(HOLD) return;
   const b=outset(boxOf(view)), [nx, ny]=overlaySize();
-  $("#over").src=`api/overlay?extent=${b.join(",")}&nx=${nx}&ny=${ny}`;
-  if(P) $("#over").src+="&"+projQ(new URLSearchParams());
+  // one assignment: setting src twice starts a request only to abandon it
+  $("#over").src=`api/overlay?extent=${b.join(",")}&nx=${nx}&ny=${ny}`+
+    (P ? "&"+projQ(new URLSearchParams()) : "");
 }
 
 // show the frame we already have, transformed into place, until the real one
@@ -2738,7 +2884,7 @@ $("#colourReset").onclick=()=>{
 };
 
 async function draw(){
-  if(!cur) return;
+  if(!cur || HOLD) return;
   if(plotMode()) return drawPlot();
   // Selecting something new mid-render used to queue behind the render
   // already in flight, so switching variable/time/level while a frame was

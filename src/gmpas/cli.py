@@ -662,6 +662,11 @@ def _kind(args) -> str:
 
 
 def _view(args) -> int:
+    if getattr(args, "script", None):
+        from . import script
+
+        # a script that does not parse is an error here, before anything binds
+        script.set_startup(Path(args.script).read_text())
     if _kind(args) != "mpas":                # "ask" opens the setup panel
         return _generic_view(args)
     return _dashboard(args, data_path=args.path, mesh_path=args.mesh or "",
@@ -966,6 +971,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "node so a tunnel from the login node can reach it")
     v.add_argument("--width", type=int, default=1200, help="raster width in pixels")
     v.add_argument("--height", type=int, default=700)
+    v.add_argument("--script", metavar="FILE",
+                   help="open on the view this script describes: lines of "
+                        "key = value (var, time, level, cmap, levels, proj, "
+                        "region, ...), as the page's script box writes them")
     browser_opts(v)
     v.set_defaults(func=_view)
 
