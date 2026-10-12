@@ -482,7 +482,7 @@ def test_every_plot_kind_declares_what_its_controls_can_do(gv):
     assert [k for k, c in KIND_CAPS.items() if c["frames"]] == ["map"]
     assert [k for k, c in KIND_CAPS.items() if c["pan"]] == ["map"]
     # netCDF holds the numbers behind a picture the input files do not have
-    assert [k for k, c in KIND_CAPS.items() if c["data"]] == ["hovmoller"]
+    assert [k for k, c in KIND_CAPS.items() if c["data"]] == ["hovmoller", "section"]
     for kind in ("layers", "hovmoller", "series"):
         assert not KIND_CAPS[kind]["options"], kind
 

@@ -265,7 +265,20 @@ open file before anything changes, and a mistake is reported with its line
 number. `gmpas view run/ --script view.txt` opens the viewer on a saved view.
 
 **Click the map to probe** — gives you the exact cell number, its lat/lon,
-and the value there.
+and the value there. The panel that opens has two buttons: "time series"
+reads that point through the run, and "profile" draws the column under it —
+the value on every level at the current step, on the file's own vertical
+coordinate (pressure, height from `zgrid`, or the level index). The profile
+follows the time slider and the next click; click a level on it to move the
+map there. "copy" and "save" give the numbers as CSV.
+
+**Vertical section** — for a field with levels, the "plot" list has "vertical
+section along a path". Give the two end points (or "use view" for west to
+east through the middle of the map) and it draws the field along the great
+circle between them: one column per cell the path crosses, as wide as the
+path inside it, one row per level in the file. Nothing is interpolated. It
+works on MPAS output and on lat/lon files, and "data" exports the numbers as
+netCDF.
 
 **A graticule and scale bar**, both toggleable. The graticule is drawn in the
 browser, so it toggles without a round trip.

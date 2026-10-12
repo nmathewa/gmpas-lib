@@ -22,6 +22,7 @@ views a map raster cannot show.
 from __future__ import annotations
 
 import io
+import math
 import sys
 import threading
 import time as _time
@@ -37,6 +38,7 @@ from . import jobs as _jobs
 from . import layers as _layers
 from . import netcdf, palettes, timing
 from . import projection as _projection
+from .mesh import EARTH_RADIUS
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
 from .viewer import _overlay, _png, _proj_key, data_range
@@ -47,6 +49,10 @@ from .viewer import _overlay, _png, _proj_key, data_range
 # variable's name as the weakest tiebreak rather than the only test. A name
 # list alone misses `nav_lat` or a `lat` spelled some other way, and trusts a
 # `lat` that is actually metres.
+
+#: the sphere a section's distances are measured on: the MPAS one, so a
+#: path is as long here as on a run
+_EARTH_KM = EARTH_RADIUS / 1000.0
 
 #: normalised by `_norm_units`: lower-case, no spaces or underscores
 _LAT_UNITS = {"degreesnorth", "degreenorth", "degreesn", "degreen"}
@@ -295,6 +301,7 @@ KIND_LABELS = {
     "series": "line: time series at point",
     "hovmoller": "Hovmöller (time × lon)",
     "profile": "line: profile at point",
+    "section": "vertical section along a path",
     "layers": "layers (composite)",
 }
 _GRID_KINDS = ("pcolormesh", "contourf", "contour", "imshow")
@@ -330,6 +337,10 @@ KIND_CAPS = {
     # the band options the encoder applies are not part of a matplotlib figure
     "hovmoller": {**_KIND_FIGURE, "options": False, "probe": False, "gif": False,
                   "data": True},
+    # the same entry as the MPAS page's section (viewer.KIND_CAPS): its own
+    # panel sets the path, and the numbers drawn export as netCDF
+    "section": {**_KIND_FIGURE, "options": False, "probe": False, "gif": False,
+                "data": True},
     # every layer carries its own colours, so the shared picker means nothing
     "layers": {**_KIND_FIGURE, "colour": False, "options": False, "probe": False},
 }
@@ -1008,6 +1019,7 @@ class GenericViewer:
                 out.append("hovmoller")
             if self._stack_dims(da):
                 out.append("profile")
+                out.append("section")
             out.append("layers")
             return out
         nd = da.ndim
@@ -1268,6 +1280,39 @@ class GenericViewer:
                 "lon": round(float(self.lon[j]), 4),
                 "lat": round(float(self.lat[i]), 4),
                 "value": value}
+
+    def profile_at_point(self, lon, lat, var, time) -> dict:
+        """The clicked grid point's column, in the shape the MPAS viewer answers
+        with. The level coordinate is the file's own when it has one."""
+        from .viewer import profile_body
+
+        if var not in self.ds.data_vars:
+            raise ValueError(f"{var!r} is a derived expression; take the profile "
+                             f"of the underlying variable(s) instead")
+        first = self.ds[var]
+        if not (self.lat_dim in first.dims and self.lon_dim in first.dims):
+            raise ValueError(f"{var!r} is not on the lat/lon grid, so it has no "
+                             f"profile at a point")
+        i, j = self._point(lon, lat)
+        da = self._profile_at(var, int(time), lon, lat)
+        dim = str(da.dims[0])
+        coord = self.ds[dim] if dim in self.ds.variables else None
+        numeric = coord is not None and np.issubdtype(coord.dtype, np.number)
+        levels = np.asarray(coord.values, dtype=np.float64) if numeric \
+            else np.arange(da.sizes[dim], dtype=np.float64)
+        down = numeric and dim in self._vertical and (
+            str(coord.attrs.get("positive", "")).lower() == "down"
+            or _norm_units(coord) in _PRESSURE_UNITS)
+        prof = {"dim": dim,
+                "axis": str(coord.attrs.get("long_name", dim)) if numeric
+                else f"{dim} index",
+                "axis_units": str(coord.attrs.get("units", "")) if numeric else "index",
+                "down": down, "levels": levels,
+                "values": np.asarray(da.values, dtype=np.float64)}
+        point = {"cell": i * self.lon.size + j, "lon": round(float(self.lon[j]), 4),
+                 "lat": round(float(self.lat[i]), 4)}
+        return profile_body(point, _data.field_label(self.ds[var]),
+                            self.labels[int(time)], prof)
 
     def series_at_point(self, lon, lat, var, level=0, blocking=False) -> dict:
         """The clicked grid point's value at every step, as the page wants it.
@@ -1621,6 +1666,114 @@ class GenericViewer:
             da = da.isel({d: 0 for d in stack[1:]}).load()
         return da
 
+    def section(self, var: str, time: int, extent, sec=None):
+        """`var` on the grid columns a great-circle path crosses, as
+        (level, distance) -- the shape `native.cross_section` gives an MPAS
+        run, so one function draws both.
+
+        The path is sampled at a sixteenth of the smallest grid spacing along
+        it and each sample takes its nearest grid point, the rule the map
+        itself draws by; consecutive samples at one point are one column,
+        which ends halfway to the next column's first sample. Each row is one
+        level of the file. Nothing is interpolated. Without `sec` the path
+        runs west to east through the middle of the view.
+        """
+        import xarray as xr
+
+        from . import native
+
+        if var not in self.ds.data_vars:
+            raise ValueError(f"{var!r} is a derived expression; take the section "
+                             f"of the underlying variable(s) instead")
+        first = self.ds[var]
+        if not (self.lat_dim in first.dims and self.lon_dim in first.dims):
+            raise ValueError(f"{var!r} is not on the lat/lon grid, so it has no section")
+        stack = self._stack_dims(first)
+        if not stack:
+            raise ValueError(f"{var!r} has no level axis, so it has no section")
+        if sec is None:
+            mid = 0.5 * (float(extent[2]) + float(extent[3]))
+            sec = ((float(extent[0]), mid), (float(extent[1]), mid))
+        p0, p1 = sec
+        _, _, omega = native._great_circle(p0, p1, 2)
+        length = omega * _EARTH_KM
+        if length <= 0:
+            raise ValueError("the two section points are the same place")
+        # the narrowest a grid cell gets along this path, in degrees of arc
+        reach = min(89.0, max(abs(p0[1]), abs(p1[1])) + 1.0)
+        dlat = float(np.min(np.abs(np.diff(self.lat)))) if self.lat.size > 1 else 1.0
+        dlon = float(np.min(np.abs(np.diff(self.lon)))) if self.lon.size > 1 else 1.0
+        step = min(dlat, dlon * math.cos(math.radians(reach))) / 16.0
+        n = int(math.ceil(math.degrees(omega) / step)) + 1
+        if n > native.SECTION_MAX_SAMPLES:
+            raise ValueError(f"a {length:,.0f} km section on this grid needs {n:,} "
+                             f"samples, over the {native.SECTION_MAX_SAMPLES:,} "
+                             f"allowed; shorten the path")
+        pts, ang, _ = native._great_circle(p0, p1, max(n, 2))
+        lat_s = np.degrees(np.arcsin(np.clip(pts[:, 2], -1, 1)))
+        lon_s = np.degrees(np.arctan2(pts[:, 1], pts[:, 0]))
+        rows, row_in = _nearest_along(self.lat, lat_s, False)
+        cols, col_in = _nearest_along(
+            self.lon, self.lon[0] + np.mod(lon_s - self.lon[0], 360.0), self.cyclic)
+        ids = np.where(row_in & col_in, rows * self.lon.size + cols, -1)
+        if not (ids >= 0).any():
+            raise ValueError("the section path does not cross the grid")
+        start = np.flatnonzero(np.r_[True, ids[1:] != ids[:-1]])
+        along = ang * _EARTH_KM
+        edges = np.r_[0.0, 0.5 * (along[start[1:] - 1] + along[start[1:]]), length]
+        x0, x1 = edges[:-1], edges[1:]
+        cells = ids[start]
+        on = cells >= 0
+        r, c = rows[start], cols[start]
+
+        levdim = stack[0]
+        with self._lock:
+            da = self._read(var, time).isel({d: 0 for d in stack[1:]})
+            frow = (self.lat.size - 1 - r) if self._lat_flip else r
+            fcol = (self.lon.size - 1 - c) if self._lon_flip else c
+            r0, r1 = int(frow[on].min()), int(frow[on].max()) + 1
+            c0, c1 = int(fcol[on].min()), int(fcol[on].max()) + 1
+            window = da.isel({self.lat_dim: slice(r0, r1), self.lon_dim: slice(c0, c1)})
+            arr = np.asarray(window.transpose(levdim, self.lat_dim, self.lon_dim).values,
+                             dtype=np.float64)
+        block = np.full((arr.shape[0], cells.size), np.nan)
+        block[:, on] = arr[:, frow[on] - r0, fcol[on] - c0]
+
+        coord = self.ds[levdim] if levdim in self.ds.variables else None
+        numeric = coord is not None and np.issubdtype(coord.dtype, np.number)
+        centres = np.asarray(coord.values, dtype=np.float64) if numeric \
+            else np.arange(arr.shape[0], dtype=np.float64)
+        down = bool(numeric and levdim in self._vertical and (
+            str(coord.attrs.get("positive", "")).lower() == "down"
+            or _norm_units(coord) in _PRESSURE_UNITS))
+        bounds = native._bounds(centres)
+        level_attrs = {"long_name": str(coord.attrs.get("long_name", levdim)),
+                       "units": str(coord.attrs.get("units", ""))} if numeric \
+            else {"long_name": f"{levdim} index", "units": "index"}
+        mid = 0.5 * (x0 + x1)
+        at = np.clip(np.searchsorted(along, mid), 0, along.size - 1)
+        attrs = {k: v for k, v in first.attrs.items()
+                 if k in ("units", "long_name", "standard_name")}
+        return xr.DataArray(
+            block, dims=("level", "distance"),
+            coords={"level": ("level", centres, level_attrs),
+                    "distance": ("distance", mid, {"units": "km"}),
+                    "x0": ("distance", x0), "x1": ("distance", x1),
+                    "cell": ("distance", cells),
+                    "lon": ("distance", np.where(on, self.lon[c], lon_s[at])),
+                    "lat": ("distance", np.where(on, self.lat[r], lat_s[at])),
+                    "level_lo": ("level", bounds[:-1]),
+                    "level_hi": ("level", bounds[1:])},
+            name=var,
+            attrs={**attrs,
+                   "pressure_down": int(down),
+                   "path": f"({p0[0]:g}, {p0[1]:g}) to ({p1[0]:g}, {p1[1]:g}), "
+                           f"{length:,.0f} km great circle",
+                   "method": "one column per grid point nearest the path, as wide "
+                             "as the path stays nearest it; one row per file level; "
+                             "nothing interpolated",
+                   "time_step": int(time)})
+
     def _whole(self, var: str):
         """A non-map variable in full -- across every file if it runs in time."""
         import xarray as xr
@@ -1680,7 +1833,7 @@ class GenericViewer:
             return da.load()
 
     def _draw(self, fig, var, time, level, kind, extent, cmap, vmin, vmax, lon, lat,
-              hov=None, layers=None, colour=None):
+              hov=None, layers=None, colour=None, sec=None):
         """Put one plot on `fig`. Shared by the live plot, figures and GIF frames."""
         import matplotlib.pyplot as plt  # noqa: F401  (backend already chosen)
 
@@ -1692,6 +1845,16 @@ class GenericViewer:
         if kind == "hovmoller":
             return self._draw_hovmoller(fig, var, time, level, extent, cmap, vmin, vmax,
                                         hov)
+        if kind == "section":
+            from . import native
+
+            da = self.section(var, time, extent, sec)
+            ax = fig.add_subplot()
+            artist = native.draw_section(ax, da, cmap=cmap or None, vmin=vmin, vmax=vmax)
+            fig.colorbar(artist, ax=ax, shrink=0.9, label=_data.field_label(self.ds[var]))
+            ax.set_title(f"{var} · {da.attrs['path']} · {self.labels[time]} · "
+                         f"{int((da['cell'] >= 0).sum())} grid columns", fontsize=10)
+            return ax
 
         spatial = var in self._spatial_vars()
         if spatial and kind in (*_GRID_KINDS, "map"):
@@ -1960,7 +2123,7 @@ class GenericViewer:
 
     def _render(self, var, time, level, kind, extent, figsize, dpi,
                 cmap=None, vmin=None, vmax=None, lon=None, lat=None, hov=None,
-                meta=None, layers=None, colour=None) -> bytes:
+                meta=None, layers=None, colour=None, sec=None) -> bytes:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
@@ -1968,7 +2131,7 @@ class GenericViewer:
         fig = plt.figure(figsize=figsize, dpi=dpi, layout="constrained")
         try:
             ax = self._draw(fig, var, time, level, kind, extent, cmap, vmin, vmax,
-                            lon, lat, hov, layers, colour)
+                            lon, lat, hov, layers, colour, sec)
             buf = io.BytesIO()
             fig.savefig(buf, format="png", dpi=dpi)
             if meta is not None and kind == "hovmoller":
@@ -1979,7 +2142,7 @@ class GenericViewer:
 
     def plot(self, var, time, level, kind, extent, width=900, height=560,
              cmap=None, vmin=None, vmax=None, lon=None, lat=None, hov=None,
-             meta=None, layers=None, colour=None) -> bytes:
+             meta=None, layers=None, colour=None, sec=None) -> bytes:
         """The live plot pane: `kind` drawn at the browser's pixel size.
 
         `hov` holds a Hovmöller's band, longitudes, steps, method and time
@@ -1991,13 +2154,13 @@ class GenericViewer:
         width, height = int(np.clip(width, 200, 4000)), int(np.clip(height, 150, 3000))
         return self._render(var, time, level, kind, extent,
                             (width / 100, height / 100), 100, cmap, vmin, vmax, lon, lat,
-                            hov, meta, layers, colour)
+                            hov, meta, layers, colour, sec)
 
     # -- export ------------------------------------------------------------
 
     def figure(self, var, time, level, extent, cmap, vmin, vmax, style="paper",
                kind="map", lon=None, lat=None, hov=None, layers=None,
-               colour=None) -> bytes:
+               colour=None, sec=None) -> bytes:
         """A publication-shaped figure of what is on screen.
 
         Sized by the same `Style` presets as the MPAS path. The fast map
@@ -2010,11 +2173,11 @@ class GenericViewer:
         if var not in self._spatial_vars() and kind == "map":
             kind = "auto"
         return self._render(var, time, level, kind, extent, st.figsize, st.dpi,
-                            cmap, vmin, vmax, lon, lat, hov, None, layers, colour)
+                            cmap, vmin, vmax, lon, lat, hov, None, layers, colour, sec)
 
     def gif(self, var, level, extent, cmap, vmin, vmax, nx=None, ny=None, fps=8,
             kind="map", lon=None, lat=None, hov=None, layers=None,
-            colour=None) -> bytes:
+            colour=None, sec=None) -> bytes:
         """Every timestep as one animated GIF, drawn the way the screen is.
 
         The fast map re-containers its own palette frames, as `Viewer.gif`
@@ -2096,16 +2259,20 @@ class GenericViewer:
         return buf.getvalue()
 
     def netcdf(self, var, time, level, extent, nx=None, ny=None, kind=None,
-               lon=None, lat=None, hov=None, layers=None, colour=None) -> bytes:
-        """The numbers behind a Hovmöller, as netCDF. Other kinds: not yet."""
-        if kind != "hovmoller":
+               lon=None, lat=None, hov=None, layers=None, colour=None,
+               sec=None) -> bytes:
+        """The numbers behind a Hovmöller or a section, as netCDF. Other
+        kinds: not yet."""
+        if kind not in ("hovmoller", "section"):
             raise NotImplementedError(
-                "netCDF export for --generic is implemented for the Hovmöller only")
-        da = self._hov_result(var, level, hov, extent)
+                "netCDF export for --generic is implemented for the Hovmöller "
+                "and the section only")
+        da = self.section(var, time, extent, sec) if kind == "section" \
+            else self._hov_result(var, level, hov, extent)
         ds = da.to_dataset()
         ds.attrs.update(source=", ".join(f.name for f in self.files[:20]) +
                         (" ..." if len(self.files) > 20 else ""),
-                        history="gmpas --generic Hovmoller export")
+                        history=f"gmpas --generic {kind} export")
         # writing netCDF4 bytes is HDF5 too, and a Hovmöller job may be reading
         # on another thread: the same process-wide lock every read takes
         with self._lock:

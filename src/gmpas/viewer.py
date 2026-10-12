@@ -872,6 +872,20 @@ class Viewer:
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
                 "lat": round(float(self.mesh.lat_cell[cell]), 4)}
 
+    def profile_at_point(self, lon, lat, var, time) -> dict:
+        """The clicked cell's column: its value on every level, at one step."""
+        from . import native
+
+        if var not in self.plottable_cell_vars():
+            raise ValueError(f"{var!r} is a derived expression; take the profile "
+                             f"of the underlying variable(s) instead")
+        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        prof = native.profile(self.series, var, int(time), cell, sel=self._pins(var))
+        point = {"cell": cell, "lon": round(float(self.mesh.lon_cell[cell]), 4),
+                 "lat": round(float(self.mesh.lat_cell[cell]), 4)}
+        return profile_body(point, _data.field_label(self.series.dataarray(var, time)),
+                            self.series.labels[int(time)], prof)
+
     def series_at_point(self, lon, lat, var, level=0, blocking=False) -> dict:
         """The clicked cell's value at every step: state, or the series itself.
 
@@ -946,6 +960,17 @@ class Viewer:
 
 
 # ----------------------------------------------------------------- serving
+
+
+def profile_body(point: dict, label: str, when: str, prof: dict) -> dict:
+    """A profile as the page wants it: plain lists, null for no data. Shared
+    with the lat/lon viewer, so both answer /api/profile in one shape."""
+    return {**point, "label": label, "time": when,
+            "dim": prof["dim"], "axis": prof["axis"],
+            "axis_units": prof["axis_units"], "down": bool(prof["down"]),
+            "levels": [float(v) for v in prof["levels"]],
+            "values": [None if not np.isfinite(v) else float(v)
+                       for v in prof["values"]]}
 
 
 def _safe_header_value(value: str) -> str:
@@ -1450,6 +1475,10 @@ def _handler(viewer: Viewer, html: str = ""):
                     out = viewer.probe(float(q["lon"]), float(q["lat"]), q["var"],
                                        int(q.get("time", 0)), int(q.get("level", 0)))
                     return self._send(json.dumps(out).encode(), "application/json")
+                if url.path == "/api/profile" and hasattr(viewer, "profile_at_point"):
+                    out = viewer.profile_at_point(float(q["lon"]), float(q["lat"]),
+                                                  q["var"], int(q.get("time", 0)))
+                    return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/series" and hasattr(viewer, "series_at_point"):
                     return _serve_series(self, viewer, q)
             except Exception as exc:                      # surface, don't hang
@@ -1936,6 +1965,7 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #ptchart{width:100%;height:150px;display:none}
 #ptchart .ax{stroke:var(--line);stroke-width:1}
 #ptchart .ln{fill:none;stroke:var(--accent);stroke-width:1.5}
+#ptchart .lev{fill:#fff;stroke:none;opacity:.8}
 #ptchart .now{stroke:#fff;stroke-width:1;opacity:.5;stroke-dasharray:3 3}
 #ptchart .hit{stroke:none;fill:transparent}
 #ptchart .pt{fill:var(--accent);stroke:none}
@@ -2052,7 +2082,9 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
         <button id="ptclose" title="close">\u00d7</button></div>
       <div id="ptbody">
         <div id="ptnow"></div>
-        <div class="row"><button id="ptgo" style="flex:1">time series</button></div>
+        <div class="row"><button id="ptgo" style="flex:1">time series</button>
+          <button id="ptprof" style="flex:1"
+            title="this point on every level">profile</button></div>
         <svg id="ptchart" preserveAspectRatio="none"></svg>
         <div id="ptfoot">
           <div class="hint" id="pthint">the value here, through the run</div>
@@ -3716,6 +3748,7 @@ function schedule(ms){ stopPlayback(); preview(); scalebar(); graticule(); ptMar
 
 $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
   if(PT){ ptFollow(); if(PT.series) ptChart(); }   // the panel is about a moment
+  if(PT && PT.show==="profile" && PT.profile) ptProfFollow();
   // a Hovmöller already holds every step: moving time only moves its marker
   if(plotMode() && $("#kind").value==="hovmoller"){ hovMark(); return; }
   if(plotMode()){ clearTimeout(redrawTimer); redrawTimer=setTimeout(draw, 120); return; }
@@ -3724,7 +3757,11 @@ $("#time").oninput = e=>{ $("#tlab").textContent=M.labels[e.target.value];
   if(entry && entry.urls[e.target.value]){ $("#data").src=entry.urls[e.target.value]; return; }
   draw(); };
 $("#level").oninput = e=>{ $("#llab").textContent=e.target.value; stopPlayback();
-  ptStale("level changed"); draw(); };
+  // a profile holds every level already: only its marker moves
+  if(PT && PT.show==="profile" && PT.profile){ PT.series=null; PT.key=null;
+    ptValue(PT.profile.values[+e.target.value]); ptChart(); }
+  else ptStale("level changed");
+  draw(); };
 $("#cmap").onchange = ()=>{ stopPlayback(); draw(); };
 $("#vmin").onchange = draw; $("#vmax").onchange = draw;
 $("#reset").onclick = ()=>{ $("#vmin").value=""; $("#vmax").value=""; draw(); };
@@ -3873,7 +3910,9 @@ $("#wrap").onpointerup = async ev=>{
   ptOpen(lon, lat, d);
 };
 $("#grid").onchange = ()=>{ graticule(); ptMark(); };
-function relayout(){ layout(); scalebar(); graticule(); ptMark(); ptClamp(); }
+function relayout(){
+  if(!M || !view) return;      // the observer fires once before the page has booted
+  layout(); scalebar(); graticule(); ptMark(); ptClamp(); }
 addEventListener("resize", relayout);
 // The stage also changes size without the window doing so: the toolbar
 // wrapping to a second line, a panel opening. Sized only at load and on window
@@ -3897,8 +3936,12 @@ function ptOpen(lon, lat, d){
   if(!caps().probe) return;
   const box=$("#point");
   const moved=PT && PT.placed;
+  // a profile on screen follows the click: the next point's column replaces it
+  const again=PT && PT.show==="profile" && PT.profile;
   PT={lon, lat, cell:d.cell, series:null, log:PT?PT.log:false, key:null,
-      placed:moved, snapped:{lon:+d.lon, lat:+d.lat}, var:cur.name};
+      placed:moved, snapped:{lon:+d.lon, lat:+d.lat}, var:cur.name,
+      profile:null, show:"series"};
+  ptProfOffer();
   box.style.display="block";
   $("#pttitle").textContent=`${d.lat}\u00b0, ${d.lon}\u00b0`+
                             (d.cell>=0 ? ` \u00b7 cell ${d.cell}` : "");
@@ -3912,6 +3955,7 @@ function ptOpen(lon, lat, d){
   ptClamp();
   ptMark();
   ptWarm();
+  if(again && cur.levels>1) ptProfile();
 }
 // The reader processes take about half a second to start, and that used to
 // land on the first series asked for. The panel being open is the earliest
@@ -4030,7 +4074,7 @@ async function ptSeries(){
       // a preview arrives long before the full read: draw it rather than
       // making the user watch a counter
       if(body.values){
-        PT.series=body; ptChart();
+        PT.series=body; PT.show="series"; ptChart();
         const n=body.values.filter(v=>v!==null).length;
         $("#pthint").textContent=`preview: ${n} of ${total} steps\u2026`;
       }else{
@@ -4058,7 +4102,7 @@ async function ptSeries(){
       $("#ptgo").disabled=false; return;         // the server knew, not a
     }                                            // TypeError from undefined
     if(!PT || ptKey()!==key) return;         // moved on while it read
-    PT.series=body;
+    PT.series=body; PT.show="series";
     $("#pthint").textContent=ptSummary(body);
     $("#ptgo").disabled=false;
     $("#ptstop").style.display="none";
@@ -4068,7 +4112,115 @@ async function ptSeries(){
     $("#ptgo").disabled=false;
   }
 }
+// ---- the column under the point: every level at this step, value across and
+// level up, drawn in the series' own chart. One small read, so it follows the
+// time slider and the next click without being asked again.
+function ptProfOffer(){
+  // a derived expression and a single-level field have no column to read
+  const on=!!cur && cur.levels>1 && !!varNamed(cur.name);
+  $("#ptprof").style.display = on ? "" : "none";
+}
+let ptProfTimer=null;
+async function ptProfile(){
+  if(!PT || !cur) return;
+  const step=+$("#time").value, name=cur.name, at=[PT.lon, PT.lat];
+  const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:name, time:step});
+  try{
+    const r=await fetch("api/profile?"+q);
+    const body=await r.json();
+    if(!r.ok){ $("#pthint").textContent=
+      String(body.error).replace(/^[A-Za-z]*Error: /, ""); return; }
+    // the point, the field or the step moved on while it read
+    if(!PT || !cur || cur.name!==name || PT.lon!==at[0] || PT.lat!==at[1] ||
+       +$("#time").value!==step) return;
+    clearTimeout(ptPoll); $("#ptgo").disabled=false; $("#ptstop").style.display="none";
+    PT.profile=body; PT.show="profile";
+    $("#pthint").textContent=ptSummary(body);
+    ptChart();
+  }catch(e){ $("#pthint").textContent="profile failed: "+e; }
+}
+function ptProfFollow(){                 // the time slider moved
+  clearTimeout(ptProfTimer);
+  ptProfTimer=setTimeout(ptProfile, 120);
+}
+function ptShownData(){ return PT && (PT.show==="profile" ? PT.profile : PT.series); }
+function ptProfChart(){
+  const svg=$("#ptchart"), body=PT.profile;
+  const W=314, H=150, L=52, R=8, T=8, B=18;
+  const vals=body.values, levs=body.levels;
+  const finite=vals.filter(x=>x!==null);
+  if(!finite.length){ svg.style.display="none";
+    $("#pthint").textContent="no data in this column"; return; }
+  let lo=Math.min(...finite), hi=Math.max(...finite);
+  const logOK=PT.log && lo>0;
+  if(PT.log && !logOK) $("#pthint").textContent=
+    "log needs values above zero \u2014 drawn linear";
+  const tr=v=>logOK ? Math.log10(v) : v;
+  let tlo=tr(lo), thi=tr(hi);
+  if(thi-tlo < 1e-12){ tlo-=0.5; thi+=0.5; }
+  let zlo=Math.min(...levs), zhi=Math.max(...levs);
+  if(zhi-zlo < 1e-12){ zlo-=0.5; zhi+=0.5; }
+  const x=v=>L+(tr(v)-tlo)/(thi-tlo)*(W-L-R);
+  // up is up: a pressure axis (down) puts its largest value at the bottom
+  const y=z=>{ const t=(z-zlo)/(zhi-zlo); return T+(body.down ? t : 1-t)*(H-T-B); };
+  const f=n=>Math.abs(n)>=1e4||(n!==0&&Math.abs(n)<1e-3)
+    ? n.toExponential(1) : (+n.toPrecision(4)).toString();
+  let d="", pen=false;
+  vals.forEach((v,i)=>{
+    if(v===null){ pen=false; return; }
+    d+=(pen?"L":"M")+x(v).toFixed(1)+" "+y(levs[i]).toFixed(1)+" "; pen=true;
+  });
+  const ticks=[0, 0.5, 1].map(t=>{
+    const z=zlo+(zhi-zlo)*t, yy=y(z);
+    return `<text x="${L-5}" y="${(yy+3).toFixed(1)}" text-anchor="end">${f(z)}</text>`+
+           `<line class="ax" x1="${L}" y1="${yy.toFixed(1)}" `+
+           `x2="${L+3}" y2="${yy.toFixed(1)}"/>`;
+  });
+  // the level the map is showing, as a rule across and a dot on the line
+  const k=+$("#level").value, onLine=k<vals.length && vals[k]!==null;
+  const ky=k<levs.length ? y(levs[k]) : null;
+  const ends=logOK ? [lo, hi] : [tlo, thi];
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML=
+    `<line class="ax" x1="${L}" y1="${T}" x2="${L}" y2="${H-B}"/>`+
+    `<line class="ax" x1="${L}" y1="${H-B}" x2="${W-R}" y2="${H-B}"/>`+
+    ticks.join("")+
+    `<text x="${L}" y="${H-6}">${f(ends[0])}</text>`+
+    `<text x="${W-R}" y="${H-6}" text-anchor="end">${f(ends[1])}</text>`+
+    `<text x="${(L+W-R)/2}" y="${H-6}" text-anchor="middle">`+
+      `${esc(body.axis)}${body.axis_units ? " ["+esc(body.axis_units)+"]" : ""}`+
+      ` \u2191</text>`+
+    (ky!==null ? `<line class="now" x1="${L}" y1="${ky.toFixed(1)}" `+
+                 `x2="${W-R}" y2="${ky.toFixed(1)}"/>` : "")+
+    `<path class="ln" d="${d.trim()}"/>`+
+    (onLine ? `<circle class="lev" cx="${x(vals[k]).toFixed(1)}" `+
+              `cy="${ky.toFixed(1)}" r="2.6"/>` : "")+
+    `<rect class="hit" x="${L}" y="${T}" width="${W-L-R}" height="${H-T-B}"/>`;
+  svg.style.display="block";
+  const nearest=ev=>{
+    const r=svg.getBoundingClientRect();
+    const py=(ev.clientY-r.top)/r.height*H;
+    let best=0, gap=Infinity;
+    levs.forEach((z,i)=>{ const g=Math.abs(y(z)-py); if(g<gap){ gap=g; best=i; } });
+    return best;
+  };
+  const hit=svg.querySelector(".hit");
+  hit.onmousemove=ev=>{ const i=nearest(ev), v=vals[i];
+    $("#pthint").textContent=`level ${i} \u00b7 ${f(levs[i])} ${body.axis_units} \u00b7 `+
+                             (v===null ? "no data" : f(v)); };
+  hit.onmouseleave=()=>{ $("#pthint").textContent=ptSummary(body); };
+  // click a level on the profile and the map goes there
+  hit.onclick=ev=>{ nudge("#level", 0, nearest(ev)); };
+}
 function ptSummary(body){
+  if(body.levels){
+    const v=body.values.filter(x=>x!==null);
+    if(!v.length) return "no data in this column";
+    const g=x=>Math.abs(x)>=1e4||(x!==0&&Math.abs(x)<1e-3)
+      ? x.toExponential(2) : x.toPrecision(4);
+    return `${v.length} levels \u00b7 ${body.time} \u00b7 min ${g(Math.min(...v))} `+
+           `\u00b7 max ${g(Math.max(...v))}`;
+  }
   const v=body.values.filter(x=>x!==null);
   if(!v.length) return "no data at this point";
   const mean=v.reduce((a,b)=>a+b,0)/v.length;
@@ -4086,6 +4238,7 @@ function ptSummary(body){
 // A small SVG rather than a plotted PNG: it redraws on hover and on the time
 // slider without asking the server for anything.
 function ptChart(){
+  if(PT && PT.show==="profile" && PT.profile) return ptProfChart();
   const svg=$("#ptchart"), body=PT&&PT.series;
   if(!body){ svg.style.display="none"; return; }
   const W=314, H=150, L=52, R=6, T=8, B=18;   // L fits "0.008264", which
@@ -4165,7 +4318,7 @@ function ptShown(on){
 function ptStale(why){
   clearTimeout(ptPoll);
   if(!PT) return;
-  PT.series=null; PT.key=null;
+  PT.series=null; PT.key=null; PT.profile=null; PT.show="series";
   $("#ptchart").style.display="none";
   $("#ptgo").disabled=false;                 // a read in flight is abandoned,
   $("#ptstop").style.display="none";         // so the button must come back
@@ -4175,8 +4328,11 @@ function ptStale(why){
 // were all about the old one. Re-probe the same place for the new field.
 async function ptRefresh(){
   if(!PT || !cur || plotMode()) return;
+  const again=PT.show==="profile" && PT.profile;
   ptStale("variable changed");
   PT.var=cur.name;
+  ptProfOffer();
+  if(again && cur.levels>1 && varNamed(cur.name)) ptProfile();
   $("#ptnow").innerHTML=`${cur.label}<br><b>\u2026</b>`;
   const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
                                time:$("#time").value, level:$("#level").value});
@@ -4193,13 +4349,15 @@ async function ptRefresh(){
   }catch(e){ $("#pthint").textContent="probe failed: "+e; }
 }
 $("#ptgo").onclick=ptSeries;
+$("#ptprof").onclick=ptProfile;
 $("#ptclose").onclick=ptClose;
 $("#ptlog").onclick=()=>{
-  if(!PT || !PT.series) return;
-  const v=PT.series.values.filter(x=>x!==null);
+  const shown=ptShownData();
+  if(!shown) return;
+  const v=shown.values.filter(x=>x!==null);
   if(!PT.log && (!v.length || Math.min(...v)<=0)){
     // lighting the button over a linear line is the lie; decline out loud
-    $("#pthint").textContent="log needs values above zero \u2014 this series "+
+    $("#pthint").textContent="log needs values above zero \u2014 this one "+
                              "reaches "+(v.length?Math.min(...v):"nothing");
     return;
   }
@@ -4208,8 +4366,16 @@ $("#ptlog").onclick=()=>{
   ptChart();
 };
 function ptRows(){
-  const body=PT && PT.series;
+  const body=ptShownData();
   if(!body) return null;
+  if(body.levels){
+    const unit=body.axis_units ? ` [${body.axis_units}]` : "";
+    const head=`# ${cur.label} at ${body.lat}, ${body.lon}, ${body.time}\\n`+
+               `level,${body.axis}${unit},value\\n`;
+    const rows=body.levels.map((z,i)=>
+      `${i},${z},${body.values[i]===null?"":body.values[i]}`);
+    return {text:head+rows.join("\\n")+"\\n", n:rows.length, what:"profile"};
+  }
   if(body.preview){
     // 1400 empty rows labelled "1500 rows copied" is not an export
     $("#pthint").textContent="still a preview \u2014 wait for the full series";
@@ -4224,6 +4390,7 @@ function ptRows(){
 $("#ptsave").onclick=()=>{
   const out=ptRows(); if(!out) return;
   const name=`${(cur.name||"series").replace(/[^A-Za-z0-9._-]+/g,"_")}_`+
+             (out.what ? out.what+"_" : "")+
              `${PT.snapped.lat}_${PT.snapped.lon}.csv`;
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([out.text], {type:"text/csv"}));
@@ -4232,8 +4399,6 @@ $("#ptsave").onclick=()=>{
   $("#pthint").textContent=`${out.n} rows \u2192 ${name}`;
 };
 $("#ptcsv").onclick=async ()=>{
-  if(!PT || !PT.series) return;
-  const body=PT.series;
   const out=ptRows(); if(!out) return;
   try{
     if(!navigator.clipboard) throw new Error("no clipboard over plain HTTP");

@@ -169,11 +169,11 @@ def test_a_time_varying_field_offers_the_hovmoller(viewer):
 
 def test_the_mpas_kind_table_matches_the_generic_one():
     """One page serves both viewers; a kind both offer must mean the same thing
-    in each. The section is MPAS only, and a figure like the Hovmöller."""
+    in each. The section is a figure like the Hovmöller."""
     from gmpas import generic, viewer
 
     shared = set(viewer.KIND_CAPS) & set(generic.KIND_CAPS)
-    assert shared == {"map", "hovmoller"}
+    assert shared == {"map", "hovmoller", "section"}
     for kind in shared:
         assert viewer.KIND_CAPS[kind] == generic.KIND_CAPS[kind]
     assert viewer.KIND_CAPS["section"] == viewer.KIND_CAPS["hovmoller"]
@@ -356,3 +356,61 @@ def test_the_section_draws_and_travels_over_http(sec_run, tmp_path):
         assert back.dims == ("level", "distance") and "native" in back.attrs["method"]
     finally:
         v.close()
+
+
+# ------------------------------------------------------- profile at a cell
+
+def test_a_profile_is_the_cells_own_column(sec_run):
+    cell = 37
+    p = native.profile(sec_run, "t_isobaric", 0, cell)
+    assert p["values"] == pytest.approx([cell, 100 + cell, 200 + cell])
+    # the same numbers a map of each level shows at that cell
+    for k in range(3):
+        assert p["values"][k] == sec_run.values("t_isobaric", level=k)[cell]
+    assert p["dim"] == "nIsoLevelsT" and p["axis_units"] == "hPa" and p["down"]
+    assert p["levels"] == pytest.approx([500.0, 700.0, 850.0])
+
+
+def test_a_profile_without_level_coordinates_is_on_the_index(sec_run):
+    p = native.profile(sec_run, "theta", 0, 5)
+    assert p["axis"] == "model level" and not p["down"]
+    assert p["levels"] == pytest.approx([0, 1, 2])
+    assert p["values"] == pytest.approx([5, 105, 205])
+
+
+@pytest.mark.parametrize("var, cell, why", [
+    ("t2m", 0, "no vertical axis"),
+    ("u", 0, "lives on nEdges"),
+    ("theta", 10**6, "outside nCells"),
+])
+def test_a_profile_that_cannot_be_read_is_refused_by_name(sec_run, var, cell, why):
+    with pytest.raises((ValueError, IndexError), match=why):
+        native.profile(sec_run, var, 0, cell)
+
+
+def test_the_profile_travels_over_http(sec_run, tmp_path):
+    import json
+    import threading
+    import urllib.error
+    import urllib.request
+
+    from gmpas.viewer import PAGE, Viewer, _handler, bind
+
+    viewer = Viewer(sec_run.files[0].parent, nx=300, ny=200)
+    srv = bind(_handler(viewer, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}/api/profile"
+    try:
+        with urllib.request.urlopen(f"{base}?lon=5.2&lat=0.3&var=t_isobaric&time=0") as r:
+            got = json.loads(r.read())
+        cell = got["cell"]
+        assert got["values"] == pytest.approx([cell, 100 + cell, 200 + cell])
+        assert got["levels"] == pytest.approx([500.0, 700.0, 850.0]) and got["down"]
+        assert got["time"] == viewer.series.labels[0]
+        assert viewer.probe(5.2, 0.3, "t_isobaric", 0, 2)["value"] == got["values"][2]
+        with pytest.raises(urllib.error.HTTPError) as err:
+            urllib.request.urlopen(f"{base}?lon=5&lat=0&var=theta%20-%20t2m&time=0")
+        assert "derived expression" in json.loads(err.value.read())["error"]
+    finally:
+        srv.shutdown()
+        viewer.close()

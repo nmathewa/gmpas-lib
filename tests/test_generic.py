@@ -813,3 +813,125 @@ def test_a_generic_frame_carries_its_data_range(tmp_path):
         assert (dlo, dhi) == (float(np.nanmin(img)), float(np.nanmax(img)))
     finally:
         srv.shutdown()
+
+
+def test_the_profile_at_a_click_is_the_grid_points_column(months):
+    got = months.profile_at_point(20.0, 0.0, "t", 3)
+    assert got["values"] == pytest.approx([110, 111])
+    assert got["levels"] == pytest.approx([1000.0, 500.0])
+    assert got["dim"] == "pressure_level" and got["axis_units"] == "hPa" and got["down"]
+    assert (got["lon"], got["lat"]) == (20.0, 0.0)
+    assert got["time"] == months.labels[3]
+    # the level slider's own value at that point, level by level
+    for k in range(2):
+        assert months.probe(20.0, 0.0, "t", 3, k)["value"] == got["values"][k]
+
+
+def test_a_profile_off_the_grid_or_of_an_expression_is_refused(months):
+    with pytest.raises(ValueError, match="derived expression"):
+        months.profile_at_point(20.0, 0.0, "t - t", 0)
+    with pytest.raises(ValueError, match="not on the lat/lon grid"):
+        months.profile_at_point(20.0, 0.0, "gmean", 0)
+
+
+# ------------------------------------------------------- vertical section
+
+@pytest.fixture
+def stacked(tmp_path):
+    """A 10-degree grid, three pressure levels, latitude written north first.
+    Value = 10000 * level + 100 * (lat + 90) / 10 + lon / 10: a number names
+    the level, the row and the column it was read from."""
+    import matplotlib
+    matplotlib.use("Agg")
+    lat, lon = np.arange(80, -81, -10.0), np.arange(0, 360, 10.0)
+    plev = np.array([1000.0, 500.0, 200.0])
+    code = (10000 * np.arange(3)[:, None, None] + 100 * ((lat + 90) / 10)[None, :, None]
+            + (lon / 10)[None, None, :])
+    xr.Dataset(
+        {"t": (("time", "plev", "lat", "lon"), code[None].astype("f8"), {"units": "K"}),
+         "ps": (("time", "lat", "lon"), code[None, 0])},
+        coords={"time": pd.date_range("2024-01-01", periods=1),
+                "plev": ("plev", plev, {"units": "hPa", "long_name": "pressure"}),
+                "lat": ("lat", lat, {"units": "degrees_north"}),
+                "lon": ("lon", lon, {"units": "degrees_east"})},
+    ).to_netcdf(tmp_path / "stack.nc")
+    gv = GenericViewer(tmp_path / "stack.nc")
+    yield gv
+    gv.close()
+
+
+def _code(level, lat, lon):
+    return 10000 * level + 100 * (lat + 90) / 10 + (lon % 360) / 10
+
+
+def test_a_section_takes_the_grid_columns_the_path_crosses(stacked):
+    da = stacked.section("t", 0, stacked.home, ((6.0, 0.0), (34.0, 0.0)))
+    assert da.dims == ("level", "distance")
+    assert list(da["lon"].values) == [10.0, 20.0, 30.0]
+    assert list(da["lat"].values) == [0.0, 0.0, 0.0]
+    for k in range(3):
+        assert da.values[k] == pytest.approx([_code(k, 0, x) for x in (10, 20, 30)])
+    # each column is as wide as the path stays nearest it: 9, 10 and 9 degrees
+    km = 2 * np.pi * 6371.229 / 360
+    assert (da["x1"] - da["x0"]).values == pytest.approx(
+        [9 * km, 10 * km, 9 * km], abs=0.05 * 10 * km)
+    assert float(da["x0"][0]) == 0 and float(da["x1"][-1]) == pytest.approx(28 * km)
+    assert da["level"].values == pytest.approx([1000, 500, 200])
+    assert da.attrs["pressure_down"] == 1 and da["level"].attrs["units"] == "hPa"
+
+
+def test_a_section_agrees_with_the_map_at_every_column(stacked):
+    """Diagonal, across the date line and the prime meridian: each column is
+    the value the map's probe gives at that grid point, level by level."""
+    da = stacked.section("t", 0, stacked.home, ((-40.0, -35.0), (55.0, 62.0)))
+    assert da.sizes["distance"] > 8
+    assert len(set(zip(da["lon"].values, da["lat"].values, strict=True))) \
+        == da.sizes["distance"]                    # no column twice
+    for k in range(3):
+        for i in range(da.sizes["distance"]):
+            lon, lat = float(da["lon"][i]), float(da["lat"][i])
+            assert da.values[k, i] == stacked.probe(lon, lat, "t", 0, k)["value"]
+            assert da.values[k, i] == pytest.approx(_code(k, lat, lon))
+    # consecutive columns are neighbours on the grid: nothing was jumped over
+    step_lat = np.abs(np.diff(da["lat"].values))
+    step_lon = np.abs((np.diff(da["lon"].values) + 180) % 360 - 180)
+    assert step_lat.max() <= 10 and step_lon.max() <= 10
+
+
+def test_a_path_leaving_the_grid_leaves_blank_columns(stacked):
+    da = stacked.section("t", 0, stacked.home, ((20.0, 60.0), (20.0, 89.5)))
+    assert int(da["cell"][-1]) == -1 and np.isnan(da.values[:, -1]).all()
+    assert np.isfinite(da.values[:, :-1]).all()
+    with pytest.raises(ValueError, match="does not cross the grid"):
+        stacked.section("t", 0, stacked.home, ((20.0, 89.0), (30.0, 89.5)))
+
+
+def test_the_default_section_runs_through_the_middle_of_the_view(stacked):
+    da = stacked.section("t", 0, (100.0, 140.0, -22.0, 18.0))
+    assert set(da["lat"].values) == {0.0}
+    assert da["lon"].values.min() == 100.0 and da["lon"].values.max() == 140.0
+
+
+@pytest.mark.parametrize("var, sec, why", [
+    ("ps", ((0.0, 0.0), (20.0, 0.0)), "no level axis"),
+    ("t - t", ((0.0, 0.0), (20.0, 0.0)), "derived expression"),
+    ("t", ((5.0, 5.0), (5.0, 5.0)), "same place"),
+])
+def test_a_section_that_cannot_be_drawn_is_refused_by_name(stacked, var, sec, why):
+    with pytest.raises(ValueError, match=why):
+        stacked.section(var, 0, stacked.home, sec)
+
+
+def test_the_section_is_offered_drawn_and_exported(stacked, tmp_path):
+    assert "section" in stacked.kinds("t") and "section" not in stacked.kinds("ps")
+    sec = ((6.0, 0.0), (34.0, 0.0))
+    png = stacked.plot("t", 0, 0, "section", stacked.home, 500, 300, "viridis", sec=sec)
+    assert png[:4] == b"\x89PNG"
+    assert stacked.figure("t", 0, 0, stacked.home, "viridis", None, None,
+                          kind="section", sec=sec)[:4] == b"\x89PNG"
+    out = tmp_path / "section.nc"
+    out.write_bytes(stacked.netcdf("t", 0, 0, stacked.home, kind="section", sec=sec))
+    back = xr.open_dataset(out)
+    assert back["t"].dims == ("level", "distance")
+    assert list(back["lon"].values) == [10.0, 20.0, 30.0]
+    assert "nothing interpolated" in back["t"].attrs["method"]
