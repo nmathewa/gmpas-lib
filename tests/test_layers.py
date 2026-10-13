@@ -450,11 +450,13 @@ def test_a_preset_is_bound_over_http(gv):
         srv.shutdown()
 
 
-def test_the_mpas_viewer_is_untouched(tmp_path):
+def test_the_mpas_viewer_draws_layers_from_its_own_mesh(tmp_path):
     from gmpas.viewer import Viewer
 
-    # it plots a Hovmöller now (#111), but layers are still --generic only
-    assert not hasattr(Viewer, "layer_stack")
+    # layers reach an MPAS run through the cell under each pixel
+    # (viewer._MeshOnGrid, tests/test_mpas_layers.py), not through this
+    # module's lat/lon reader; presets are still lat/lon only
+    assert hasattr(Viewer, "layer_stack") and not hasattr(Viewer, "bind_preset")
 
 
 @pytest.mark.parametrize("projection", L.PROJECTIONS)

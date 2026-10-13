@@ -39,6 +39,7 @@ import numpy as np
 from . import chat as _chat
 from . import colour as _colour
 from . import jobs as _jobs
+from . import layers as _layers
 from . import data as _data
 from . import derive as _derive
 from . import script as _script
@@ -78,7 +79,61 @@ KIND_CAPS = {
     # MPAS only: a vertical section along a path, native cells and levels
     "section": {"colour": True, "options": False, "pan": False, "frames": False,
                 "probe": False, "gif": False, "data": True},
+    # a figure of layers; every layer carries its own colours
+    "layers": {"colour": False, "options": False, "pan": False, "frames": False,
+               "probe": False, "gif": False, "data": False},
 }
+
+#: The most pixels along a side that a layer of an MPAS figure is sampled at.
+LAYER_SAMPLES = 480
+
+
+class _MeshOnGrid:
+    """An MPAS run as `gmpas.layers` sees a lat/lon file.
+
+    A layer is the field sampled onto the view's pixels, exactly as the fast
+    map samples it -- the cell under each pixel, no interpolation -- and then
+    contoured or drawn as arrows on that grid. Zoomed in until cells are wider
+    than pixels, a contour therefore follows cell edges.
+    """
+
+    lon_name = lon_dim = "lon"
+    lat_name = lat_dim = "lat"
+    cyclic = False
+
+    class _Fields:
+        def __init__(self, series):
+            self.series = series
+            self.variables = ()
+
+        def __getitem__(self, name):
+            return self.series.dataarray(name, 0)
+
+    def __init__(self, viewer, extent, width: int, height: int):
+        self.viewer = viewer
+        self.home = tuple(viewer.home)
+        self.labels = viewer.series.labels
+        self.ds = self._Fields(viewer.series)
+        scale = LAYER_SAMPLES / max(width, height, 1)
+        self.nx = max(16, int(width * min(1.0, scale)))
+        self.ny = max(16, int(height * min(1.0, scale)))
+        self.lon, _ = target_grid(tuple(extent), self.nx, self.ny)
+        self._lon_file, self._lat_file = target_grid(tuple(extent), self.nx, self.ny)
+
+    def _stack_dims(self, da):
+        return []
+
+    def _cropped(self, var, time, level, extent):
+        import xarray as xr
+
+        extent = tuple(float(v) for v in extent)
+        lon, lat = target_grid(extent, self.nx, self.ny)
+        index = self.viewer.view(extent, self.nx, self.ny)
+        image = index.frame(self.viewer.values(var, time, level))   # south first
+        attrs = dict(self.ds[var].attrs) if var in self.viewer.plottable_cell_vars() \
+            else {}
+        return xr.DataArray(image, dims=("lat", "lon"), name=var, attrs=attrs,
+                            coords={"lat": lat, "lon": lon})
 
 
 #: largest coastline overlay, in pixels per side, a request may ask for
@@ -437,8 +492,9 @@ class Viewer:
                 "pinned": _data.level_dims(da)[1:],
             })
             if not out[-1]["static"]:
+                out[-1]["spatial"] = True
                 out[-1]["kinds"] = ["map", "hovmoller"] + (
-                    ["section"] if out[-1]["levels"] > 1 else [])
+                    ["section"] if out[-1]["levels"] > 1 else []) + ["layers"]
         out.sort(key=lambda v: (v["static"], v["name"]))
         first = self.series.files[0].name
         title = (first if self.series.n_files == 1
@@ -464,8 +520,10 @@ class Viewer:
             "projections": list(PAGE_CHOICES),
             "kind_labels": {"map": "map (native mesh)",
                             "hovmoller": "Hovmöller (time × lon, area-weighted)",
-                            "section": "vertical section along a path"},
+                            "section": "vertical section along a path",
+                            "layers": "layers (composite)"},
             "kind_caps": KIND_CAPS,
+            "layer_schema": _layers.schema(),
             "variables": out,
         }
 
@@ -823,10 +881,46 @@ class Viewer:
         if kind == "section":
             return self._render_section(var, time, extent, cmap, vmin, vmax, sec,
                                         (width / 100, height / 100), 100)
+        if kind == "layers":
+            return self._render_layers(var, time, level, extent, _.get("layers"),
+                                       width, height)
         if kind != "hovmoller":
             raise ValueError(f"the MPAS viewer has no {kind!r} plot")
         return self._render_hovmoller(var, level, extent, cmap, vmin, vmax, hov,
                                       (width / 100, height / 100), 100, meta)
+
+    # -- a figure of layers: fields and winds over one another ----------------
+
+    def _spatial_vars(self) -> list[str]:
+        return [v for v in self.plottable_cell_vars()
+                if _data.time_axis(self.series.dataarray(v, 0)) is not None]
+
+    def layer_stack(self, stack, var: str):
+        """A validated layer stack; the default, one filled contour of `var`."""
+        if isinstance(stack, _layers.Stack):
+            return stack
+        if stack is None:
+            stack = _layers.default_stack(var)
+        names = self._spatial_vars()
+        counts = {v: self._level_span(self.series.dataarray(v, 0)) for v in names}
+        return _layers.clean(stack, names, counts)
+
+    def _render_layers(self, var, time, level, extent, layers, width, height) -> bytes:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        stack = self.layer_stack(layers, var)
+        grid = _MeshOnGrid(self, extent, width, height)
+        fig = plt.figure(figsize=(width / 100, height / 100), dpi=100,
+                         layout="constrained")
+        try:
+            _layers.draw(grid, fig, stack, int(time), int(level), extent)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100)
+            return buf.getvalue()
+        finally:
+            plt.close(fig)
 
     # -- vertical section along a great circle: see gmpas.native --------------
 

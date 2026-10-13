@@ -151,7 +151,9 @@ Draw several things as one figure, in order, the first underneath:
   contour(z.isel(time=0, level=3), colors="black", levels=10)
   vectors(u.isel(time=0, level=3), v.isel(time=0, level=3), stride=4)
   also barbs(u, v) and streamlines(u, v); a layer draws a field of the file,
-  not an expression, and every layer picks the same time.
+  not an expression, and every layer picks the same time. Such a figure is on
+  the plain lon/lat map: give no proj with it. To overlay on what is shown
+  now, draw the variable the view names first, then the overlay.
 """
 
 

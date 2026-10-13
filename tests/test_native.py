@@ -163,7 +163,7 @@ def viewer(run):
 
 def test_a_time_varying_field_offers_the_hovmoller(viewer):
     rows = {r["name"]: r for r in viewer.describe()["variables"]}
-    assert rows["t2m"]["kinds"] == ["map", "hovmoller"]
+    assert rows["t2m"]["kinds"] == ["map", "hovmoller", "layers"]
     assert "kinds" not in rows["areaCell"]                     # static: no time axis
 
 
@@ -173,8 +173,11 @@ def test_the_mpas_kind_table_matches_the_generic_one():
     from gmpas import generic, viewer
 
     shared = set(viewer.KIND_CAPS) & set(generic.KIND_CAPS)
-    assert shared == {"map", "hovmoller", "section"}
-    for kind in shared:
+    assert shared == {"map", "hovmoller", "section", "layers"}
+    # layers differ in one thing: an MPAS figure of layers has no GIF yet
+    assert {k for k in viewer.KIND_CAPS["layers"]
+            if viewer.KIND_CAPS["layers"][k] != generic.KIND_CAPS["layers"][k]} == {"gif"}
+    for kind in shared - {"layers"}:
         assert viewer.KIND_CAPS[kind] == generic.KIND_CAPS[kind]
     assert viewer.KIND_CAPS["section"] == viewer.KIND_CAPS["hovmoller"]
 
