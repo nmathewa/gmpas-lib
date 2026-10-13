@@ -865,8 +865,23 @@ class Viewer:
         finally:
             plt.close(fig)
 
+    def _cell_at(self, lon, lat) -> int:
+        """The cell containing a point, or -1 where the map draws nothing:
+        further from the nearest centre than `ViewIndex` lets a pixel be. A
+        click answers for what is under it, and past the edge of a regional
+        mesh that is no cell at all, not the boundary cell nearest by."""
+        from . import native
+
+        mesh = self.mesh
+        dist, idx = mesh.tree().query(native._unit(lon, lat)[None])
+        radius = math.sqrt(float(mesh.area_cell[idx[0]]) / math.pi) / mesh.sphere_radius
+        return int(idx[0]) if dist[0] <= 2.0 * radius else -1
+
     def probe(self, lon, lat, var, time, level):
-        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        cell = self._cell_at(lon, lat)
+        if cell < 0:
+            return {"cell": -1, "value": float("nan"),
+                    "lon": float(lon), "lat": float(lat)}
         value = float(self.values(var, time, level)[cell])
         return {"cell": cell, "value": value,
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
@@ -879,7 +894,9 @@ class Viewer:
         if var not in self.plottable_cell_vars():
             raise ValueError(f"{var!r} is a derived expression; take the profile "
                              f"of the underlying variable(s) instead")
-        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        cell = self._cell_at(lon, lat)
+        if cell < 0:
+            raise ValueError(f"({lat:g}, {lon:g}) is outside the mesh")
         prof = native.profile(self.series, var, int(time), cell, sel=self._pins(var))
         point = {"cell": cell, "lon": round(float(self.mesh.lon_cell[cell]), 4),
                  "lat": round(float(self.mesh.lat_cell[cell]), 4)}
@@ -904,7 +921,9 @@ class Viewer:
                 f"{len(self.series):,} steps is past the {MAX_SERIES_STEPS:,} a "
                 f"point series will read; open a shorter run."
             )
-        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        cell = self._cell_at(lon, lat)
+        if cell < 0:
+            raise ValueError(f"({lat:g}, {lon:g}) is outside the mesh")
         key = (var, cell, int(level), tuple(sorted(self._pins(var).items())))
 
         def work(progress, cancel, publish=None):
@@ -937,7 +956,7 @@ class Viewer:
 
     def cancel_series(self, lon, lat, var, level=0) -> bool:
         """Stop the read for this point, if one is going."""
-        cell = int(self.mesh.cell_of(np.array([lon]), np.array([lat]))[0])
+        cell = self._cell_at(lon, lat)
         return self._jobs.cancel(
             (var, cell, int(level), tuple(sorted(self._pins(var).items()))))
 
@@ -1474,6 +1493,8 @@ def _handler(viewer: Viewer, html: str = ""):
                 if url.path == "/api/probe":
                     out = viewer.probe(float(q["lon"]), float(q["lat"]), q["var"],
                                        int(q.get("time", 0)), int(q.get("level", 0)))
+                    if not math.isfinite(out["value"]):
+                        out["value"] = None       # NaN is not JSON: a missing value
                     return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/profile" and hasattr(viewer, "profile_at_point"):
                     out = viewer.profile_at_point(float(q["lon"]), float(q["lat"]),
@@ -2406,7 +2427,9 @@ function foldBoot(){
       try{ localStorage.setItem(FOLD_KEY, JSON.stringify(ids)); }catch(e){}
     };
     head.onclick=flip;
-    head.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); flip(); } };
+    // stopped here: Space is also the page's play key
+    head.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){
+      e.preventDefault(); e.stopPropagation(); flip(); } };
   }
 }
 // ------------------------------------------------------------------ script
@@ -3936,8 +3959,13 @@ $("#wrap").onpointerup = async ev=>{
     if(PT) $("#pthint").textContent=why;
     return;
   }
+  if(d.cell<0){                            // beyond a regional grid or mesh
+    $("#probe2").textContent="outside the data";
+    if(PT) $("#pthint").textContent="that point is outside the data";
+    return;
+  }
   $("#probe2").innerHTML=`cell ${d.cell}<br>${d.lat}\u00b0, ${d.lon}\u00b0<br>`+
-                         `<b>${d.value.toPrecision(6)}</b>`;
+    `<b>${d.value===null ? "no data" : d.value.toPrecision(6)}</b>`;
   ptOpen(lon, lat, d);
 };
 $("#grid").onchange = ()=>{ graticule(); ptMark(); };

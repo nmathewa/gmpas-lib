@@ -31,7 +31,8 @@ def served(tmp_path_factory):
         full = ds.load()
     mesh.unlink()
     full["t2m"] = (("Time", "nCells"), np.arange(full.sizes["nCells"], dtype=float)[None])
-    full.to_netcdf(folder / "history.2012-01-01_00.00.00.nc")
+    for step in (1, 2):     # two steps, so there is something to play
+        full.to_netcdf(folder / f"history.2012-01-0{step}_00.00.00.nc")
 
     viewer = Viewer(folder, nx=600, ny=350)
     srv = bind(_handler(viewer, PAGE), 0)
@@ -88,6 +89,15 @@ def test_the_keyboard_folds_too(page):
     assert not page.is_visible("#elon0")
     page.keyboard.press(" ")
     assert page.is_visible("#elon0")
+
+
+def test_space_on_a_heading_does_not_start_playback(page):
+    page.focus("#extentsec > label")
+    page.keyboard.press(" ")
+    page.wait_for_timeout(300)
+    playing = page.evaluate("playingKey")
+    page.keyboard.press(" ")
+    assert playing is None
 
 
 def test_a_folded_section_keeps_what_it_holds(page):

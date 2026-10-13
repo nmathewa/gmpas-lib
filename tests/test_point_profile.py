@@ -29,7 +29,9 @@ def served(tmp_path_factory):
     lon = rng.uniform(-180, 180, 600)
     lat = np.degrees(np.arcsin(rng.uniform(-1, 1, 600)))
     mesh = folder / "mesh.nc"
-    write_mesh(mesh, list(zip(lon, lat, strict=True)))
+    # cells wide enough to meet: a click anywhere on the map is on a cell
+    areas = np.full(lon.size, 0.85 * 4 * np.pi * 6371229.0 ** 2 / lon.size)
+    write_mesh(mesh, list(zip(lon, lat, strict=True)), areas=areas)
     with xr.open_dataset(mesh) as ds:
         full = ds.load()
     mesh.unlink()
