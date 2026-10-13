@@ -90,3 +90,25 @@ def test_a_layer_the_run_does_not_have_is_refused(viewer):
     with pytest.raises(ValueError, match="not a map variable"):
         viewer.plot("sst", 0, 0, "layers", (-60, 60, -30, 30),
                     layers={"figure": {}, "layers": [{"kind": "contour", "var": "nope"}]})
+
+
+def test_a_layer_may_be_an_expression_of_the_runs_fields(viewer):
+    state = script.resolve(script.parse(
+        "contourf(sst)\ncontour(skintemp - 273.15, labels=True, label_fontsize=6)"),
+        viewer.describe())
+    assert state["layers"]["layers"][1]["var"] == "skintemp - 273.15"
+    from gmpas.viewer import _MeshOnGrid
+
+    extent = (-60.0, 60.0, -30.0, 30.0)
+    grid = _MeshOnGrid(viewer, extent, 400, 200)
+    plain = grid._cropped("skintemp", 0, 0, extent).values
+    shifted = grid._cropped("skintemp - 273.15", 0, 0, extent).values
+    shown = np.isfinite(plain)
+    np.testing.assert_allclose(shifted[shown], plain[shown] - 273.15)
+    assert viewer.plot("sst", 0, 0, "layers", extent, 640, 400, layers=state["layers"])
+
+
+def test_a_lone_contourf_on_a_run_is_drawn_as_one_layer(viewer):
+    state = script.resolve(script.parse("contourf(sst)"), viewer.describe())
+    assert state["kind"] == "layers"
+    assert state["layers"]["layers"][0]["kind"] == "contourf"

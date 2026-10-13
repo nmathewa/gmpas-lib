@@ -442,12 +442,13 @@ def _clean_options(given, table: dict, where: str) -> dict:
     return out
 
 
-def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
+def clean(stack, spatial_vars, level_counts: dict[str, int], derived=None) -> dict:
     """A validated copy of a stack, or ValueError naming what is wrong.
 
     `spatial_vars` are the variables a layer may draw; `level_counts` gives
     each one's level-axis length, so a pinned level is checked up front rather
-    than failing deep inside a read.
+    than failing deep inside a read. `derived`, where the viewer can draw an
+    expression of fields as a layer, says whether a name is one.
     """
     if isinstance(stack, (str, bytes)):
         if len(stack) > 64_000:
@@ -495,7 +496,8 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
             _check_contour_options(clean_layer["options"], where)
         for need in spec["needs"]:
             name = layer.get(need)
-            if name not in spatial_vars:
+            if name not in spatial_vars and not (
+                    derived and isinstance(name, str) and derived(name)):
                 raise ValueError(f"{where}{need}={name!r} is not a map variable of this "
                                  f"file; one of {sorted(spatial_vars)}")
             clean_layer[need] = name

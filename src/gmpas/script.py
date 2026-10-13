@@ -334,7 +334,8 @@ class _Fields:
             self.used.add(node.id)
             text, picked = self.defs[node.id]
             return text, dict(picked)
-        return ast.unparse(self._plain(node)), {}
+        picked: dict = {}
+        return ast.unparse(self._plain(node, picked)), picked
 
     def _pick(self, how: str, kw):
         value = kw.value
@@ -350,23 +351,31 @@ class _Fields:
                          '.sel(time="2012-03-01 12:00")')
         return value.value
 
-    def _plain(self, node):
-        """`node` with defined names written out, refusing what is not
-        arithmetic over fields."""
+    def _plain(self, node, picked: dict):
+        """`node` with defined names written out and what its fields pick
+        gathered into `picked`, refusing what is not arithmetic over fields.
+
+        `t.isel(time=0) - 273.15` and `(t - 273.15).isel(time=0)` are the same
+        field: the picks belong to the whole expression, so they must agree.
+        """
+        def gather(inner, found: dict):
+            for key, value in found.items():
+                if picked.setdefault(key, value) != value:
+                    _fail(node, f"the fields of one expression are picked at one "
+                                f"{key}, not {picked[key]!r} and {value!r}")
+            return ast.parse(inner, mode="eval").body
+
         if isinstance(node, ast.Name):
             if node.id in self.defs:
                 self.used.add(node.id)
-                text, picked = self.defs[node.id]
-                if picked:
-                    _fail(node, f"{node.id} already picks a step or a level; "
-                                f"pick after combining fields, not before")
-                return ast.parse(text, mode="eval").body
+                return gather(*self.defs[node.id])
             return node
         if _number_of(node) is not None:
             return node
         if isinstance(node, ast.BinOp) and \
                 isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
-            node.left, node.right = self._plain(node.left), self._plain(node.right)
+            node.left = self._plain(node.left, picked)
+            node.right = self._plain(node.right, picked)
             return node
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and not node.keywords:
@@ -374,11 +383,10 @@ class _Fields:
                 _fail(node, f"{node.func.id}() is not a function here"
                             f"{_near(node.func.id, _FUNCS)}; "
                             f"{', '.join(f + '()' for f in _FUNCS)} are")
-            node.args = [self._plain(a) for a in node.args]
+            node.args = [self._plain(a, picked) for a in node.args]
             return node
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            _fail(node, "pick a step or a level after combining fields: "
-                        "(a - b).isel(time=0)")
+            return gather(*self.read(node))
         _fail(node, "not understood; a field, a number, + - * /, hypot(a, b) "
                     "or diff(a)")
 
@@ -414,10 +422,10 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
         levels = set()
         for need, arg in zip(("u", "v") if vector else ("var",), call.args, strict=True):
             name, picked = fields.read(arg)
-            if not name.isidentifier():
-                _fail(arg, f"a layer draws a field of the file, not {name!r}")
             layer[need] = name
-            first = first or name
+            # the page's own variable is a field of the file: the first named
+            words = [w for w in re.findall(r"[A-Za-z_]\w*", name) if w not in _FUNCS]
+            first = first or (words[0] if words else None)
             if "time" in picked:
                 times[picked["time"]] = call
             levels.add(picked.get("level"))
@@ -457,9 +465,22 @@ def _parse_python(text: str) -> dict:
     defined: dict[str, int] = {}
     draws: list = []
 
-    def put(key: str, node, line: int, written=None):
+    lines: set[str] = set()          # keys set by a plain `key = value` line
+
+    def put(key: str, node, line: int, written=None, call=True):
+        # A call that draws says what it draws; a plain line saying the same
+        # thing another way gives way to it, in whichever order they come.
+        # Two lines, or two calls, that disagree are still a mistake.
         if key in where:
-            raise ScriptError(f"line {line}: {key} is already set on line {where[key]}")
+            if call and key in lines:
+                lines.discard(key)
+            elif not call and key not in lines:
+                return
+            else:
+                raise ScriptError(f"line {line}: {key} is already set on line "
+                                  f"{where[key]}")
+        if not call:
+            lines.add(key)
         where[key] = line
         value = _setting_text(key, node) if written is None else written
         if key in _colour.OPTIONS:
@@ -470,11 +491,11 @@ def _parse_python(text: str) -> dict:
         except ValueError as exc:
             raise ScriptError(f"line {line}: {exc}") from None
 
-    def field(node, line: int):
+    def field(node, line: int, call=True):
         expr, picked = fields.read(node)
-        put("var", node, line, expr)
+        put("var", node, line, expr, call)
         for key, value in picked.items():
-            put(key, node, line, str(value))
+            put(key, node, line, str(value), call)
 
     for stmt in tree.body:
         line = stmt.lineno
@@ -482,9 +503,9 @@ def _parse_python(text: str) -> dict:
                 and isinstance(stmt.targets[0], ast.Name):
             name = stmt.targets[0].id
             if name == "var":
-                field(stmt.value, line)
+                field(stmt.value, line, call=False)
             elif _is_key(name):
-                put(name, stmt.value, line)
+                put(name, stmt.value, line, call=False)
             elif name in (*_FUNCS, *_DRAW, *_LATER, "view"):
                 _fail(stmt, f"{name} is a word of the script and cannot be defined")
             else:
@@ -599,6 +620,32 @@ def resolve(state: dict, meta: dict) -> dict:
             offered = list(meta.get("kind_labels") or ["map"])
             if named is not None and named not in variables:
                 offered = ["map"]                # a derived field is the map only
+        if kind == "series" and meta.get("steps", 0) <= 1:
+            raise ScriptError("series: this file has one time step, so there is "
+                              "nothing to plot against time")
+        if kind == "profile" and named in variables \
+                and variables[named].get("levels", 1) <= 1:
+            raise ScriptError(f"profile: {named} has one level, so there is no "
+                              f"column to plot")
+        if kind in _AT_POINT and kind not in offered and meta.get("point_panel"):
+            # this page reads a point's series and column in its point panel,
+            # over the map, for any field
+            if state.get("point") is None:
+                raise ScriptError(f"{kind}: say where: "
+                                  f"{kind}({named or 'field'}, lon=147.4, lat=-2.0)")
+            out["panel"] = kind
+            kind = out["kind"] = "map"
+        if kind not in offered and kind in _AS_LAYER.values() and "layers" in offered:
+            # a run with no contourf plot of its own draws one as a single layer
+            keep = ("vmin", "vmax") if kind == "contour" else ("cmap", "vmin", "vmax")
+            options = {k: state[k] for k in keep if state.get(k) is not None}
+            lev = state.get("level")
+            out["layers"] = {"figure": {}, "layers": [
+                {"kind": kind, "var": named, "visible": True, "opacity": 1,
+                 "level": "follow" if lev is None else lev, "options": options},
+                *({"kind": k, "visible": True, "opacity": 1, "level": "follow",
+                   "options": {}} for k in ("coastlines", "gridlines"))]}
+            kind = out["kind"] = "layers"
         if kind not in offered:
             what = f"{named} has" if named else "this page has"
             raise ScriptError(f"kind: {what} no {kind!r} plot{_near(kind, offered)}; "
@@ -606,13 +653,21 @@ def resolve(state: dict, meta: dict) -> dict:
         if kind != "map" and state.get("proj") not in (None, LONLAT):
             raise ScriptError(f"kind: a {kind} plot is drawn on the {LONLAT} map; "
                               f"leave proj out or set proj = {LONLAT}")
-    if state.get("layers") is not None:
+    if out.get("layers") is not None:
         if not meta.get("layer_schema"):
             raise ScriptError("layers: this page draws one field at a time")
         spatial = [v["name"] for v in meta.get("variables", []) if v.get("spatial")]
         counts = {v["name"]: v.get("levels", 1) for v in meta.get("variables", [])}
+
+        def derived(name: str) -> bool:
+            try:
+                _derive.parse(name, spatial)
+            except KeyError:
+                return False
+            return True
         try:
-            _layers.clean(state["layers"], spatial, counts)
+            _layers.clean(out["layers"], spatial, counts,
+                          derived if meta.get("layer_expressions") else None)
         except ValueError as exc:
             raise ScriptError(f"layers: {exc}") from None
     if state.get("cmap") is not None and state["cmap"] not in meta.get("cmaps", []):

@@ -94,14 +94,15 @@ def test_view_frames_the_map():
     ("vectors(u)", "vectors\\(\\) takes u and v"),
     ("vectors(u.isel(level=1), v.isel(level=2))", "u and v are drawn at one level"),
     ("contourf(t2m.isel(time=0))\ncontour(u.isel(time=1))", "one time step"),
-    ("contourf(u - v)\ncontour(u)", "a layer draws a field of the file"),
     ("contourf(t2m, cmap=open)\ncontour(u)", "an option takes"),
     ("shade(sqrt(t2m))", "sqrt\\(\\) is not a function here"),
-    ("a = t2m.isel(time=1)\nshade(a - u)", "a already picks a step"),
+    ("shade(u.isel(time=1) - v.isel(time=2))", "picked at one time, not 1 and 2"),
     ("spd = hypot(u, v)\nshade(t2m)", "line 1: spd is set and never used"),
     ("shade(t2m", "line 1: "),
     ("shade(t2m)\nlevels = (,,2.5)", "line 2: .*text goes in quotes"),
-    ("shade(t2m.isel(time=1))\ntime = 2", "time is already set"),
+    ("var = t2m\nvar = u\nshade(t2m)", "line 2: var is already set on line 1"),
+    ("view(region=(1, 2, 3, 4))\nview(region=(1, 2, 3, 5))\nshade(u)",
+     "region is already set"),
     ("view = 3\nshade(t2m)", "view is a word of the script"),
 ])
 def test_what_is_not_understood_says_which_line_and_why(text, says):
@@ -194,13 +195,14 @@ def test_winds_alone_are_layers_too_and_a_definition_may_name_a_field():
 
 @pytest.mark.parametrize("text, says", [
     ("contourf(tm2)", "did you mean t2m"),
-    ("pcolormesh(t2m)", "kind: t2m has no 'pcolormesh' plot"),
+    ("profile(u, lon=1, lat=2)", "kind: u has no 'profile' plot"),
     ("kind = contuor\nvar = t2m", "did you mean contour"),
     ("contourf(hypot(u, v))", "kind: hypot\\(u, v\\) has no 'contourf' plot"),
     ("contourf(t2m)\nview(proj='Mercator')", "is drawn on the lonlat map"),
     ("contourf(t2m)\nvectors(u, w)", "layers: layer 2 \\(quiver\\): v='w' is not"),
     ("contourf(t2m, stride=3)\nvectors(u, v)", "layers: layer 1 \\(contourf\\)"),
     ("contourf(t2m)\ncontour(u.isel(level=7))", "layers: .*level 7 is out of range"),
+    ("contourf(u - v)\ncontour(u)", "var='u - v' is not a map variable"),
 ])
 def test_a_plot_the_file_cannot_draw_is_refused(text, says):
     with pytest.raises(script.ScriptError, match=says):
@@ -211,3 +213,63 @@ def test_a_page_without_layers_says_so():
     with pytest.raises(script.ScriptError, match="one field at a time"):
         script.resolve(script.parse("contourf(t2m)\nvectors(u, v)"),
                        {**KINDS, "layer_schema": None})
+
+
+def test_a_call_that_draws_wins_over_a_line_saying_the_same_another_way():
+    """A model restates the view as lines and then draws: that is one script."""
+    got = script.parse('var = t2m\ntime = 0\ncmap = viridis\nregion = 110, 155, -45, -10\n'
+                       'shade(u.isel(time=2), cmap="RdBu_r")\n')
+    assert (got["var"], got["time"], got["cmap"]) == ("u", 2, "RdBu_r")
+    assert got["region"] == [110.0, 155.0, -45.0, -10.0]
+    # in either order
+    assert script.parse("shade(u.isel(time=2))\nvar = t2m\ntime = 0\n")["var"] == "u"
+
+
+def test_a_layer_may_be_arithmetic_where_the_page_can_draw_it():
+    text = "contourf(t2m)\ncontour(t2m - 273.15, labels=True)"
+    got = script.parse(text)
+    assert got["layers"]["layers"][1]["var"] == "t2m - 273.15" and got["var"] == "t2m"
+    assert script.resolve(got, {**KINDS, "layer_expressions": True})["kind"] == "layers"
+    with pytest.raises(script.ScriptError, match="var='t2m - nope' is not a map"):
+        script.resolve(script.parse("contourf(t2m)\ncontour(t2m - nope)"),
+                       {**KINDS, "layer_expressions": True})
+
+
+def test_a_lone_contour_is_a_one_layer_figure_where_that_is_the_only_way():
+    meta = {**KINDS, "variables": [{**v, "kinds": ["map", "layers"]}
+                                   for v in KINDS["variables"]]}
+    got = script.resolve(script.parse('contourf(u.isel(level=2), cmap="RdBu_r")'), meta)
+    assert got["kind"] == "layers"
+    first = got["layers"]["layers"][0]
+    assert (first["kind"], first["var"], first["level"]) == ("contourf", "u", 2)
+    assert first["options"] == {"cmap": "RdBu_r"}
+    assert [x["kind"] for x in got["layers"]["layers"][1:]] == ["coastlines", "gridlines"]
+
+
+def test_a_series_needs_more_than_one_step_and_a_profile_more_than_one_level():
+    one = {**KINDS, "steps": 1, "labels": KINDS["labels"][:1]}
+    with pytest.raises(script.ScriptError, match="series: this file has one time step"):
+        script.resolve(script.parse("series(t2m, lon=147, lat=-2)"), one)
+    with pytest.raises(script.ScriptError, match="profile: t2m has one level"):
+        script.resolve(script.parse("profile(t2m, lon=147, lat=-2)"), KINDS)
+
+
+def test_where_a_point_is_read_in_the_panel_any_field_has_a_series():
+    panel = {**KINDS, "point_panel": True,
+             "variables": [{**v, "kinds": ["map", "layers"]} for v in KINDS["variables"]]}
+    got = script.resolve(script.parse("series(t2m, lon=147.4, lat=-2)"), panel)
+    assert (got["kind"], got["panel"], got["point"]) == ("map", "series", [147.4, -2.0])
+    got = script.resolve(script.parse("profile(u.isel(time=1), lon=10, lat=5)"), panel)
+    assert (got["kind"], got["panel"], got["time"]) == ("map", "profile", 1)
+    with pytest.raises(script.ScriptError, match="series: say where"):
+        script.resolve(script.parse("series(t2m)"), panel)
+
+
+def test_picking_before_or_after_arithmetic_is_the_same_field():
+    after = script.parse("shade((t2m - 273.15).isel(time=1))")
+    assert script.parse("shade(t2m.isel(time=1) - 273.15)") == after
+    assert script.parse("a = t2m.isel(time=1)\nshade(a - 273.15)") == after
+    got = script.parse("shade(hypot(u.isel(time=0, level=2), v.isel(level=2)))")
+    assert (got["var"], got["time"], got["level"]) == ("hypot(u, v)", 0, 2)
+    layer = script.parse("contourf(t2m)\ncontour(t2m.isel(time=0) - 273.15)")
+    assert layer["layers"]["layers"][1]["var"] == "t2m - 273.15" and layer["time"] == 0

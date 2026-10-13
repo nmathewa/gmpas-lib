@@ -150,8 +150,12 @@ Draw several things as one figure, in order, the first underneath:
   contourf(t.isel(time=0, level=3), cmap="RdBu_r", levels=[270, 280, 290])
   contour(z.isel(time=0, level=3), colors="black", levels=10)
   vectors(u.isel(time=0, level=3), v.isel(time=0, level=3), stride=4)
-  also barbs(u, v) and streamlines(u, v); a layer draws a field of the file,
-  not an expression, and every layer picks the same time. Such a figure is on
+  also barbs(u, v) and streamlines(u, v); every layer picks the same time.
+  contour options: levels=10 or [0, 5, 10], colors="black", linewidths=1,
+    labels=True, label_fontsize=8, label_every=2, cmap="viridis"
+  contourf options: levels, cmap, vmin, vmax
+  vectors options: stride=4 (every 4th point), color="black", scale, colorize=True
+{EXPRESSIONS}  Such a figure is on
   the plain lon/lat map: give no proj with it. To overlay on what is shown
   now, draw the variable the view names first, then the overlay.
 """
@@ -177,6 +181,9 @@ def system_prompt(meta: dict) -> str:
     where = (f"The data covers longitude {home[0]:g} to {home[1]:g} and latitude "
              f"{home[2]:g} to {home[3]:g}; give regions in that longitude range.\n"
              if home else "")
+    expressions = ("  A layer may be arithmetic on a field: "
+                   "contour(skintemp - 273.15).\n") if meta.get("layer_expressions") \
+        else "  A layer draws a field of the file, not an expression.\n"
     layers = "" if meta.get("layer_schema") else \
         "This file is drawn one field at a time: no layers, no winds.\n"
     return (
@@ -185,9 +192,10 @@ def system_prompt(meta: dict) -> str:
         "only what the request changes; when it asks for a different plot or an "
         "overlay, write every draw call the figure needs. If the request cannot "
         "be met, reply with one line starting `# ` that says why.\n\n"
-        f"{_LANGUAGE}\n"
-        "The view now is given as `key = value` lines; those keys may also be "
-        "set that way.\n\n"
+        f"{_LANGUAGE.replace('{EXPRESSIONS}', expressions)}\n"
+        "The view now is given as a script: `key = value` lines for one field, "
+        "draw calls for a figure of layers. To change a figure of layers, write "
+        "all of its calls again with the change.\n\n"
         f"Variables in this file:\n{variables}\n\n"
         f"{times}.\n{where}{layers}"
         f"Projections: {', '.join(meta.get('projections') or []) or 'none'}.\n"
@@ -235,12 +243,18 @@ def script_of(reply: str) -> str:
     return "\n".join(kept) + ("\n" if kept else "")
 
 
+#: How many earlier requests go with a new one.
+MAX_HISTORY = 6
+
+
 def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
-        post=_post) -> dict:
+        post=_post, history=None) -> dict:
     """The script for `text`, checked against the file `meta` describes.
 
     `current` is the view on screen, as a script, so a request such as
-    "the same, but zoomed on Africa" has something to mean. Returns
+    "the same, but zoomed on Africa" has something to mean; `history` is the
+    earlier requests of this conversation and what was answered, as
+    [{"request": ..., "reply": ...}], so that "no, the other one" does. Returns
     {"script": the text, "state": what `gmpas.script.resolve` made of it}.
     Raises ChatError when there is no usable script after one retry.
     """
@@ -255,11 +269,17 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
         raise ChatError(f"no model is configured; write {config_path()}")
     asked = text if not current.strip() else \
         f"The view now:\n{current.strip()}\n\nRequest: {text}"
-    messages = [{"role": "system", "content": system_prompt(meta)},
-                {"role": "user", "content": asked}]
+    messages = [{"role": "system", "content": system_prompt(meta)}]
+    said = [h for h in (history or []) if isinstance(h, dict)
+            and isinstance(h.get("request"), str) and isinstance(h.get("reply"), str)]
+    for turn in said[-MAX_HISTORY:]:
+        messages += [{"role": "user", "content": turn["request"][:MAX_TEXT]},
+                     {"role": "assistant", "content": turn["reply"][:2000]}]
+    messages.append({"role": "user", "content": asked})
     record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "model": cfg["model"],
               "file": meta.get("file"), "request": text, "view": current.strip(),
-              "system": messages[0]["content"], "rounds": []}
+              "system": messages[0]["content"],
+              "history": said[-MAX_HISTORY:], "rounds": []}
     try:
         return _rounds(cfg, messages, meta, post, record)
     except ChatError as exc:

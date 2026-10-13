@@ -107,7 +107,12 @@ class _MeshOnGrid:
             self.variables = ()
 
         def __getitem__(self, name):
-            return self.series.dataarray(name, 0)
+            import xarray as xr
+
+            try:
+                return self.series.dataarray(name, 0)
+            except KeyError:                 # an expression: it has no attributes
+                return xr.DataArray(0.0, name=name)
 
     def __init__(self, viewer, extent, width: int, height: int):
         self.viewer = viewer
@@ -524,6 +529,10 @@ class Viewer:
                             "layers": "layers (composite)"},
             "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),
+            # a layer may be an expression of fields: `values` computes those
+            "layer_expressions": True,
+            # a point's series and column are read in the point panel
+            "point_panel": True,
             "variables": out,
         }
 
@@ -903,7 +912,14 @@ class Viewer:
             stack = _layers.default_stack(var)
         names = self._spatial_vars()
         counts = {v: self._level_span(self.series.dataarray(v, 0)) for v in names}
-        return _layers.clean(stack, names, counts)
+
+        def derived(name: str) -> bool:
+            try:
+                _derive.parse(name, names)
+            except KeyError:
+                return False
+            return True
+        return _layers.clean(stack, names, counts, derived)
 
     def _render_layers(self, var, time, level, extent, layers, width, height) -> bytes:
         import matplotlib
@@ -1586,8 +1602,12 @@ def _handler(viewer: Viewer, html: str = ""):
                     return self._send(json.dumps(state).encode(), "application/json")
                 if url.path == "/api/chat":
                     try:
+                        try:
+                            said = json.loads(q.get("history") or "[]")
+                        except ValueError:
+                            said = []
                         got = _chat.ask(q.get("text", ""), viewer.describe(),
-                                        q.get("script", ""))
+                                        q.get("script", ""), history=said)
                     except _chat.ChatError as exc:
                         return self._send(json.dumps({"error": str(exc)}).encode(),
                                           "application/json", 400)
@@ -1616,6 +1636,10 @@ def _handler(viewer: Viewer, html: str = ""):
                     return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/series" and hasattr(viewer, "series_at_point"):
                     return _serve_series(self, viewer, q)
+            except (BrokenPipeError, ConnectionResetError):
+                # the page stopped waiting -- it asked for a newer frame -- so
+                # there is nobody to send this one, or an error about it, to
+                return None
             except Exception as exc:                      # surface, don't hang
                 body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
                 self.send_response(500)
@@ -2585,6 +2609,7 @@ function scriptBoot(){
 function chatSay(text, bad){
   const h=$("#chathint"); h.textContent=text; h.classList.toggle("bad", !!bad);
 }
+const CHAT=[];
 function chatLine(cls, text){
   const d=document.createElement("div"); d.className=cls; d.textContent=text;
   $("#chatlog").append(d); $("#chatlog").scrollTop=1e9;
@@ -2613,8 +2638,12 @@ async function chatAsk(){
   chatLine("q", text);
   const a=chatLine("a", `asking ${M.chat.model}\\u2026`);
   try{
-    const r=await fetch("api/chat?"+new URLSearchParams({text, script:scriptText()}));
+    const r=await fetch("api/chat?"+new URLSearchParams({text, script:scriptText(),
+      history:JSON.stringify(CHAT.slice(-6))}));
     const d=await r.json();
+    // what was said is sent with the next request: "no, the other one" and
+    // "still the same" mean nothing without it
+    CHAT.push({request:text, reply:r.ok ? d.script : "# "+d.error});
     if(!r.ok){ a.textContent=String(d.error); a.classList.add("bad"); return; }
     $("#scriptBox").value=d.script;
     a.textContent=d.script.trim();
@@ -2630,7 +2659,33 @@ function scriptSay(text, bad){
 // its own frame. Held, they ask for none; one frame is drawn at the end.
 let HOLD=false;
 function scriptNum(v){ return String(+(+v).toPrecision(10)); }
+// A figure of layers, as the calls that draw it: the Python form of a script
+const LY_VERB={pcolormesh:"pcolormesh", contourf:"contourf", contour:"contour",
+               imshow:"imshow", quiver:"vectors", barbs:"barbs", streamplot:"streamlines"};
+function scriptPy(v){
+  if(typeof v==="boolean") return v ? "True" : "False";
+  if(typeof v==="number") return String(v);
+  return JSON.stringify(String(v));
+}
+function scriptLayers(){
+  const t=$("#time").value, rows=[`view(region=(${boxOf(view).map(scriptNum).join(", ")}))`];
+  for(const L of LY.layers){
+    const verb=LY_VERB[L.kind];
+    if(!verb || L.visible===false) continue;        // coastlines, gridlines: always there
+    const lev=(L.level==null || L.level==="follow") ? $("#level").value : L.level;
+    const pick=n=>{ const v=varNamed(n);
+      const what=/^\\w+$/.test(n) ? n : `(${n})`;       // (a - b).isel(...)
+      return `${what}.isel(time=${t}${v && v.levels>1 ? `, level=${lev}` : ""})`; };
+    const args=(L.var ? [pick(L.var)] : [pick(L.u), pick(L.v)]).concat(
+      Object.entries(L.options||{}).filter(([,v])=>v!=null && v!=="")
+        .map(([k,v])=>`${k}=${scriptPy(v)}`));
+    rows.push(`${verb}(${args.join(", ")})`);
+  }
+  return rows.join("\\n")+"\\n";
+}
 function scriptText(){
+  if(cur.kinds && $("#kind").value==="layers" && LY && LY.layers.length)
+    return scriptLayers();
   const rows=[["var", cur.name], ["time", $("#time").value],
               ["level", $("#level").value]];
   if(cur.kinds && $("#kind").value && $("#kind").value!=="map")
@@ -2713,6 +2768,9 @@ async function scriptSet(s, first){
   if(box){ view=fit(box); clamp(); }
   else if("region" in s || "box" in s){ view={...home}; clamp(); }
   if(PT) ptStale("the view changed");
+  // a series or a profile at a point, on a page that reads them in the point
+  // panel: open it there once the map this script asked for is drawn
+  if(s.panel && s.point) setTimeout(()=>ptAt(s.point[0], s.point[1], s.panel), 0);
   scriptSay("applied");
   return true;
 }
@@ -4608,6 +4666,17 @@ async function ptRefresh(){
                               (d.cell>=0 ? ` \u00b7 cell ${d.cell}` : "");
     ptValue(d.value);
   }catch(e){ $("#pthint").textContent="probe failed: "+e; }
+}
+async function ptAt(lon, lat, what){
+  if(!cur || plotMode()) return;
+  lastClickPx=null; probePt={lon, lat};
+  const q=new URLSearchParams({lon, lat, var:cur.name,
+    time:$("#time").value, level:$("#level").value});
+  const res=await fetch("api/probe?"+q), d=await res.json();
+  if(!res.ok || d.value===undefined){
+    scriptSay(String((d && d.error) || "no value there"), true); return; }
+  ptOpen(lon, lat, d);
+  if(what==="profile") ptProfile(); else ptSeries();
 }
 $("#ptgo").onclick=ptSeries;
 $("#ptprof").onclick=ptProfile;

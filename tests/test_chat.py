@@ -79,6 +79,17 @@ def test_a_reply_in_the_python_form_with_an_overlay_is_a_figure_of_layers():
     assert got["script"].startswith("contourf(") and "Here" not in got["script"]
 
 
+def test_earlier_requests_go_with_a_new_one():
+    post = _says("var = t2m\n")
+    said = [{"request": f"request {i}", "reply": f"var = u\n# {i}"} for i in range(9)]
+    said.append({"request": 5, "reply": None})                  # not a turn: dropped
+    chat.ask("no, the temperature", META, cfg=CFG, post=post, history=said)
+    sent = post.seen[0]
+    assert [m["role"] for m in sent] == ["system"] + ["user", "assistant"] * 6 + ["user"]
+    assert sent[1]["content"] == "request 3" and sent[-2]["content"] == "var = u\n# 8"
+    assert "no, the temperature" in sent[-1]["content"]
+
+
 def test_a_refused_script_is_sent_back_once():
     post = _says("var = sst\n", "var = t2m\n")
     got = chat.ask("sea surface temperature", META, cfg=CFG, post=post)

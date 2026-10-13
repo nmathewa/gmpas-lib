@@ -94,7 +94,8 @@ def test_the_mpas_viewer_still_describes_its_own_shape(tmp_path):
     assert set(meta) == {"file", "mesh", "cells", "regional", "coverage", "files", "steps",
                          "labels", "scanning", "home", "nx", "ny", "cmaps", "ramps",
                          "palettes", "colour_options", "kind_labels", "kind_caps",
-                         "layer_schema", "native", "projections", "variables"}
+                         "layer_schema", "layer_expressions", "point_panel", "native",
+                         "projections", "variables"}
     assert set(meta["kind_labels"]) == set(meta["kind_caps"]) \
         == {"map", "hovmoller", "section", "layers"}
     assert meta["cmaps"][:len(CMAPS)] == CMAPS          # matplotlib first, in order
