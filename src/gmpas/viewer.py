@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from . import chat as _chat
 from . import colour as _colour
 from . import jobs as _jobs
 from . import data as _data
@@ -1348,6 +1349,17 @@ def _handler(viewer: Viewer, html: str = ""):
                     meta = {**viewer.describe(),
                             "script": {"keys": _script.keys(),
                                        "startup": _script.startup()}}
+                    # chat is an optional install; with it the right panel
+                    # is the chat box, once a model is named
+                    if _chat.installed():
+                        try:
+                            cfg = _chat.load_config()
+                            log = _chat.log_path(cfg)
+                            meta["chat"] = {"model": cfg["model"],
+                                            "log": str(log) if log else ""} \
+                                if cfg else {"setup": str(_chat.config_path())}
+                        except _chat.ChatError as exc:
+                            meta["chat"] = {"error": str(exc)}
                     return self._send(json.dumps(meta).encode(), "application/json")
                 if url.path == "/api/dims":
                     return _serve_dims(self, viewer, q)
@@ -1478,6 +1490,14 @@ def _handler(viewer: Viewer, html: str = ""):
                         return self._send(json.dumps({"error": str(exc)}).encode(),
                                           "application/json", 400)
                     return self._send(json.dumps(state).encode(), "application/json")
+                if url.path == "/api/chat":
+                    try:
+                        got = _chat.ask(q.get("text", ""), viewer.describe(),
+                                        q.get("script", ""))
+                    except _chat.ChatError as exc:
+                        return self._send(json.dumps({"error": str(exc)}).encode(),
+                                          "application/json", 400)
+                    return self._send(json.dumps(got).encode(), "application/json")
                 if url.path == "/api/projbox":
                     # a lon/lat region as the box that holds it in a projection
                     from .projection import make_crs, projected_extent
@@ -1941,7 +1961,19 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #scriptBox{width:100%;box-sizing:border-box;height:150px;font:11px monospace;
            margin-top:6px;resize:vertical;white-space:pre}
 #scriptsec .row{display:flex;gap:6px}
-#scripthint.bad{color:#e88}
+#scripthint.bad,#chathint.bad{color:#e88}
+/* With a model to ask, the right panel is the chat box and what cannot be
+   asked for: animation, export, the probe. The rest is one button away. */
+body.chat #right{width:300px}
+body.chat:not(.allctl) #projsec,body.chat:not(.allctl) #cmapsec,
+body.chat:not(.allctl) #coloursec,body.chat:not(.allctl) #rangesec,
+body.chat:not(.allctl) #extentsec{display:none!important}
+#chatText{width:100%;box-sizing:border-box;resize:vertical;font:12px inherit}
+#chatlog{max-height:260px;overflow-y:auto;margin-bottom:6px}
+#chatlog .q{color:var(--fg);margin:6px 0 2px}
+#chatlog .a{font:11px monospace;white-space:pre-wrap;color:var(--dim);
+            border-left:2px solid var(--line);padding-left:6px}
+#chatlog .a.bad{color:#e88}
 #lyJsonBox{width:100%;box-sizing:border-box;height:180px;font:11px monospace;margin-top:6px}
 #lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
 #hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
@@ -2134,6 +2166,15 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
 </div>
 <div id="right">
   <h1>options</h1>
+
+  <div class="sec" id="chatsec" style="display:none"><label>ask</label>
+    <div id="chatlog"></div>
+    <textarea id="chatText" maxlength="500" rows="2" spellcheck="false"
+      placeholder="wind speed over Africa, in Mercator"></textarea>
+    <div class="row" style="margin-top:6px"><button id="chatGo" style="flex:1">ask</button>
+      <button id="chatAll" title="show or hide the other controls">controls</button></div>
+    <div class="hint" id="chathint"></div>
+  </div>
 
   <div class="sec" id="dimssec" style="display:none"><label>dimensions</label>
     <div class="hint" id="dimswhy"></div>
@@ -2398,7 +2439,7 @@ async function boot(){
   // "loading…" with no explanation
   const first = M.variables.find(v=>!v.static) ?? M.variables[0];
   if(!first){ say("this file has no variables to draw"); return; }
-  scriptBoot();
+  scriptBoot(); chatBoot();
   if(M.script && M.script.startup){      // gmpas view --script
     $("#scriptBox").value=M.script.startup; $("#scriptsec").open=true;
     if(await scriptRun(M.script.startup, first.name)) return;
@@ -2443,6 +2484,50 @@ function scriptBoot(){
   $("#scriptsec").style.display="";
   $("#scripthint").title=Object.entries(M.script.keys)
     .map(([k,h])=>`${k}: ${h}`).join("\\n");
+}
+// Asking in words: a model the user runs writes the script, the server checks
+// it as it checks any script, and it lands in the script box -- so what was
+// understood is on the page to read and to correct.
+function chatSay(text, bad){
+  const h=$("#chathint"); h.textContent=text; h.classList.toggle("bad", !!bad);
+}
+function chatLine(cls, text){
+  const d=document.createElement("div"); d.className=cls; d.textContent=text;
+  $("#chatlog").append(d); $("#chatlog").scrollTop=1e9;
+  return d;
+}
+function chatBoot(){
+  if(!M.chat || !M.script) return;
+  $("#chatsec").style.display="";
+  if(M.chat.error || M.chat.setup){
+    $("#chatGo").disabled=true; $("#chatAll").style.display="none";
+    chatSay(M.chat.error || `no model yet: write ${M.chat.setup} with\\n`+
+      `url = http://127.0.0.1:11434\\nmodel = <a model your Ollama has>`, !!M.chat.error);
+    $("#chathint").style.whiteSpace="pre-wrap";
+    return;
+  }
+  document.body.classList.add("chat");
+  $("#right h1").textContent="ask";
+  chatSay(`answered by ${M.chat.model}, a model you run`+
+          (M.chat.log ? ` \\u00b7 kept in ${M.chat.log}` : ""));
+  relayout();
+}
+async function chatAsk(){
+  const text=$("#chatText").value.trim();
+  if(!text || !cur || $("#chatGo").disabled) return;
+  $("#chatGo").disabled=true; $("#chatText").value="";
+  chatLine("q", text);
+  const a=chatLine("a", `asking ${M.chat.model}\\u2026`);
+  try{
+    const r=await fetch("api/chat?"+new URLSearchParams({text, script:scriptText()}));
+    const d=await r.json();
+    if(!r.ok){ a.textContent=String(d.error); a.classList.add("bad"); return; }
+    $("#scriptBox").value=d.script;
+    a.textContent=d.script.trim();
+    if(!await scriptRun(d.script)){
+      a.textContent+="\\n"+$("#scripthint").textContent; a.classList.add("bad"); }
+  }catch(e){ a.textContent="no answer: "+e; a.classList.add("bad"); }
+  finally{ $("#chatGo").disabled=false; $("#chatlog").scrollTop=1e9; }
 }
 function scriptSay(text, bad){
   const h=$("#scripthint"); h.textContent=text; h.classList.toggle("bad", !!bad);
@@ -2521,6 +2606,12 @@ async function scriptSet(s, first){
   return true;
 }
 $("#scriptApply").onclick = ()=>scriptRun($("#scriptBox").value);
+$("#chatGo").onclick = chatAsk;
+$("#chatAll").onclick = ()=>{ document.body.classList.toggle("allctl"); };
+$("#chatText").addEventListener("keydown", e=>{
+  e.stopPropagation();                 // typing is not the map's arrow keys
+  if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); chatAsk(); }
+});
 $("#scriptFrom").onclick = ()=>{ if(!cur) return;
   $("#scriptBox").value=scriptText(); scriptSay("this view, as a script"); };
 $("#scriptCopy").onclick = ()=>{
