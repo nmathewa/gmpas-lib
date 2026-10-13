@@ -169,7 +169,8 @@ Draw several things as one figure, in order, the first underneath:
   contour(z.isel(time=0, level=3), colors="black", levels=10)
   vectors(u.isel(time=0, level=3), v.isel(time=0, level=3), stride=4)
   also barbs(u, v) and streamlines(u, v); every layer picks the same time.
-  contour options: levels=10 or [0, 5, 10], colors="black", linewidths=1,
+  contour options: levels=10 (a count) or [0, 5, 10] (values; [28] is the
+    one line at 28), colors="black", linewidths=1,
     labels=True, label_fontsize=8, label_every=2, cmap="viridis"
   contourf options: levels, cmap, vmin, vmax
   vectors options: stride=4 (every 4th point), color="black", scale, colorize=True
@@ -215,6 +216,7 @@ def system_prompt(meta: dict) -> str:
     expressions = ("  A layer may be arithmetic on a field: "
                    "contour(skintemp - 273.15).\n") if meta.get("layer_expressions") \
         else "  A layer draws a field of the file, not an expression.\n"
+    projections = [p for p in meta.get("projections") or [] if p != "auto"]
     layers = "" if meta.get("layer_schema") else \
         "This file is drawn one field at a time: no layers, no winds.\n"
     return (
@@ -244,6 +246,9 @@ def system_prompt(meta: dict) -> str:
         "- Asked why something was not done, or what you can do, answer in one "
         "line starting `# `. Small talk gets one friendly `# ` line that says "
         "what can be asked about the map.\n"
+        "- A field is what its label says and nothing else. If the file holds "
+        "no wind, do not draw ocean transport or anything else in its place: "
+        "say what the file does hold.\n"
         "- If the file does not hold what is asked for, or the request is not "
         "about the map, reply with one line starting `# ` that says why. If only "
         "part can be met, write that part and add a `# ` line saying what was "
@@ -254,7 +259,9 @@ def system_prompt(meta: dict) -> str:
         "all of its calls again with the change.\n\n"
         f"Variables in this file:\n{variables}\n\n"
         f"{times}.\n{where}{layers}"
-        f"Projections: {', '.join(meta.get('projections') or []) or 'none'}.\n"
+        # "auto" is left out: the model cannot know what it would pick, and on
+        # a global file it is the plain map already on screen
+        f"Projections: {', '.join(projections) or 'none'}.\n"
         f"Palettes: {', '.join(meta.get('cmaps') or [])}.\n")
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from gmpas import layers as L
 from gmpas import script
 
 META = {
@@ -179,7 +180,7 @@ vectors(u.isel(time=1, level=3), v.isel(time=1, level=3), stride=4, color="white
                                            "coastlines", "gridlines"]
     assert layers[0] == {"kind": "contourf", "var": "t2m", "level": "follow",
                          "visible": True, "opacity": 1,
-                         "options": {"cmap": "RdBu_r", "levels": "270, 280, 290"}}
+                         "options": {"cmap": "RdBu_r", "levels": [270, 280, 290]}}
     assert (layers[1]["var"], layers[1]["level"]) == ("u", 2)
     assert (layers[2]["u"], layers[2]["v"], layers[2]["level"]) == ("u", "v", 3)
     assert layers[2]["options"] == {"stride": 4, "color": "white"}
@@ -356,7 +357,7 @@ def test_an_option_matplotlib_takes_is_passed_on_as_a_plain_value():
     assert fill["options"] == {"antialiased": True}
     assert arrows["options"] == {"stride": 4, "pivot": "mid", "headlength": 7}
     # its own option takes the list as its form writes it; matplotlib's keeps it
-    assert lines["options"] == {"levels": "270, 280", "corner_mask": [1, 2]}
+    assert lines["options"] == {"levels": [270, 280], "corner_mask": [1, 2]}
     # one call with a layer's option is a figure of that one layer
     alone = script.resolve(script.parse("contourf(t2m, antialiased=True)"), KINDS)
     assert alone["kind"] == "layers"
@@ -493,3 +494,46 @@ def test_mark_puts_the_answer_or_a_place_on_the_map():
 def test_a_mark_that_names_nothing_is_refused(text, says):
     with pytest.raises(script.ScriptError, match=says):
         script.parse(text)
+
+
+def test_one_level_in_a_list_is_a_line_at_that_value_not_a_count():
+    def levels(text):
+        stack = script.resolve(script.parse(f"shade(t2m)\ncontour(u, {text})"), KINDS)
+        return L.clean(stack["layers"], ["t2m", "u"], {})["layers"][1]["options"]["levels"]
+
+    assert levels("levels=[28]") == [28.0]
+    assert levels("levels=[270, 280]") == [270.0, 280.0]
+    assert levels("levels=10") == 10
+    assert levels('colors=["red", "blue"], levels=[1, 2]') == [1.0, 2.0]
+    with pytest.raises(script.ScriptError, match="a single value is a count"):
+        levels("levels=1")
+
+
+def test_a_projection_named_beside_a_figure_is_the_figures_own():
+    got = script.resolve(script.parse(
+        'view(proj="Mercator", lon0=120)\nshade(t2m)\ncontour(u)'), KINDS)
+    assert got["proj"] == "" and "plon" not in got
+    assert got["layers"]["figure"] == {"projection": "Mercator", "central_longitude": 120.0}
+    # figure(projection=) said outright is kept; "auto" is left to the figure
+    got = script.resolve(script.parse(
+        'proj = Mercator\nshade(t2m)\ncontour(u)\nfigure(projection="Robinson")'), KINDS)
+    assert got["layers"]["figure"]["projection"] == "Robinson"
+    got = script.resolve(script.parse('view(proj="auto")\nshade(t2m)\nvectors(u, v)'),
+                         {**KINDS, "projections": ["auto", "Mercator"]})
+    assert got["proj"] == "" and got["layers"]["figure"] == {}
+    # a single plot of its own kind is still drawn on the plain map only
+    with pytest.raises(script.ScriptError, match="is drawn on the lonlat map"):
+        script.resolve(script.parse('hist(t2m)\nview(proj="Mercator")'), KINDS)
+
+
+def test_a_question_takes_no_argument():
+    for text in ('t2m.max("time")', "t2m.min(dim='time')", 'mark(t2m.max("time"))'):
+        with pytest.raises(script.ScriptError, match="over time|takes a question"):
+            script.parse(text)
+
+
+def test_an_overlay_goes_over_a_derived_field_too():
+    meta = {**KINDS, "layer_expressions": True}
+    text, got = script.read("vectors(u, v)", meta, shown="hypot(u, v)")
+    assert text.startswith("var = hypot(u, v)") and got["var"] == "u"
+    assert got["layers"]["layers"][0]["var"] == "hypot(u, v)"

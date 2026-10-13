@@ -402,14 +402,19 @@ def _coerce(name: str, spec: dict, value, where: str):
                                  f"x o O . * only")
             return [p or None for p in parts]
         if kind == "levels":
+            listed = isinstance(value, (list, tuple))     # values, never a count
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 values = [value]
+            elif listed:
+                values = list(value)
             else:
                 values = [v for v in re.split(r"[,\s]+", text.strip()) if v]
             numbers = [float(v) for v in values]
             if not numbers or len(numbers) > MAX_LEVELS \
                     or not all(math.isfinite(v) for v in numbers):
                 raise ValueError
+            if len(numbers) == 1 and listed:
+                return numbers                            # one line, at that value
             if len(numbers) == 1:
                 count = int(numbers[0])
                 if count != numbers[0] or not 2 <= count <= MAX_LEVELS:

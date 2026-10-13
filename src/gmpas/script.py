@@ -484,9 +484,9 @@ def _option_of(kind: str, name: str, node):
     passed on to matplotlib keeps the list."""
     value = _literal(node)
     listed = name in _layers.LAYER_KINDS.get(kind, {}).get("options", {})
-    if isinstance(value, list) and (listed or kind == "figure"):
+    if isinstance(value, list) and name != "levels" and (listed or kind == "figure"):
         return ", ".join(str(v) for v in value)
-    return value
+    return value                # levels=[28] is a line at 28; levels=28 is a count
 
 
 def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
@@ -625,6 +625,10 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
             if call.func.attr not in _STATS:
                 _fail(call, f".{call.func.attr}() is not in the script yet; "
                             f".max() and .min() are")
+            if call.args or call.keywords:
+                _fail(call, f".{call.func.attr}() with nothing in the brackets asks "
+                            f"where a field is largest or smallest in view; over "
+                            f"time or another axis is not in the script yet")
             if "ask" in out:
                 _fail(call, "one question to a script")
             expr, picked = fields.read(call.func.value)
@@ -639,7 +643,7 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
             # a question whose answer is also marked on the map, or a place
             arg = call.args[0] if len(call.args) == 1 and not call.keywords else None
             if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Attribute) \
-                    and arg.func.attr in _STATS:
+                    and arg.func.attr in _STATS and not arg.args and not arg.keywords:
                 if "ask" in out:
                     _fail(call, "one question to a script")
                 expr, picked = fields.read(arg.func.value)
@@ -716,7 +720,8 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
             stack["layers"].insert(at, {"kind": "pcolormesh", "var": under,
                                         "visible": True, "opacity": 1,
                                         "level": "follow", "options": {}})
-            extra["var"] = re.findall(r"[A-Za-z_]\w*", under)[0]
+            extra["var"] = next(w for w in re.findall(r"[A-Za-z_]\w*", under)
+                                if w not in _FUNCS)
         line = draws[0][1].lineno
         put("kind", draws[0][1], line, "layers")
         for key, value in extra.items():
@@ -907,6 +912,21 @@ def resolve(state: dict, meta: dict) -> dict:
             what = f"{named} has" if named else "this page has"
             raise ScriptError(f"kind: {what} no {kind!r} plot{_near(kind, offered)}; "
                               f"one of {', '.join(offered)}")
+        if kind == "layers" and proj not in (None, LONLAT) \
+                and (proj == "auto" or proj in _layers.PROJECTIONS):
+            # a figure of layers has its own projection: the one named for
+            # the map is the one meant for the figure, and the page's own map
+            # stays the plain one underneath. "auto" is left to the figure.
+            stack = out["layers"] = copy.deepcopy(out.get("layers") or state["layers"])
+            if proj != "auto":
+                stack["figure"].setdefault("projection", proj)
+                for key, name in (("plon", "central_longitude"),
+                                  ("plat", "central_latitude")):
+                    if out.get(key) is not None:
+                        stack["figure"].setdefault(name, out[key])
+            for key in ("plon", "plat", "box"):
+                out.pop(key, None)
+            proj = LONLAT
         if kind != "map" and proj not in (None, LONLAT):
             raise ScriptError(f"kind: a {kind} plot is drawn on the {LONLAT} map; "
                               f"leave proj out or set proj = {LONLAT}")
