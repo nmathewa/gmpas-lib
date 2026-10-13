@@ -9,6 +9,12 @@ description = "Fast plotting of MPAS output on its own native variable-resolutio
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
+authors = [
+    { name = "Nirmal Mathew Alex", email = "nalex2023@my.fit.edu" },
+    { name = "May Wong", email = "mwong@ucar.edu" },
+    { name = "Jimy Dudhia", email = "dudhia@ucar.edu" },
+    { name = "Pallav Ray", email = "pray@fit.edu" },
+]
 keywords = ["mpas", "unstructured", "voronoi", "atmosphere", "visualization"]
 classifiers = [
     "Development Status :: 3 - Alpha",

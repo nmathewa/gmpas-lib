@@ -5,6 +5,23 @@ type: software
 authors:
   - given-names: Nirmal Mathew
     family-names: Alex
+    email: nalex2023@my.fit.edu
+    affiliation: Florida Institute of Technology
+  - given-names: May
+    family-names: Wong
+    email: mwong@ucar.edu
+    affiliation: NSF National Center for Atmospheric Research
+    orcid: "https://orcid.org/0000-0002-8422-433X"
+  - given-names: Jimy
+    family-names: Dudhia
+    email: dudhia@ucar.edu
+    affiliation: NSF National Center for Atmospheric Research
+    orcid: "https://orcid.org/0000-0002-2394-6232"
+  - given-names: Pallav
+    family-names: Ray
+    email: pray@fit.edu
+    affiliation: Florida Institute of Technology
+    orcid: "https://orcid.org/0000-0001-8924-1852"
 version: 0.8.0
 date-released: "2026-10-09"
 repository-code: "https://github.com/nmathewa/gmpas-lib"
