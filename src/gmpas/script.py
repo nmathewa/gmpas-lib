@@ -22,7 +22,8 @@ the two forms mix:
 
 A name that is not a key is a definition, `.isel(time=, level=)` picks a step
 and a level by number (from 0, and -1 is the last step), `.sel(time="...")`
-picks a step by its label, `view()` frames the map and `shade()` draws. It
+picks a step by its label and `.sel(level=850)` a level by its value,
+`view()` frames the map and `shade()` draws. It
 reads like Python and is not run as Python: the text goes through Python's
 parser and only these forms are accepted.
 
@@ -56,6 +57,7 @@ applies what `resolve` returns; this module draws nothing.
 from __future__ import annotations
 
 import ast
+import copy
 import difflib
 import math
 import re
@@ -289,7 +291,8 @@ def _split(text: str) -> tuple[str, list[tuple[int, str, str | None]]]:
         if line[:1] == "!":
             line = ""
         hit = _SETTING.match(line) if depth == 0 else None
-        if hit and hit[1].lower() != "var" and _is_key(hit[1].lower()):
+        if hit and _is_key(hit[1].lower()) and (hit[1].lower() != "var"
+                                                or not hit[2].strip()):
             key, value = hit[1].lower(), hit[2].strip()
             quoted = _QUOTED.match(value)
             if quoted:
@@ -402,7 +405,10 @@ class _Fields:
                 _fail(value, f".isel({kw.arg}=) takes a whole number, counted from 0")
             return number
         if kw.arg == "level":
-            _fail(value, "a level is picked by number for now: .isel(level=0)")
+            if number is None:
+                _fail(value, ".sel(level=) takes the level's own value: "
+                             ".sel(level=850)")
+            return {"value": float(number)}       # its number is the file's to say
         if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
             _fail(value, '.sel(time=) takes a step\'s label in quotes: '
                          '.sel(time="2012-03-01 12:00")')
@@ -497,7 +503,7 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
                   else f"{verb}() takes one field")
         layer = {"kind": _VECTOR[verb] if vector else _AS_LAYER[verb],
                  "visible": True, "opacity": 1, "level": "follow", "options": {}}
-        levels = set()
+        levels = []
         for need, arg in zip(("u", "v") if vector else ("var",), call.args, strict=True):
             name, picked = fields.read(arg)
             layer[need] = name
@@ -506,24 +512,22 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
             first = first or (words[0] if words else None)
             if "time" in picked:
                 times[picked["time"]] = call
-            levels.add(picked.get("level"))
-        if len(levels) > 1:
+            levels.append(picked.get("level"))
+        if any(lev != levels[0] for lev in levels):
             _fail(call, "u and v are drawn at one level")
-        if None not in levels:
-            layer["level"] = levels.pop()
+        if levels[0] is not None:
+            layer["level"] = levels[0]
         for kw in call.keywords:
             layer["options"][kw.arg] = _option_of(layer["kind"], kw.arg, kw.value)
         layers.append(layer)
     if len(times) > 1:
         _fail(list(times.values())[-1], "a figure is of one time step; "
                                         "every layer must pick the same")
-    if first is None:
-        _fail(draws[0][1], "a figure draws at least one field: contourf(t2m)")
     for kind in ("coastlines", "gridlines"):         # there unless drawn already
         if not any(layer["kind"] == kind for layer in layers):
             layers.append({"kind": kind, "visible": True, "opacity": 1,
                            "level": "follow", "options": {}})
-    extra = {"var": first}
+    extra = {"var": first} if first else {}     # none: the map's own layers only
     if times:
         extra["time"] = next(iter(times))
     return {"figure": figure, "layers": layers}, extra
@@ -548,7 +552,8 @@ def _parse_python(text: str) -> dict:
 
     lines: set[str] = set()          # keys set by a plain `key = value` line
 
-    def put(key: str, node, line: int, written=None, call=True, clear=False):
+    def put(key: str, node, line: int, written=None, call=True, clear=False,
+            ready=None):
         # A call that draws says what it draws; a plain line saying the same
         # thing another way gives way to it, in whichever order they come.
         # Two lines, or two calls, that disagree are still a mistake.
@@ -563,6 +568,9 @@ def _parse_python(text: str) -> dict:
         if not call:
             lines.add(key)
         where[key] = line
+        if ready is not None:
+            out[key] = ready
+            return
         value = None if clear else \
             _setting_text(key, node) if written is None else written
         if key in _colour.OPTIONS:
@@ -580,7 +588,10 @@ def _parse_python(text: str) -> dict:
         expr, picked = fields.read(node)
         put("var", node, line, expr, call)
         for key, value in picked.items():
-            put(key, node, line, str(value), call)
+            if isinstance(value, dict):
+                put(key, node, line, call=call, ready=value)
+            else:
+                put(key, node, line, str(value), call)
 
     for stmt in tree.body:
         line = stmt.lineno
@@ -591,7 +602,7 @@ def _parse_python(text: str) -> dict:
                 field(stmt.value, line, call=False)
             elif _is_key(name):
                 put(name, stmt.value, line, call=False)
-            elif name in (*_FUNCS, *_DRAW, *_LATER, "view"):
+            elif name in (*_DRAW, *_LATER, "view"):
                 _fail(stmt, f"{name} is a word of the script and cannot be defined")
             else:
                 fields.defs[name] = fields.read(stmt.value)
@@ -636,6 +647,13 @@ def _parse_python(text: str) -> dict:
     alone = len(draws) == 1 and draws[0][0] in _FIELD and not (
         draws[0][0] in _AS_LAYER and draws[0][0] != "shade"
         and any(kw.arg not in own for kw in draws[0][1].keywords))
+    # A plain `var = x` line names the shaded field. Beside calls that shade
+    # nothing -- contour lines, winds -- it is what they are drawn over.
+    under = out.get("var") if "var" in lines else None
+    if alone and under and draws[0][0] == "contour" \
+            and len(draws[0][1].args) == 1 \
+            and fields.read(draws[0][1].args[0])[0] != under:
+        alone = False
     if alone:
         verb, call = draws[0]
         line = call.lineno
@@ -660,6 +678,14 @@ def _parse_python(text: str) -> dict:
             put("point", call, line, f"{point['lon']!r}, {point['lat']!r}")
     elif draws:
         stack, extra = _stack(draws, fields)
+        shaded = ("pcolormesh", "contourf", "imshow")
+        if under and not any(x["kind"] in shaded for x in stack["layers"]):
+            at = next(i for i, x in enumerate(stack["layers"])
+                      if x["kind"] not in ("land", "ocean"))
+            stack["layers"].insert(at, {"kind": "pcolormesh", "var": under,
+                                        "visible": True, "opacity": 1,
+                                        "level": "follow", "options": {}})
+            extra["var"] = re.findall(r"[A-Za-z_]\w*", under)[0]
         line = draws[0][1].lineno
         put("kind", draws[0][1], line, "layers")
         for key, value in extra.items():
@@ -670,6 +696,74 @@ def _parse_python(text: str) -> dict:
             raise _Unused(f"line {line}: {name} is set and never used"
                           f"{_near(name, keys())}")
     return _finish(out, colour, where)
+
+
+_SHADED = ("pcolormesh", "contourf", "imshow")
+_NO_FIELD = re.compile(r"^[ \t]*var[ \t]*=[ \t]*$", re.M)
+
+
+def underlay(text: str, parsed: dict, shown: str | None) -> str | None:
+    """`text` with the field on screen named as what it draws over, or None
+    when it needs nothing added.
+
+    A script changes only what it names, so contour lines, winds or rivers
+    written alone are drawn over the field already shown: this says so in the
+    script itself, with a `var = ...` line, so that what is applied and what
+    is read are the same text. A script that shades a field of its own, or
+    says `var =` -- nothing underneath -- is left as it is.
+    """
+    if not shown or parsed.get("kind") != "layers" or _NO_FIELD.search(text):
+        return None
+    layers = (parsed.get("layers") or {}).get("layers", [])
+    if any(layer.get("kind") in _SHADED for layer in layers):
+        return None
+    return f"var = {shown}\n{text}"
+
+
+def read(text: str, meta: dict, shown: str | None = None) -> tuple[str, dict]:
+    """A script checked against one open file and the view on screen:
+    (the text as applied, what `resolve` made of it)."""
+    parsed = parse(text)
+    more = underlay(text, parsed, shown)
+    if more is not None:
+        try:
+            return more, resolve(parse(more), meta)
+        except ScriptError:
+            pass                  # what is shown cannot lie under a figure here
+    return text, resolve(parsed, meta)
+
+
+#: What the plain lon/lat map is also called.
+_LONLAT_NAMES = {"lonlat", "latlon", "platecarree", "equirectangular", "flat", "plain"}
+
+
+def _projection(name, offered: list[str]):
+    """A projection as this page names it: its own spelling whatever the case,
+    and the lon/lat map by any of its names."""
+    if not isinstance(name, str):
+        return name
+    key = re.sub(r"[\s_/-]", "", name).lower()
+    if key in _LONLAT_NAMES:
+        return LONLAT
+    return {p.lower(): p for p in offered}.get(key, name)
+
+
+def _level_index(lev, expr, variables: dict):
+    """A level given by its value as its number, where the file lists them."""
+    if not isinstance(lev, dict):
+        return lev
+    words = [expr] if expr in variables else re.findall(r"[A-Za-z_]\w*", expr or "")
+    owner = next((w for w in words if (variables.get(w) or {}).get("level_values")), None)
+    if owner is None:
+        raise ScriptError(f"level: {expr or 'this field'} lists no level values in "
+                          f"this file; pick by number: .isel(level=0)")
+    values, want = variables[owner]["level_values"], lev["value"]
+    for i, value in enumerate(values):
+        if abs(value - want) <= 1e-6 * max(1.0, abs(want)):
+            return i
+    units = variables[owner].get("level_units") or ""
+    raise ScriptError(f"level: {want:g} is not one of {owner}'s levels: "
+                      f"{', '.join(f'{v:g}' for v in values)} {units}".rstrip())
 
 
 def resolve(state: dict, meta: dict) -> dict:
@@ -709,7 +803,7 @@ def resolve(state: dict, meta: dict) -> dict:
             raise ScriptError(f"time: step {t} is outside this run's {steps} step(s)")
         out["time"] = t % steps
     if state.get("level") is not None:
-        lev = state["level"]
+        lev = out["level"] = _level_index(state["level"], out.get("var"), variables)
         if lev < 0 or (levels is not None and lev >= levels):
             raise ScriptError(f"level: {lev} is outside {out['var']}'s "
                               f"{levels} level(s)" if levels is not None
@@ -738,9 +832,12 @@ def resolve(state: dict, meta: dict) -> dict:
             ask["time"] = t % steps
         count = variables[name].get("levels", 1) if name in variables else None
         lev = ask.get("level")
+        if lev is not None:
+            lev = ask["level"] = _level_index(lev, ask["var"], variables)
         if lev is not None and (lev < 0 or (count is not None and lev >= count)):
             raise ScriptError(f"level: {lev} is outside {ask['var']}'s level(s)")
         out["ask"] = ask
+    proj = _projection(state.get("proj"), meta.get("projections") or [])
     kind = state.get("kind")
     if kind is not None:
         named = out.get("var")
@@ -779,7 +876,7 @@ def resolve(state: dict, meta: dict) -> dict:
             what = f"{named} has" if named else "this page has"
             raise ScriptError(f"kind: {what} no {kind!r} plot{_near(kind, offered)}; "
                               f"one of {', '.join(offered)}")
-        if kind != "map" and state.get("proj") not in (None, LONLAT):
+        if kind != "map" and proj not in (None, LONLAT):
             raise ScriptError(f"kind: a {kind} plot is drawn on the {LONLAT} map; "
                               f"leave proj out or set proj = {LONLAT}")
     if out.get("layers") is not None:
@@ -794,17 +891,39 @@ def resolve(state: dict, meta: dict) -> dict:
             except KeyError:
                 return False
             return True
+        stack = out["layers"] = copy.deepcopy(out["layers"])
+        if not any(_layers.LAYER_KINDS.get(layer.get("kind"), {}).get("needs")
+                   for layer in stack["layers"]):
+            raise ScriptError("layers: a figure draws a field, and this one names "
+                              "none; say which lies underneath with a line: var = ...")
+        for layer in stack["layers"]:
+            if isinstance(layer.get("level"), dict):
+                layer["level"] = _level_index(
+                    layer["level"], layer.get("var") or layer.get("u"), variables)
         try:
-            _layers.clean(out["layers"], spatial, counts,
+            _layers.clean(stack, spatial, counts,
                           derived if meta.get("layer_expressions") else None)
         except ValueError as exc:
             raise ScriptError(f"layers: {exc}") from None
     if state.get("cmap") is not None and state["cmap"] not in meta.get("cmaps", []):
-        raise ScriptError(f"cmap: {state['cmap']!r} is not one of this page's palettes"
-                          f"{_near(state['cmap'], meta.get('cmaps', []))}")
+        # matplotlib's own way of saying "reversed": viridis_r is viridis with
+        # reverse set, and RdBu is the page's RdBu_r the same way
+        cmap, cmaps = state["cmap"], {c.lower(): c for c in meta.get("cmaps", [])}
+        other = cmap[:-2] if cmap.endswith("_r") else cmap + "_r"
+        if cmap.lower() in cmaps:
+            out["cmap"] = cmaps[cmap.lower()]
+        elif other.lower() in cmaps and meta.get("colour_options"):
+            out["cmap"] = cmaps[other.lower()]
+            colour = dict(out.get("colour") or {})
+            # the other way round from whatever `reverse` already says
+            colour["reverse"] = None if colour.get("reverse") else True
+            out["colour"] = colour
+        else:
+            raise ScriptError(f"cmap: {cmap!r} is not one of this page's palettes"
+                              f"{_near(cmap, meta.get('cmaps', []))}")
     if "proj" in state:
         offered = meta.get("projections") or []
-        name = state["proj"]
+        name = out["proj"] = proj
         if name in (None, LONLAT):
             out["proj"] = ""
         elif name not in offered:

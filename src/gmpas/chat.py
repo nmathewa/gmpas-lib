@@ -54,7 +54,16 @@ _CALLS = re.compile(r"[A-Za-z_(][\w.() +*/-]*\(")
 
 
 class ChatError(ValueError):
-    """A request that could not be turned into a script; the message says why."""
+    """A request that could not be turned into a script; the message says why.
+
+    `kind` says which way it failed: "said" when the model answered in words
+    that it cannot, "refused" when its script was refused twice, "server"
+    when the model could not be reached, and "request" for the rest.
+    """
+
+    def __init__(self, message: str, kind: str = "request"):
+        super().__init__(message)
+        self.kind = kind
 
 
 def installed() -> bool:
@@ -136,6 +145,7 @@ Python: only the forms below exist. Counting is from 0; time=-1 is the last step
 Pick from a field:
   t.isel(time=0, level=3)          a step and a level, by number
   t.sel(time="2012-03-01 12:00")   a step, by its label
+  t.sel(level=850)                 a level, by its value, where the file lists them
 Make a field (then draw it with shade):
   spd = hypot(u, v)                also a - b, a * 1000, a / b, diff(a)
 Ask where a field is largest or smallest in view. The page answers with the
@@ -145,8 +155,11 @@ Frame the map:
   view(region=(west, east, south, north))
   view(proj="Mercator")            a projection; shade() only
   view(proj="Orthographic", lon0=120, lat0=10)
+  view(proj="lonlat")              back to the plain map
 Draw one field -- the call chooses the kind of plot:
   shade(x, cmap="viridis", vmin=0, vmax=30, levels="(0,30,2)")   the fast map
+    more options: levels="20" (that many colours), reverse=True,
+    norm="log" (also "symlog", "power"), center=0, extend="both"
   contourf(x)   contour(x)   pcolormesh(x)   imshow(x)   hist(x)   hovmoller(x)
   series(x, lon=147.4, lat=-2.0)   profile(x, lon=147.4, lat=-2.0)
 Draw several things as one figure, in order, the first underneath:
@@ -169,8 +182,7 @@ Draw several things as one figure, in order, the first underneath:
          EqualEarth, Orthographic, NorthPolarStereo, SouthPolarStereo,
          LambertConformal, Mercator; look: matplotlib, grads, ferret
 {EXPRESSIONS}  Such a figure takes its
-  projection from figure(projection=), not from view(proj=). To overlay on what is shown
-  now, draw the variable the view names first, then the overlay.
+  projection from figure(projection=), not from view(proj=).
 """
 
 
@@ -179,7 +191,11 @@ def system_prompt(meta: dict) -> str:
     def line(v):
         out = f"  {v['name']}: {v.get('label') or v['name']}"
         if v.get("levels", 1) > 1:
-            out += f" ({v['levels']} levels, 0 to {v['levels'] - 1})"
+            out += f" ({v['levels']} levels, 0 to {v['levels'] - 1}"
+            if v.get("level_values"):
+                out += ": " + ", ".join(f"{x:g}" for x in v["level_values"]) \
+                    + f" {v.get('level_units') or ''}".rstrip()
+            out += ")"
         if v.get("kinds"):
             out += f"; plots: {', '.join(v['kinds'])}"
         return out
@@ -201,10 +217,32 @@ def system_prompt(meta: dict) -> str:
         "This file is drawn one field at a time: no layers, no winds.\n"
     return (
         "You turn a request about a map of weather or climate data into a gmpas "
-        "script. Reply with the script only: no explanation, no code fence. Write "
-        "only what the request changes; when it asks for a different plot or an "
-        "overlay, write every draw call the figure needs. If the request cannot "
-        "be met, reply with one line starting `# ` that says why.\n\n"
+        "script. Reply with the script only: no explanation, no code fence.\n"
+        "- Write only the lines that change. Do not repeat the view: what a "
+        "script does not name stays as it is.\n"
+        "- One field is `shade(x)`, or a `var = x` line: that is the fast map the "
+        "user pans and zooms. Use figure(), contours, winds and the map's own "
+        "layers only when the request asks for an overlay, a map feature, a "
+        "title or a look; they make a still figure.\n"
+        "- Contour lines, winds and the map's own layers written alone are drawn "
+        "over the field on screen. To put another field underneath, begin with "
+        "`var = x` or shade(x); for nothing underneath, begin with `var =`. When "
+        "the view already lists draw calls, write all of them again with the "
+        "change.\n"
+        "- `level = 3` is a level by its number. A level by its value is "
+        "`x.sel(level=850)`.\n"
+        "- To clear a `key = value` setting such as vmin or levels, write it with "
+        "nothing after the equals sign: `vmin =`. A layer is not a setting: to "
+        "take one out of a figure, write the figure's other calls again without "
+        "it.\n"
+        "- Not possible yet: an average, a sum or another statistic over space "
+        "or time; saving or animating (the page's export buttons do those); a "
+        "cross-section. Say so in one line starting `# `, and do not draw "
+        "something else in its place.\n"
+        "- If the file does not hold what is asked for, or the request is not "
+        "about the map, reply with one line starting `# ` that says why. If only "
+        "part can be met, write that part and add a `# ` line saying what was "
+        "left out.\n\n"
         f"{_LANGUAGE.replace('{EXPRESSIONS}', expressions)}\n"
         "The view now is given as a script: `key = value` lines for one field, "
         "draw calls for a figure of layers. To change a figure of layers, write "
@@ -229,12 +267,13 @@ def _post(cfg: dict, messages: list[dict]) -> str:
         return got["message"]["content"] or ""
     except ollama.ResponseError as exc:
         raise ChatError(f"the model server answered {exc.status_code}: "
-                        f"{exc.error}") from None
+                        f"{exc.error}", "server") from None
     except (KeyError, TypeError):
-        raise ChatError("the model server's answer had no message in it") from None
+        raise ChatError("the model server's answer had no message in it",
+                        "server") from None
     except Exception as exc:                 # no route, refused, timed out
         raise ChatError(f"no answer from the model server at {cfg['url']}: "
-                        f"{exc}") from None
+                        f"{exc}", "server") from None
 
 
 def script_of(reply: str) -> str:
@@ -294,15 +333,37 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
               "system": messages[0]["content"],
               "history": said[-MAX_HISTORY:], "rounds": []}
     try:
-        return _rounds(cfg, messages, meta, post, record)
+        return _rounds(cfg, messages, meta, post, record, _shown(current, meta))
     except ChatError as exc:
-        record["error"] = str(exc)
+        record["error"], record["outcome"] = str(exc), exc.kind
         raise
     finally:
         _log(cfg, record)
 
 
-def _rounds(cfg, messages, meta, post, record) -> dict:
+def _shown(current: str, meta: dict):
+    """The field the view on screen shows, when its script says so."""
+    try:
+        return _script.resolve(_script.parse(current), meta).get("var")
+    except _script.ScriptError:
+        return None
+
+
+def _fits(state: dict, shown, meta: dict) -> None:
+    """What a reply leaves to the view on screen must fit it too: a level set
+    with no field named is a level of the field shown."""
+    lev = state.get("level")
+    fields = {v["name"]: v for v in meta.get("variables", [])}
+    if lev is None or "var" in state or shown not in fields:
+        return
+    count = fields[shown].get("levels", 1)
+    if lev >= count:
+        raise _script.ScriptError(
+            f"level: {lev} is outside {shown}'s {count} level(s), numbered from 0; "
+            f"a level by its value is {shown}.sel(level={lev})")
+
+
+def _rounds(cfg, messages, meta, post, record, shown=None) -> dict:
     problem = ""
     for _ in range(2):
         reply = post(cfg, messages)
@@ -312,9 +373,10 @@ def _rounds(cfg, messages, meta, post, record) -> dict:
         settings = [line for line in written.splitlines() if line[0] not in "#!"]
         if not settings:
             said = written.strip().lstrip("#! ").strip() or reply.strip()[:200]
-            raise ChatError(said or "the model wrote no script")
+            raise ChatError(said or "the model wrote no script", "said")
         try:
-            state = _script.resolve(_script.parse(written), meta)
+            written, state = _script.read(written, meta, shown)
+            _fits(state, shown, meta)
         except _script.ScriptError as exc:
             problem = turn["refused"] = str(exc)
             messages += [{"role": "assistant", "content": reply},
@@ -324,4 +386,4 @@ def _rounds(cfg, messages, meta, post, record) -> dict:
             continue
         record["script"] = written
         return {"script": written, "state": state}
-    raise ChatError(f"the model's script was refused twice: {problem}")
+    raise ChatError(f"the model's script was refused twice: {problem}", "refused")

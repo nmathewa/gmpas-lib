@@ -1620,8 +1620,12 @@ def _handler(viewer: Viewer, html: str = ""):
                                       "application/json")
                 if url.path == "/api/script":
                     try:
-                        state = _script.resolve(_script.parse(q.get("text", "")),
-                                                viewer.describe())
+                        # `shown` is the field on screen: what an overlay
+                        # written alone is drawn over (script.underlay)
+                        text, state = _script.read(q.get("text", ""), viewer.describe(),
+                                                   q.get("shown") or None)
+                        if text != q.get("text", ""):
+                            state = {**state, "text": text}
                     except _script.ScriptError as exc:
                         return self._send(json.dumps({"error": str(exc)}).encode(),
                                           "application/json", 400)
@@ -2745,9 +2749,12 @@ function scriptText(){
   return rows.map(([k,v])=>`${k.padEnd(w)} = ${v}`.trimEnd()).join("\\n")+"\\n";
 }
 async function scriptRun(text, first){
-  const r=await fetch("api/script?"+new URLSearchParams({text}));
+  const r=await fetch("api/script?"+new URLSearchParams(
+    {text, shown:cur ? cur.name : ""}));
   const s=await r.json();
   if(!r.ok){ scriptSay(String(s.error).replace(/^[A-Za-z]*Error: /, ""), true); return false; }
+  // the script as applied: it may now name the field its overlay lies over
+  if(s.text && $("#scriptBox").value.trim()===text.trim()) $("#scriptBox").value=s.text;
   HOLD=true;
   try{ return await scriptSet(s, first); }
   finally{ HOLD=false; rendered=null; overlay(); draw(); panel(); }

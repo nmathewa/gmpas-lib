@@ -53,6 +53,13 @@ def test_the_model_is_told_the_file_and_the_view():
     system, user = post.seen[0]
     assert "t2m: 2 m temperature [K]" in system["content"]
     assert "u: zonal wind [m s-1] (5 levels, 0 to 4)" in system["content"]
+    listed = {**META, "variables": [{"name": "t", "label": "T", "levels": 3,
+                                     "level_values": [1000.0, 850.0, 500.0],
+                                     "level_units": "hPa"}]}
+    assert "t: T (3 levels, 0 to 2: 1000, 850, 500 hPa)" in chat.system_prompt(listed)
+    # every option the prompt offers for the fast map is one the page has
+    from gmpas import colour
+    assert {"levels", "reverse", "norm", "center", "extend"} <= set(colour.OPTIONS)
     assert "4 time step(s), 0 to 3" in system["content"]
     assert "Mercator" in system["content"] and "vectors(u" in system["content"]
     assert "var = t2m" in user["content"] and "the last step" in user["content"]
@@ -99,6 +106,29 @@ def test_a_question_comes_back_as_a_question():
     assert got["state"]["ask"]["var"] == "hypot(u, v)"
     got = chat.ask("coldest", META, cfg=CFG, post=_says("(t2m - 273.15).min()"))
     assert got["state"]["ask"] == {"what": "min", "var": "t2m - 273.15"}
+
+
+def test_a_level_with_no_field_named_is_a_level_of_the_field_shown():
+    post = _says("level = 850\n", "shade(u.isel(level=3))\n")
+    got = chat.ask("u at 850", META, current="var = u\nlevel = 0\n", cfg=CFG, post=post)
+    assert got["state"]["level"] == 3
+    assert "850 is outside u's 5 level(s)" in post.seen[1][-1]["content"]
+    assert "u.sel(level=850)" in post.seen[1][-1]["content"]
+    # in range, or with nothing known about what is shown, it is left alone
+    assert chat.ask("level 4", META, current="var = u\n", cfg=CFG,
+                    post=_says("level = 4\n"))["state"] == {"level": 4}
+    assert chat.ask("level 9", META, cfg=CFG, post=_says("level = 9\n"))["state"]
+
+
+def test_an_overlay_alone_goes_over_what_is_shown_and_the_script_says_so():
+    meta = {**META, "layer_schema": {"kinds": {}}, "kind_labels": {"layers": "layers"},
+            "variables": [{**v, "spatial": True, "kinds": ["map", "layers"]}
+                          for v in META["variables"]]}
+    got = chat.ask("add wind arrows", meta, current="var = t2m\ntime = 0\n", cfg=CFG,
+                   post=_says("vectors(u.isel(level=1), v.isel(level=1))\n"))
+    assert got["script"].splitlines()[0] == "var = t2m"
+    assert [x["kind"] for x in got["state"]["layers"]["layers"][:2]] == \
+        ["pcolormesh", "quiver"]
 
 
 def test_a_refused_script_is_sent_back_once():

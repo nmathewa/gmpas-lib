@@ -80,7 +80,6 @@ def test_view_frames_the_map():
 @pytest.mark.parametrize("text, says", [
     ("shade(t2m.isel(time=1.5))", "line 1: .isel\\(time=\\) takes a whole number"),
     ("shade(t2m.isel(step=1))", "takes time and level, not step"),
-    ("shade(u.sel(level=850))", "a level is picked by number for now"),
     ("shade(t2m.mean('time'))", ".mean\\(\\) is not understood"),
     ("shade(t2m.isel(time=1).isel(time=2))", "time is picked twice"),
     ("shade(t2m, colormap='viridis')", "shade\\(\\) has no colormap"),
@@ -309,7 +308,7 @@ def test_the_map_itself_is_drawn_by_calls_too():
 
 
 @pytest.mark.parametrize("text, says", [
-    ("rivers()", "a figure draws at least one field"),
+    ("rivers()", "a figure draws a field, and this one names none"),
     ("contourf(t2m)\nrivers('blue')", "rivers\\(\\) takes options by name"),
     ("contourf(t2m)\nrivers(colour='blue')", "layer 2 \\(rivers\\): unknown option"),
     ("contourf(t2m)\nfigure(projection='Peters')", "figure: projection='Peters'"),
@@ -362,3 +361,101 @@ def test_an_option_matplotlib_takes_is_passed_on_as_a_plain_value():
     alone = script.resolve(script.parse("contourf(t2m, antialiased=True)"), KINDS)
     assert alone["kind"] == "layers"
     assert script.resolve(script.parse("contourf(t2m)"), KINDS)["kind"] == "contourf"
+
+
+LEVELS = {**META, "variables": [
+    {"name": "t", "levels": 3, "level_values": [1000.0, 850.0, 500.0],
+     "level_units": "hPa", "spatial": True, "kinds": ["map", "layers"]},
+    {"name": "u", "levels": 3, "level_values": [1000.0, 850.0, 500.0],
+     "spatial": True, "kinds": ["map", "layers"]},
+    {"name": "t2m", "levels": 1, "spatial": True, "kinds": ["map", "layers"]}],
+    "layer_schema": {"kinds": {}}, "kind_labels": {"map": "map", "layers": "layers"}}
+
+
+def test_a_level_is_picked_by_its_value_where_the_file_lists_them():
+    assert script.parse("shade(t.sel(level=850))")["level"] == {"value": 850.0}
+    assert script.resolve(script.parse("shade(t.sel(level=850))"), LEVELS)["level"] == 1
+    got = script.resolve(
+        script.parse("shade((t - u).sel(level=500).isel(time=1))"), LEVELS)
+    assert (got["var"], got["level"], got["time"]) == ("t - u", 2, 1)
+    got = script.resolve(script.parse(
+        "contourf(t.sel(level=850))\ncontour(u.sel(level=500))"), LEVELS)
+    assert [x["level"] for x in got["layers"]["layers"][:2]] == [1, 2]
+    asked = script.resolve(script.parse("t.sel(level=1000).max()"), LEVELS)["ask"]
+    assert asked["level"] == 0
+
+
+@pytest.mark.parametrize("text, says", [
+    ("shade(t.sel(level=860))",
+     "level: 860 is not one of t's levels: 1000, 850, 500 hPa"),
+    ("shade(t2m.sel(level=850))", "level: t2m lists no level values"),
+    ("shade(t.sel(level='low'))", "takes the level's own value"),
+    ("vectors(u.sel(level=850), u.sel(level=500))\nshade(t)",
+     "u and v are drawn at one level"),
+])
+def test_a_level_value_the_file_does_not_have_is_refused(text, says):
+    with pytest.raises(script.ScriptError, match=says):
+        script.resolve(script.parse(text), LEVELS)
+
+
+def test_the_plain_map_and_a_reversed_palette_go_by_their_usual_names():
+    for name in ("PlateCarree", "lat/lon", "latlon", "lonlat"):
+        assert script.resolve(script.parse(f'view(proj="{name}")'), META)["proj"] == ""
+    assert script.resolve(script.parse("proj = mercator"), META)["proj"] == "Mercator"
+    # a figure of layers may name the plain map; it may not name a projection
+    plain = 'view(proj="PlateCarree")\ncontourf(t2m)\ncontour(u)'
+    assert script.resolve(script.parse(plain), KINDS)["kind"] == "layers"
+    got = script.resolve(script.parse("cmap = viridis_r"), META)
+    assert (got["cmap"], got["colour"]) == ("viridis", {"reverse": True})
+    got = script.resolve(script.parse("cmap = RdBu\nreverse = false"), META)
+    assert got["cmap"] == "RdBu_r" and got["colour"]["reverse"] is True
+    assert script.resolve(script.parse("cmap = rdbu_r"), META)["cmap"] == "RdBu_r"
+    with pytest.raises(script.ScriptError, match="'jet_r' is not one of"):
+        script.resolve(script.parse("cmap = jet_r"), META)
+
+
+def test_a_plain_var_line_is_the_field_that_overlays_are_drawn_over():
+    def layers(text):
+        return [(x["kind"], x.get("var") or x.get("u"))
+                for x in script.parse(text)["layers"]["layers"]]
+
+    assert layers("var = t2m\ncontour(u, colors='black')")[:2] == \
+        [("pcolormesh", "t2m"), ("contour", "u")]
+    assert layers("var = t2m\nbarbs(u, v)")[:2] == [("pcolormesh", "t2m"), ("barbs", "u")]
+    # under the lines and the winds, over the land and the sea
+    assert layers("ocean()\nvar = t2m\nrivers()\ncontour(u)")[:4] == \
+        [("ocean", None), ("pcolormesh", "t2m"), ("rivers", None), ("contour", "u")]
+    assert script.parse("var = t2m\nvectors(u, v)")["var"] == "t2m"
+    # a call that shades has its own field, and the line gives way to it
+    assert layers("var = t2m\ncontourf(u)\ncontour(v)")[:2] == \
+        [("contourf", "u"), ("contour", "v")]
+    assert script.parse("var = t2m\ncontour(t2m)") == {"var": "t2m", "kind": "contour"}
+    # an empty var line: nothing underneath
+    assert layers("var =\nvectors(u, v)")[0] == ("quiver", "u")
+
+
+def test_a_definition_may_share_a_functions_name():
+    assert script.parse("diff = u - v\nvar = diff") == {"var": "u - v"}
+    assert script.parse("diff = u - v\nshade(diff.isel(time=1))")["var"] == "u - v"
+    assert script.parse("shade(diff(t2m))")["var"] == "diff(t2m)"
+
+
+def test_an_overlay_written_alone_is_drawn_over_the_field_on_screen():
+    text, state = script.read("vectors(u, v)", KINDS, shown="t2m")
+    assert text == "var = t2m\nvectors(u, v)" and state["var"] == "t2m"
+    assert [x["kind"] for x in state["layers"]["layers"][:2]] == ["pcolormesh", "quiver"]
+    text, state = script.read('rivers(color="blue")\nborders()', KINDS, shown="u")
+    assert text.startswith("var = u\n")
+    assert [x["kind"] for x in state["layers"]["layers"][:3]] == \
+        ["pcolormesh", "rivers", "borders"]
+    # nothing is added to a script that shades its own field, says `var =`,
+    # is one plot of one field, or is not a figure at all
+    for same in ("shade(t2m)\ncontour(u)", "var =\nvectors(u, v)", "contour(u)",
+                 "cmap = viridis", "t2m.max()"):
+        assert script.read(same, KINDS, shown="t2m")[0] == same
+    # with nothing on screen to lie underneath, the map's own layers are not a figure
+    with pytest.raises(script.ScriptError, match="names none"):
+        script.read("rivers()", KINDS)
+    # where the field shown cannot be a layer, the overlay is drawn alone
+    text, state = script.read("vectors(u, v)", KINDS, shown="t2m - 273.15")
+    assert text == "vectors(u, v)" and state["layers"]["layers"][0]["kind"] == "quiver"

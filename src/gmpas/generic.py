@@ -989,6 +989,18 @@ class GenericViewer:
         return [name for name, da in self.ds.data_vars.items()
                 if self.lat_dim in da.dims and self.lon_dim in da.dims]
 
+    def _level_values(self, dim: str) -> dict:
+        """The level axis's own values, when the file gives it a numeric
+        coordinate: what lets a level be asked for as 850 rather than as 5."""
+        coord = self.ds.variables.get(dim)
+        if coord is None or coord.ndim != 1 or coord.size > 200 \
+                or not np.issubdtype(coord.dtype, np.number):
+            return {}
+        values = [float(v) for v in np.asarray(coord.values, dtype=float)]
+        if not all(np.isfinite(values)):
+            return {}
+        return {"level_values": values, "level_units": str(coord.attrs.get("units", ""))}
+
     def _stack_dims(self, da) -> list[str]:
         """Every axis of `da` that is not lat, lon or time, vertical first.
 
@@ -1044,6 +1056,7 @@ class GenericViewer:
                 # the slider drives the first stacking axis, the rest are
                 # held at 0 -- the same contract as viewer.Viewer.describe
                 "levels": int(da.sizes[stack[0]]) if spatial and stack else 1,
+                **(self._level_values(stack[0]) if spatial and stack else {}),
                 "dim": stack[0] if spatial and stack else "",
                 "pinned": stack[1:] if spatial else [],
                 "spatial": spatial,
