@@ -2661,7 +2661,10 @@ let HOLD=false;
 function scriptNum(v){ return String(+(+v).toPrecision(10)); }
 // A figure of layers, as the calls that draw it: the Python form of a script
 const LY_VERB={pcolormesh:"pcolormesh", contourf:"contourf", contour:"contour",
-               imshow:"imshow", quiver:"vectors", barbs:"barbs", streamplot:"streamlines"};
+               imshow:"imshow", quiver:"vectors", barbs:"barbs", streamplot:"streamlines",
+               gridvalues:"gridvalues", coastlines:"coastlines", borders:"borders",
+               land:"land", ocean:"ocean", lakes:"lakes", rivers:"rivers",
+               gridlines:"gridlines"};
 function scriptPy(v){
   if(typeof v==="boolean") return v ? "True" : "False";
   if(typeof v==="number") return String(v);
@@ -2671,16 +2674,19 @@ function scriptLayers(){
   const t=$("#time").value, rows=[`view(region=(${boxOf(view).map(scriptNum).join(", ")}))`];
   for(const L of LY.layers){
     const verb=LY_VERB[L.kind];
-    if(!verb || L.visible===false) continue;        // coastlines, gridlines: always there
+    if(!verb || L.visible===false) continue;
     const lev=(L.level==null || L.level==="follow") ? $("#level").value : L.level;
     const pick=n=>{ const v=varNamed(n);
       const what=/^\\w+$/.test(n) ? n : `(${n})`;       // (a - b).isel(...)
       return `${what}.isel(time=${t}${v && v.levels>1 ? `, level=${lev}` : ""})`; };
-    const args=(L.var ? [pick(L.var)] : [pick(L.u), pick(L.v)]).concat(
+    const args=(L.var ? [pick(L.var)] : L.u ? [pick(L.u), pick(L.v)] : []).concat(
       Object.entries(L.options||{}).filter(([,v])=>v!=null && v!=="")
         .map(([k,v])=>`${k}=${scriptPy(v)}`));
     rows.push(`${verb}(${args.join(", ")})`);
   }
+  const fig=Object.entries(LY.figure||{}).filter(([,v])=>v!=null && v!=="")
+    .map(([k,v])=>`${k}=${scriptPy(v)}`);
+  if(fig.length) rows.push(`figure(${fig.join(", ")})`);
   return rows.join("\\n")+"\\n";
 }
 function scriptText(){

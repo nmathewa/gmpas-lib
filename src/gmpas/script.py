@@ -34,6 +34,13 @@ Two or more of them, or winds, make a figure of layers, drawn in order:
     contourf(t.isel(time=0, level=3), cmap="RdBu_r")
     contour(z.isel(time=0, level=3), colors="black")
     vectors(u.isel(time=0, level=3), v.isel(time=0, level=3))
+    rivers(color="blue")
+    figure(title="925 hPa", look="ferret")
+
+The map under and over them is drawn the same way -- `coastlines()`,
+`borders()`, `land()`, `ocean()`, `lakes()`, `rivers()`, `gridlines()` -- and
+`figure()` sets the title, the projection and where the colour bars go.
+Coastlines and gridlines are there unless a script draws its own.
 
 The text is parsed, never evaluated. `parse` checks the grammar and the types,
 and `resolve` checks the result against one open file -- the variable exists,
@@ -231,7 +238,7 @@ def _finish(out: dict, colour: dict, where: dict[str, int]) -> dict:
 # ------------------------------------------------------------ the Python form
 
 #: A line that calls something, which only the Python form has.
-_CALL_LINE = re.compile(r"^[ \t]*(view|shade|[A-Za-z_]\w*)[ \t]*\(.*\)[ \t]*$", re.M)
+_CALL_LINE = re.compile(r"^[ \t]*[A-Za-z_]\w*[ \t]*\(", re.M)
 #: What draws one field, and the plot kind it is.
 _FIELD = {"shade": "map", "contourf": "contourf", "contour": "contour",
           "pcolormesh": "pcolormesh", "imshow": "imshow", "hist": "hist",
@@ -241,8 +248,10 @@ _VECTOR = {"vectors": "quiver", "quiver": "quiver", "barbs": "barbs",
            "streamlines": "streamplot", "streamplot": "streamplot"}
 #: A field call as a layer of a figure; the rest cannot be layered.
 _AS_LAYER = {"shade": "pcolormesh", "contourf": "contourf", "contour": "contour",
-             "pcolormesh": "pcolormesh", "imshow": "imshow"}
-_DRAW = (*_FIELD, *_VECTOR)
+             "pcolormesh": "pcolormesh", "imshow": "imshow", "gridvalues": "gridvalues"}
+#: The map itself, as layers: each is a call with options and no field.
+_FEATURE = ("coastlines", "borders", "land", "ocean", "lakes", "rivers", "gridlines")
+_DRAW = (*_FIELD, *_VECTOR, *_FEATURE, "gridvalues", "figure")
 _AT_POINT = ("series", "profile")
 _LATER = ("section", "save", "animate")
 _VIEW_KEYS = {"region": "region", "box": "box", "proj": "proj",
@@ -254,8 +263,49 @@ def _is_key(name: str) -> bool:
     return name in KEYS or name in _colour.OPTIONS
 
 
+_SETTING = re.compile(r"^([A-Za-z_]\w*)\s*=(?!=)\s*(.*)$")
+_QUOTED = re.compile(r"""^(['"])(.*)\1$""")
+
+
+def _split(text: str) -> tuple[str, list[tuple[int, str, str | None]]]:
+    """The script as (what Python's parser is given, the plain settings).
+
+    A `key = value` line means in the Python form what it means on its own,
+    whatever its value looks like -- `vmin =`, `cmap = cmo.thermal`,
+    `levels = (0,20,2)(inf)` -- so those lines are read here and left blank
+    for the parser. `var` is not one of them: it names a field, and may use a
+    definition. A line inside an open bracket is the rest of a call.
+    """
+    kept, plain, depth = [], [], 0
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if line[:1] == "!":
+            line = ""
+        hit = _SETTING.match(line) if depth == 0 else None
+        if hit and hit[1].lower() != "var" and _is_key(hit[1].lower()):
+            key, value = hit[1].lower(), hit[2].strip()
+            quoted = _QUOTED.match(value)
+            if quoted:
+                value = quoted[2].strip()
+            elif value in ("None", ""):
+                value = None
+            elif value in ("True", "False"):
+                value = value.lower()
+            elif key in ("region", "box", "point") and value[:1] in "([" \
+                    and value[-1:] in ")]":
+                value = value[1:-1]
+            plain.append((n, key, value or None))
+            kept.append("")
+            continue
+        kept.append(line)
+        bare = re.sub(r"""(['"]).*?\1""", "", line.split("#")[0])
+        depth = max(0, depth + sum(bare.count(c) for c in "([")
+                    - sum(bare.count(c) for c in ")]"))
+    return "\n".join(kept), plain
+
+
 def _defines(text: str) -> bool:
-    text = "\n".join(line.lstrip() for line in text.splitlines())
+    text, _ = _split(text)
     try:
         tree = ast.parse(text)
     except SyntaxError:
@@ -408,8 +458,18 @@ def _literal(node):
 
 def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
     """Several draw calls as a figure of layers: (the stack, {var, time})."""
-    layers, times, first = [], {}, None
+    layers, times, first, figure = [], {}, None, {}
     for verb, call in draws:
+        if verb == "figure" or verb in _FEATURE:
+            if call.args:
+                _fail(call, f"{verb}() takes options by name: {verb}(color=\"gray\")")
+            options = {kw.arg: _literal(kw.value) for kw in call.keywords}
+            if verb == "figure":
+                figure.update(options)
+            else:
+                layers.append({"kind": verb, "visible": True, "opacity": 1,
+                               "level": "follow", "options": options})
+            continue
         vector = verb in _VECTOR
         if not vector and verb not in _AS_LAYER:
             _fail(call, f"{verb}() is a plot of its own and cannot be layered")
@@ -439,25 +499,28 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
     if len(times) > 1:
         _fail(list(times.values())[-1], "a figure is of one time step; "
                                         "every layer must pick the same")
-    for kind in ("coastlines", "gridlines"):
-        layers.append({"kind": kind, "visible": True, "opacity": 1,
-                       "level": "follow", "options": {}})
+    if first is None:
+        _fail(draws[0][1], "a figure draws at least one field: contourf(t2m)")
+    for kind in ("coastlines", "gridlines"):         # there unless drawn already
+        if not any(layer["kind"] == kind for layer in layers):
+            layers.append({"kind": kind, "visible": True, "opacity": 1,
+                           "level": "follow", "options": {}})
     extra = {"var": first}
     if times:
         extra["time"] = next(iter(times))
-    return {"figure": {}, "layers": layers}, extra
+    return {"figure": figure, "layers": layers}, extra
 
 
 def _parse_python(text: str) -> dict:
     """The Python form: definitions, settings, view() and what draws."""
     # the script has no blocks, so how far a line is indented means nothing
-    text = "\n".join(line.lstrip() for line in text.splitlines())
+    text, plain = _split(text)
     try:
         tree = ast.parse(text)
     except SyntaxError as exc:
-        raise ScriptError(f"line {exc.lineno}: {exc.msg}; a script with view() or "
-                          f"shade() is read as Python, so text goes in quotes: "
-                          f'levels = "(0,30,2)"') from None
+        shown = (exc.text or "").strip()
+        raise ScriptError(f"line {exc.lineno}: {exc.msg}"
+                          + (f": {shown}" if shown else "")) from None
     fields = _Fields()
     out: dict = {}
     colour: dict = {}
@@ -467,7 +530,7 @@ def _parse_python(text: str) -> dict:
 
     lines: set[str] = set()          # keys set by a plain `key = value` line
 
-    def put(key: str, node, line: int, written=None, call=True):
+    def put(key: str, node, line: int, written=None, call=True, clear=False):
         # A call that draws says what it draws; a plain line saying the same
         # thing another way gives way to it, in whichever order they come.
         # Two lines, or two calls, that disagree are still a mistake.
@@ -482,7 +545,8 @@ def _parse_python(text: str) -> dict:
         if not call:
             lines.add(key)
         where[key] = line
-        value = _setting_text(key, node) if written is None else written
+        value = None if clear else \
+            _setting_text(key, node) if written is None else written
         if key in _colour.OPTIONS:
             colour[key] = value
             return
@@ -490,6 +554,9 @@ def _parse_python(text: str) -> dict:
             out[key] = _value(key, value) if value is not None else None
         except ValueError as exc:
             raise ScriptError(f"line {line}: {exc}") from None
+
+    for line, key, value in plain:
+        put(key, None, line, value, call=False, clear=value is None)
 
     def field(node, line: int, call=True):
         expr, picked = fields.read(node)

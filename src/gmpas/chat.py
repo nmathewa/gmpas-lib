@@ -155,8 +155,18 @@ Draw several things as one figure, in order, the first underneath:
     labels=True, label_fontsize=8, label_every=2, cmap="viridis"
   contourf options: levels, cmap, vmin, vmax
   vectors options: stride=4 (every 4th point), color="black", scale, colorize=True
-{EXPRESSIONS}  Such a figure is on
-  the plain lon/lat map: give no proj with it. To overlay on what is shown
+  gridvalues(t) writes the numbers on the map.
+  The map itself, each a call with options and no field:
+    coastlines(color="black", linewidth=0.8, resolution="10m")
+    borders()  rivers(color="blue")  lakes()  land(facecolor="lightgray")
+    ocean(facecolor="lightblue")  gridlines(labels=True, dlon=10, dlat=10)
+    Draw land() and ocean() before the fields they sit under.
+  figure(title="...", subtitle="...", projection="Robinson", look="ferret",
+         colorbar="right")   projection: PlateCarree, Robinson, Mollweide,
+         EqualEarth, Orthographic, NorthPolarStereo, SouthPolarStereo,
+         LambertConformal, Mercator; look: matplotlib, grads, ferret
+{EXPRESSIONS}  Such a figure takes its
+  projection from figure(projection=), not from view(proj=). To overlay on what is shown
   now, draw the variable the view names first, then the overlay.
 """
 

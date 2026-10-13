@@ -99,7 +99,8 @@ def test_view_frames_the_map():
     ("shade(u.isel(time=1) - v.isel(time=2))", "picked at one time, not 1 and 2"),
     ("spd = hypot(u, v)\nshade(t2m)", "line 1: spd is set and never used"),
     ("shade(t2m", "line 1: "),
-    ("shade(t2m)\nlevels = (,,2.5)", "line 2: .*text goes in quotes"),
+    ("shade(t2m)\nx = = 3", "line 2: invalid syntax: x = = 3"),
+    ("shade(t2m)\nvmin = abc", "line 2: vmin takes a number"),
     ("var = t2m\nvar = u\nshade(t2m)", "line 2: var is already set on line 1"),
     ("view(region=(1, 2, 3, 4))\nview(region=(1, 2, 3, 5))\nshade(u)",
      "region is already set"),
@@ -273,3 +274,46 @@ def test_picking_before_or_after_arithmetic_is_the_same_field():
     assert (got["var"], got["time"], got["level"]) == ("hypot(u, v)", 0, 2)
     layer = script.parse("contourf(t2m)\ncontour(t2m.isel(time=0) - 273.15)")
     assert layer["layers"]["layers"][1]["var"] == "t2m - 273.15" and layer["time"] == 0
+
+
+def test_a_plain_line_means_the_same_beside_a_call():
+    """A model restates the view -- empty settings and all -- and then draws."""
+    got = script.parse(
+        'var = t2m\ntime = 0\nlevel = 0\ncmap = viridis\nvmin =\nvmax =\nproj = lonlat\n'
+        'region = 94.3, 154.3, -45, -10\n'
+        'shade(t2m.isel(time=0), cmap="viridis")\n'
+        'contour(u.isel(time=0), colors="black", levels=10)\n')
+    assert got["kind"] == "layers" and got["vmin"] is None and got["proj"] == "lonlat"
+    assert [x["kind"] for x in got["layers"]["layers"][:2]] == ["pcolormesh", "contour"]
+    got = script.parse('shade(t2m,\n      cmap = "RdBu_r",\n      vmin = 1)\n'
+                       "levels = (0,20,2)(inf)\ntime = 2012-01-01 06:00\n"
+                       "region = (1, 2, 3, 4)\nreverse = True\n! a Ferret comment\n")
+    assert got == {"var": "t2m", "kind": "map", "cmap": "RdBu_r", "vmin": 1.0,
+                   "time": "2012-01-01 06:00", "region": [1.0, 2.0, 3.0, 4.0],
+                   "colour": {"levels": "(0,20,2)(inf)", "reverse": True}}
+    assert script.parse("cmap = cmo.thermal\nshade(t2m)")["cmap"] == "cmo.thermal"
+
+
+def test_the_map_itself_is_drawn_by_calls_too():
+    got = script.parse('ocean(facecolor="lightblue")\ncontourf(t2m)\nrivers(color="blue")\n'
+                       'coastlines(linewidth=1.2)\n'
+                       'figure(title="2 m temperature", look="ferret")')
+    stack = got["layers"]
+    assert [x["kind"] for x in stack["layers"]] == \
+        ["ocean", "contourf", "rivers", "coastlines", "gridlines"]   # one coastlines
+    assert stack["layers"][2]["options"] == {"color": "blue"}
+    assert stack["figure"] == {"title": "2 m temperature", "look": "ferret"}
+    assert script.resolve(got, KINDS)["kind"] == "layers"
+    assert script.parse("contourf(t2m)\ngridvalues(u)")["layers"]["layers"][1]["kind"] \
+        == "gridvalues"
+
+
+@pytest.mark.parametrize("text, says", [
+    ("rivers()", "a figure draws at least one field"),
+    ("contourf(t2m)\nrivers('blue')", "rivers\\(\\) takes options by name"),
+    ("contourf(t2m)\nrivers(colour='blue')", "layer 2 \\(rivers\\): unknown option"),
+    ("contourf(t2m)\nfigure(projection='Peters')", "figure: projection='Peters'"),
+])
+def test_a_feature_or_a_figure_option_that_does_not_exist_is_refused(text, says):
+    with pytest.raises(script.ScriptError, match=says):
+        script.resolve(script.parse(text), KINDS)
