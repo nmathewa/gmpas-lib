@@ -90,6 +90,17 @@ def test_earlier_requests_go_with_a_new_one():
     assert "no, the temperature" in sent[-1]["content"]
 
 
+def test_a_question_comes_back_as_a_question():
+    got = chat.ask("where is the warmest place", META, cfg=CFG,
+                   post=_says("Sure:\nt2m.max()\n"))
+    assert got["script"] == "t2m.max()\n"
+    assert got["state"] == {"ask": {"what": "max", "var": "t2m"}}
+    got = chat.ask("strongest wind", META, cfg=CFG, post=_says("hypot(u, v).max()"))
+    assert got["state"]["ask"]["var"] == "hypot(u, v)"
+    got = chat.ask("coldest", META, cfg=CFG, post=_says("(t2m - 273.15).min()"))
+    assert got["state"]["ask"] == {"what": "min", "var": "t2m - 273.15"}
+
+
 def test_a_refused_script_is_sent_back_once():
     post = _says("var = sst\n", "var = t2m\n")
     got = chat.ask("sea surface temperature", META, cfg=CFG, post=post)

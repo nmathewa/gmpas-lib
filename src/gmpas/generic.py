@@ -1293,6 +1293,16 @@ class GenericViewer:
                 "lat": round(float(self.lat[i]), 4),
                 "value": value}
 
+    def extreme(self, var, time, level, extent, what="max") -> dict:
+        """The largest (or smallest) value in `extent`, and where it is."""
+        from .viewer import _extreme
+
+        da = self._cropped(var, time, level, extent).transpose(self.lat_dim, self.lon_dim)
+        values = np.asarray(da.values, dtype=np.float64)
+        lon, lat = np.meshgrid(np.asarray(da[self.lon_name].values, float),
+                               np.asarray(da[self.lat_name].values, float))
+        return _extreme(values, np.isfinite(values), lon, lat, what)
+
     def profile_at_point(self, lon, lat, var, time) -> dict:
         """The clicked grid point's column, in the shape the MPAS viewer answers
         with. The level coordinate is the file's own when it has one."""

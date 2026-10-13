@@ -317,3 +317,32 @@ def test_the_map_itself_is_drawn_by_calls_too():
 def test_a_feature_or_a_figure_option_that_does_not_exist_is_refused(text, says):
     with pytest.raises(script.ScriptError, match=says):
         script.resolve(script.parse(text), KINDS)
+
+
+def test_a_question_about_a_field_changes_nothing_shown():
+    assert script.parse("t2m.max()") == {"ask": {"what": "max", "var": "t2m"}}
+    got = script.parse("u.isel(time=1, level=2).argmin()")
+    assert got == {"ask": {"what": "min", "var": "u", "time": 1, "level": 2}}
+    assert "var" not in got and "kind" not in got
+    assert script.resolve(script.parse("T2M.sel(time='2012-01-01 06:00').max()"),
+                          META)["ask"] == {"what": "max", "var": "t2m", "time": 1}
+    assert script.parse("hypot(u, v).max()")["ask"]["var"] == "hypot(u, v)"
+
+
+@pytest.mark.parametrize("text, says", [
+    ("t2m.mean()", ".mean\\(\\) is not in the script yet"),
+    ("t2m.max()\nu.min()", "line 2: one question to a script"),
+])
+def test_a_question_the_script_cannot_answer_is_refused(text, says):
+    with pytest.raises(script.ScriptError, match=says):
+        script.parse(text)
+
+
+@pytest.mark.parametrize("text, says", [
+    ("tm2.max()", "max: 'tm2' is not a variable.*did you mean t2m"),
+    ("u.isel(level=9).max()", "level: 9 is outside u's level"),
+    ("t2m.isel(time=7).max()", "time: step 7 is outside"),
+])
+def test_a_question_is_checked_against_the_file(text, says):
+    with pytest.raises(script.ScriptError, match=says):
+        script.resolve(script.parse(text), META)

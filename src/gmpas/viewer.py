@@ -84,6 +84,20 @@ KIND_CAPS = {
                "probe": False, "gif": False, "data": False},
 }
 
+def _extreme(values, inside, lon, lat, what: str) -> dict:
+    """The answer `Viewer.extreme` and `GenericViewer.extreme` share."""
+    if what not in ("max", "min"):
+        raise ValueError(f"{what!r} is not max or min")
+    found = np.flatnonzero(inside)
+    if not found.size:
+        raise ValueError("there is no data in this view")
+    pick = found[np.argmax(values.ravel()[found]) if what == "max"
+                 else np.argmin(values.ravel()[found])]
+    return {"what": what, "value": float(values.ravel()[pick]), "cell": int(pick),
+            "lon": round(float(np.ravel(lon)[pick]), 4),
+            "lat": round(float(np.ravel(lat)[pick]), 4), "cells": int(found.size)}
+
+
 #: The most pixels along a side that a layer of an MPAS figure is sampled at.
 LAYER_SAMPLES = 480
 
@@ -998,6 +1012,18 @@ class Viewer:
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
                 "lat": round(float(self.mesh.lat_cell[cell]), 4)}
 
+    def extreme(self, var, time, level, extent, what="max") -> dict:
+        """The largest (or smallest) value among the cells in `extent`, and
+        the cell that holds it: {value, cell, lon, lat, cells}."""
+        values = np.asarray(self.values(var, time, level), dtype=np.float64)
+        w, e, s, n = (float(v) for v in extent)
+        lon = np.asarray(self.mesh.lon_cell)
+        lat = np.asarray(self.mesh.lat_cell)
+        inside = (lat >= s) & (lat <= n) & np.isfinite(values)
+        if e - w < 360.0:
+            inside &= ((lon - w) % 360.0) <= (e - w)
+        return _extreme(values, inside, lon, lat, what)
+
     def profile_at_point(self, lon, lat, var, time) -> dict:
         """The clicked cell's column: its value on every level, at one step."""
         from . import native
@@ -1629,6 +1655,11 @@ def _handler(viewer: Viewer, html: str = ""):
                                        int(q.get("time", 0)), int(q.get("level", 0)))
                     if not math.isfinite(out["value"]):
                         out["value"] = None       # NaN is not JSON: a missing value
+                    return self._send(json.dumps(out).encode(), "application/json")
+                if url.path == "/api/extreme":
+                    out = viewer.extreme(
+                        q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
+                        [float(v) for v in q["extent"].split(",")], q.get("what", "max"))
                     return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/profile" and hasattr(viewer, "profile_at_point"):
                     out = viewer.profile_at_point(float(q["lon"]), float(q["lat"]),
@@ -2647,7 +2678,9 @@ async function chatAsk(){
     if(!r.ok){ a.textContent=String(d.error); a.classList.add("bad"); return; }
     $("#scriptBox").value=d.script;
     a.textContent=d.script.trim();
-    if(!await scriptRun(d.script)){
+    const ok=await scriptRun(d.script);
+    if(ok && ANSWER) chatLine("q", ANSWER);
+    if(!ok){
       a.textContent+="\\n"+$("#scripthint").textContent; a.classList.add("bad"); }
   }catch(e){ a.textContent="no answer: "+e; a.classList.add("bad"); }
   finally{ $("#chatGo").disabled=false; $("#chatlog").scrollTop=1e9; }
@@ -2657,7 +2690,7 @@ function scriptSay(text, bad){
 }
 // A script changes several things at once, and each control would ask for
 // its own frame. Held, they ask for none; one frame is drawn at the end.
-let HOLD=false;
+let HOLD=false, ANSWER="";      // ANSWER: what a script's question found
 function scriptNum(v){ return String(+(+v).toPrecision(10)); }
 // A figure of layers, as the calls that draw it: the Python form of a script
 const LY_VERB={pcolormesh:"pcolormesh", contourf:"contourf", contour:"contour",
@@ -2777,6 +2810,25 @@ async function scriptSet(s, first){
   // a series or a profile at a point, on a page that reads them in the point
   // panel: open it there once the map this script asked for is drawn
   if(s.panel && s.point) setTimeout(()=>ptAt(s.point[0], s.point[1], s.panel), 0);
+  ANSWER="";
+  if(s.ask){
+    // a question: the largest or smallest value in view, and where it is.
+    // The picture stays as it is; in a projection the view box is not
+    // degrees, so the whole of the data is searched and the answer says so.
+    const b=P ? M.home : boxOf(view).map((v,i)=>i<2 ? v : Math.max(-90, Math.min(90, v)));
+    const q=new URLSearchParams({var:s.ask.var, what:s.ask.what, extent:b.join(","),
+      time:s.ask.time!=null ? s.ask.time : $("#time").value,
+      level:s.ask.level!=null ? s.ask.level : Math.min(+$("#level").value,
+        ((varNamed(s.ask.var)||{}).levels||1)-1)});
+    const res=await fetch("api/extreme?"+q), d=await res.json();
+    if(!res.ok){ scriptSay(String(d.error).replace(/^[A-Za-z]*Error: /, ""), true);
+      return false; }
+    ANSWER=`${s.ask.what==="max" ? "largest" : "smallest"} ${s.ask.var} `+
+      `${P ? "in the data" : "in view"}: ${+d.value.toPrecision(6)} at `+
+      `${fmtLat(d.lat)}, ${fmtLon(d.lon)}`;
+    scriptSay(ANSWER);
+    return true;
+  }
   scriptSay("applied");
   return true;
 }
@@ -4682,7 +4734,7 @@ async function ptAt(lon, lat, what){
   if(!res.ok || d.value===undefined){
     scriptSay(String((d && d.error) || "no value there"), true); return; }
   ptOpen(lon, lat, d);
-  if(what==="profile") ptProfile(); else ptSeries();
+  if(what==="profile") ptProfile(); else if(what==="series") ptSeries();
 }
 $("#ptgo").onclick=ptSeries;
 $("#ptprof").onclick=ptProfile;

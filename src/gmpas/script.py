@@ -37,6 +37,10 @@ Two or more of them, or winds, make a figure of layers, drawn in order:
     rivers(color="blue")
     figure(title="925 hPa", look="ferret")
 
+A question about a field is asked the way xarray would be: `snow.max()` and
+`snow.min()` find the largest and smallest value in view and where it is. The
+page says the value and the place; the picture is left as it is.
+
 The map under and over them is drawn the same way -- `coastlines()`,
 `borders()`, `land()`, `ocean()`, `lakes()`, `rivers()`, `gridlines()` -- and
 `figure()` sets the title, the projection and where the colour bars go.
@@ -238,7 +242,7 @@ def _finish(out: dict, colour: dict, where: dict[str, int]) -> dict:
 # ------------------------------------------------------------ the Python form
 
 #: A line that calls something, which only the Python form has.
-_CALL_LINE = re.compile(r"^[ \t]*[A-Za-z_]\w*[ \t]*\(", re.M)
+_CALL_LINE = re.compile(r"^[ \t]*(?:[A-Za-z_][\w.]*[ \t]*)?\(", re.M)
 #: What draws one field, and the plot kind it is.
 _FIELD = {"shade": "map", "contourf": "contourf", "contour": "contour",
           "pcolormesh": "pcolormesh", "imshow": "imshow", "hist": "hist",
@@ -253,6 +257,9 @@ _AS_LAYER = {"shade": "pcolormesh", "contourf": "contourf", "contour": "contour"
 _FEATURE = ("coastlines", "borders", "land", "ocean", "lakes", "rivers", "gridlines")
 _DRAW = (*_FIELD, *_VECTOR, *_FEATURE, "gridvalues", "figure")
 _AT_POINT = ("series", "profile")
+#: A question about a field, as xarray asks it, and what it finds.
+_STATS = {"max": "max", "min": "min", "argmax": "max", "argmin": "min",
+          "idxmax": "max", "idxmin": "min"}
 _LATER = ("section", "save", "animate")
 _VIEW_KEYS = {"region": "region", "box": "box", "proj": "proj",
               "lon0": "plon", "lat0": "plat", "plon": "plon", "plat": "plat"}
@@ -580,6 +587,17 @@ def _parse_python(text: str) -> dict:
                 defined[name] = line
             continue
         call = stmt.value if isinstance(stmt, ast.Expr) else None
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
+                and call.func.attr in (*_STATS, "mean", "sum", "std", "median"):
+            if call.func.attr not in _STATS:
+                _fail(call, f".{call.func.attr}() is not in the script yet; "
+                            f".max() and .min() are")
+            if "ask" in out:
+                _fail(call, "one question to a script")
+            expr, picked = fields.read(call.func.value)
+            # a question is about a field, not a change of what is shown
+            out["ask"] = {"what": _STATS[call.func.attr], "var": expr, **picked}
+            continue
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
             _fail(stmt, "expected name = value, view(...) or a call that draws, "
                         "such as shade(...)")
@@ -679,6 +697,33 @@ def resolve(state: dict, meta: dict) -> dict:
             raise ScriptError(f"level: {lev} is outside {out['var']}'s "
                               f"{levels} level(s)" if levels is not None
                               else f"level: {lev} is below 0")
+    if state.get("ask") is not None:
+        ask = dict(state["ask"])
+        name = _derive.resolve(ask["var"], variables)
+        if name is None:
+            try:
+                _derive.parse(ask["var"], variables)
+            except KeyError as exc:
+                raise ScriptError(f"{ask['what']}: {exc.args[0]}"
+                                  f"{_near(ask['var'], variables)}") from None
+        else:
+            ask["var"] = name
+        steps, labels = meta.get("steps", 0), meta.get("labels", [])
+        t = ask.get("time")
+        if isinstance(t, str):
+            if t not in labels:
+                raise ScriptError(f"time: no step is labelled {t!r}")
+            ask["time"] = labels.index(t)
+        elif t is not None:
+            if not -steps <= t < steps:
+                raise ScriptError(f"time: step {t} is outside this run's "
+                                  f"{steps} step(s)")
+            ask["time"] = t % steps
+        count = variables[name].get("levels", 1) if name in variables else None
+        lev = ask.get("level")
+        if lev is not None and (lev < 0 or (count is not None and lev >= count)):
+            raise ScriptError(f"level: {lev} is outside {ask['var']}'s level(s)")
+        out["ask"] = ask
     kind = state.get("kind")
     if kind is not None:
         named = out.get("var")

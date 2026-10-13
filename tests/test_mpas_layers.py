@@ -112,3 +112,20 @@ def test_a_lone_contourf_on_a_run_is_drawn_as_one_layer(viewer):
     state = script.resolve(script.parse("contourf(sst)"), viewer.describe())
     assert state["kind"] == "layers"
     assert state["layers"]["layers"][0]["kind"] == "contourf"
+
+
+def test_the_largest_value_in_view_is_the_cells_own(viewer):
+    # sst holds each cell's latitude, skintemp its longitude
+    whole = viewer.extreme("sst", 0, 0, (-180, 180, -90, 90), "max")
+    lat = np.asarray(viewer.mesh.lat_cell)
+    assert whole["cell"] == int(np.argmax(lat)) and whole["value"] == lat.max()
+    assert whole["cells"] == lat.size
+    box = viewer.extreme("sst", 0, 0, (-60, 60, -30, 30), "min")
+    lon = np.asarray(viewer.mesh.lon_cell)
+    inside = (lat >= -30) & (lat <= 30) & (((lon + 60) % 360) <= 120)
+    assert box["cells"] == int(inside.sum())
+    assert box["value"] == lat[inside].min() and box["lat"] == round(box["value"], 4)
+    with pytest.raises(ValueError, match="no data in this view"):
+        viewer.extreme("sst", 0, 0, (0, 0.0001, 89.9999, 90), "max")
+    with pytest.raises(ValueError, match="not max or min"):
+        viewer.extreme("sst", 0, 0, (-180, 180, -90, 90), "mean")

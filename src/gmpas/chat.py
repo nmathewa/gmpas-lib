@@ -50,7 +50,7 @@ DEFAULT_TIMEOUT = 120.0
 _KEYS = ("url", "model", "key", "timeout", "log")
 
 
-_CALLS = re.compile(r"[A-Za-z_]\w*\s*\(")
+_CALLS = re.compile(r"[A-Za-z_(][\w.() +*/-]*\(")
 
 
 class ChatError(ValueError):
@@ -138,6 +138,9 @@ Pick from a field:
   t.sel(time="2012-03-01 12:00")   a step, by its label
 Make a field (then draw it with shade):
   spd = hypot(u, v)                also a - b, a * 1000, a / b, diff(a)
+Ask where a field is largest or smallest in view. The page answers with the
+value and the place and leaves the picture alone, so write this line only:
+  snow.max()                       also .min(); .isel() picks a step or level
 Frame the map:
   view(region=(west, east, south, north))
   view(proj="Mercator")            a projection; shade() only
