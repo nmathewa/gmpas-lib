@@ -52,8 +52,9 @@ def test_the_model_is_told_the_file_and_the_view():
     chat.ask("the last step", META, current="var = t2m\ntime = 0\n", cfg=CFG, post=post)
     system, user = post.seen[0]
     assert "t2m: 2 m temperature [K]" in system["content"]
-    assert "u: zonal wind [m s-1] (5 levels" in system["content"]
-    assert "4 time step(s)" in system["content"] and "Mercator" in system["content"]
+    assert "u: zonal wind [m s-1] (5 levels, 0 to 4)" in system["content"]
+    assert "4 time step(s), 0 to 3" in system["content"]
+    assert "Mercator" in system["content"] and "vectors(u" in system["content"]
     assert "var = t2m" in user["content"] and "the last step" in user["content"]
 
 
@@ -61,6 +62,21 @@ def test_prose_and_a_code_fence_around_the_script_are_dropped():
     reply = "Sure! Here is the script:\n```\nvar = t2m\ncmap = RdBu_r\n```\nEnjoy."
     got = chat.ask("temperature in red and blue", META, cfg=CFG, post=_says(reply))
     assert got["script"] == "var = t2m\ncmap = RdBu_r\n"
+
+
+def test_a_reply_in_the_python_form_with_an_overlay_is_a_figure_of_layers():
+    meta = {**META, "layer_schema": {"kinds": {}}, "kind_labels": {"layers": "layers"},
+            "variables": [{**v, "spatial": True, "kinds": ["map", "layers"]}
+                          for v in META["variables"]]}
+    reply = ("Here you go:\n"
+             "contourf(t2m.isel(time=1), cmap=\"RdBu_r\",\n"
+             "         levels=[270, 280, 290])\n"
+             "vectors(u.isel(time=1, level=2), v.isel(time=1, level=2))\n")
+    got = chat.ask("temperature with wind arrows", meta, cfg=CFG, post=_says(reply))
+    assert got["state"]["kind"] == "layers" and got["state"]["time"] == 1
+    assert [x["kind"] for x in got["state"]["layers"]["layers"]][:2] == \
+        ["contourf", "quiver"]
+    assert got["script"].startswith("contourf(") and "Here" not in got["script"]
 
 
 def test_a_refused_script_is_sent_back_once():

@@ -2538,8 +2538,11 @@ let HOLD=false;
 function scriptNum(v){ return String(+(+v).toPrecision(10)); }
 function scriptText(){
   const rows=[["var", cur.name], ["time", $("#time").value],
-              ["level", $("#level").value], ["cmap", $("#cmap").value],
-              ["vmin", $("#vmin").value.trim()], ["vmax", $("#vmax").value.trim()]];
+              ["level", $("#level").value]];
+  if(cur.kinds && $("#kind").value && $("#kind").value!=="map")
+    rows.push(["kind", $("#kind").value]);
+  rows.push(["cmap", $("#cmap").value],
+              ["vmin", $("#vmin").value.trim()], ["vmax", $("#vmax").value.trim()]);
   if(M.projections){
     rows.push(["proj", P ? P.proj : "lonlat"]);
     if(P && P.plon!=null) rows.push(["plon", scriptNum(P.plon)]);
@@ -2570,6 +2573,20 @@ async function scriptSet(s, first){
       $("#llab").textContent=$("#level").value; }
   }
   if(s.time!=null){ $("#time").value=s.time; $("#tlab").textContent=M.labels[s.time]; }
+  if(s.point) probePt={lon:s.point[0], lat:s.point[1]};
+  if(s.kind!=null && cur.kinds){
+    if(!cur.kinds.includes(s.kind)){
+      scriptSay(`kind: ${cur.name} has no ${s.kind} plot`, true); return false; }
+    // the other plots are drawn on the lon/lat map
+    if(s.kind!=="map" && P && !("proj" in s)){
+      $("#proj").value=""; await setProjection(""); }
+    $("#kind").value=s.kind; setMode();
+    if(s.kind==="layers" && s.layers){
+      LY=s.layers; lySel=Math.max(0, LY.layers.length-1); lyRender();
+      try{ localStorage.setItem(lyKey(), JSON.stringify(LY)); }catch(e){}
+    }
+    if(!plotMode()) layout();
+  }
   if("level" in s){
     const lev=s.level==null ? 0 : s.level;
     if(lev>cur.levels-1){ scriptSay(`level: ${lev} is outside ${cur.name}'s `+

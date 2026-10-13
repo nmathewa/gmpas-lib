@@ -38,6 +38,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -47,6 +48,9 @@ from . import script as _script
 MAX_TEXT = 500
 DEFAULT_TIMEOUT = 120.0
 _KEYS = ("url", "model", "key", "timeout", "log")
+
+
+_CALLS = re.compile(r"[A-Za-z_]\w*\s*\(")
 
 
 class ChatError(ValueError):
@@ -125,36 +129,66 @@ def load_config(path=None) -> dict | None:
     return out
 
 
+_LANGUAGE = """\
+A script is a few lines that read like Python with xarray. It is not run as
+Python: only the forms below exist. Counting is from 0; time=-1 is the last step.
+
+Pick from a field:
+  t.isel(time=0, level=3)          a step and a level, by number
+  t.sel(time="2012-03-01 12:00")   a step, by its label
+Make a field (then draw it with shade):
+  spd = hypot(u, v)                also a - b, a * 1000, a / b, diff(a)
+Frame the map:
+  view(region=(west, east, south, north))
+  view(proj="Mercator")            a projection; shade() only
+  view(proj="Orthographic", lon0=120, lat0=10)
+Draw one field -- the call chooses the kind of plot:
+  shade(x, cmap="viridis", vmin=0, vmax=30, levels="(0,30,2)")   the fast map
+  contourf(x)   contour(x)   pcolormesh(x)   imshow(x)   hist(x)   hovmoller(x)
+  series(x, lon=147.4, lat=-2.0)   profile(x, lon=147.4, lat=-2.0)
+Draw several things as one figure, in order, the first underneath:
+  contourf(t.isel(time=0, level=3), cmap="RdBu_r", levels=[270, 280, 290])
+  contour(z.isel(time=0, level=3), colors="black", levels=10)
+  vectors(u.isel(time=0, level=3), v.isel(time=0, level=3), stride=4)
+  also barbs(u, v) and streamlines(u, v); a layer draws a field of the file,
+  not an expression, and every layer picks the same time.
+"""
+
+
 def system_prompt(meta: dict) -> str:
-    """What the model is told: the task, the keys, and the open file."""
-    keys = "\n".join(f"  {k}: {v}" for k, v in _script.keys().items())
-    variables = "\n".join(
-        f"  {v['name']}: {v.get('label') or v['name']}"
-        + (f" ({v['levels']} levels, numbered from 0)" if v.get("levels", 1) > 1 else "")
-        for v in meta.get("variables", []))
+    """What the model is told: the task, the language, and the open file."""
+    def line(v):
+        out = f"  {v['name']}: {v.get('label') or v['name']}"
+        if v.get("levels", 1) > 1:
+            out += f" ({v['levels']} levels, 0 to {v['levels'] - 1})"
+        if v.get("kinds"):
+            out += f"; plots: {', '.join(v['kinds'])}"
+        return out
+
+    variables = "\n".join(line(v) for v in meta.get("variables", []))
     labels = meta.get("labels") or []
     steps = meta.get("steps", len(labels))
-    times = f"{steps} time step(s), numbered from 0"
+    times = f"{steps} time step(s), 0 to {max(steps - 1, 0)}"
     if labels:
         times += f"; the first is {labels[0]}, the last {labels[-1]}"
     home = meta.get("home")
     where = (f"The data covers longitude {home[0]:g} to {home[1]:g} and latitude "
              f"{home[2]:g} to {home[3]:g}; give regions in that longitude range.\n"
              if home else "")
-    projections = ", ".join([_script.LONLAT, *(meta.get("projections") or [])])
+    layers = "" if meta.get("layer_schema") else \
+        "This file is drawn one field at a time: no layers, no winds.\n"
     return (
         "You turn a request about a map of weather or climate data into a gmpas "
-        "script. Reply with script lines only: one `key = value` per line, no "
-        "explanation, no code fence. Write only the keys the request changes. "
-        "If the request cannot be met with these keys, reply with one line "
-        "starting `# ` that says why.\n\n"
-        f"Keys:\n{keys}\n\n"
-        "`var` is a variable name from the list, or an expression of them: "
-        "a - b, a * 1000, hypot(a, b).\n"
-        "`region` is west, east, south, north in degrees.\n\n"
+        "script. Reply with the script only: no explanation, no code fence. Write "
+        "only what the request changes; when it asks for a different plot or an "
+        "overlay, write every draw call the figure needs. If the request cannot "
+        "be met, reply with one line starting `# ` that says why.\n\n"
+        f"{_LANGUAGE}\n"
+        "The view now is given as `key = value` lines; those keys may also be "
+        "set that way.\n\n"
         f"Variables in this file:\n{variables}\n\n"
-        f"{times}.\n{where}"
-        f"Projections: {projections}.\n"
+        f"{times}.\n{where}{layers}"
+        f"Projections: {', '.join(meta.get('projections') or []) or 'none'}.\n"
         f"Palettes: {', '.join(meta.get('cmaps') or [])}.\n")
 
 
@@ -181,14 +215,21 @@ def _post(cfg: dict, messages: list[dict]) -> str:
 
 
 def script_of(reply: str) -> str:
-    """The script lines in a model's reply: what is inside a code fence if it
-    used one, and otherwise every line that is a comment or sets a key."""
+    """The script in a model's reply: what is inside a code fence if it used
+    one, and otherwise the reply without the lines that are plainly prose."""
     lines = reply.strip().splitlines()
     fences = [i for i, line in enumerate(lines) if line.strip().startswith("```")]
     if len(fences) >= 2:
         lines = lines[fences[0] + 1:fences[1]]
-    kept = [line.strip() for line in lines
-            if line.strip() and (line.strip()[0] in "#!" or "=" in line)]
+    kept, depth = [], 0
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        # inside an open bracket a line is the rest of a call, whatever it holds
+        if depth > 0 or text[0] in "#!" or "=" in text or _CALLS.match(text):
+            kept.append(text)
+            depth += text.count("(") + text.count("[") - text.count(")") - text.count("]")
     return "\n".join(kept) + ("\n" if kept else "")
 
 

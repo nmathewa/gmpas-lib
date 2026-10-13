@@ -13,6 +13,28 @@ One `key = value` per line. A line starting with `#` or `!` is a comment, and
 a key with nothing after the `=` clears that setting. A script names only what
 it wants to set; everything else on the page stays as it is.
 
+The same view can be written the way it would be in Python with xarray, and
+the two forms mix:
+
+    spd = hypot(u, v)
+    view(region=(90, 150, -15, 15), proj="Mercator")
+    shade(spd.isel(time=12, level=3), cmap="viridis", levels="(0,20,2)(inf)")
+
+A name that is not a key is a definition, `.isel(time=, level=)` picks a step
+and a level by number (from 0, and -1 is the last step), `.sel(time="...")`
+picks a step by its label, `view()` frames the map and `shade()` draws. It
+reads like Python and is not run as Python: the text goes through Python's
+parser and only these forms are accepted.
+
+What draws decides the kind of plot. `shade()` is the fast map; `contourf()`,
+`contour()`, `pcolormesh()`, `imshow()`, `hist()`, `hovmoller()`, and
+`series()` and `profile()` at a `lon=`, `lat=`, are the page's other plots.
+Two or more of them, or winds, make a figure of layers, drawn in order:
+
+    contourf(t.isel(time=0, level=3), cmap="RdBu_r")
+    contour(z.isel(time=0, level=3), colors="black")
+    vectors(u.isel(time=0, level=3), v.isel(time=0, level=3))
+
 The text is parsed, never evaluated. `parse` checks the grammar and the types,
 and `resolve` checks the result against one open file -- the variable exists,
 the time step is in range -- so the page (and anything else that writes a
@@ -22,17 +44,21 @@ applies what `resolve` returns; this module draws nothing.
 
 from __future__ import annotations
 
+import ast
+import difflib
 import math
+import re
 
 from . import colour as _colour
 from . import derive as _derive
+from . import layers as _layers
 
 #: What "proj" takes for the plain lon/lat map.
 LONLAT = "lonlat"
 
 #: The settings that are not colour options, in the order `format` writes them.
-KEYS = ("var", "time", "level", "cmap", "vmin", "vmax", "proj", "plon", "plat",
-        "region", "box")
+KEYS = ("var", "time", "level", "kind", "point", "cmap", "vmin", "vmax", "proj",
+        "plon", "plat", "region", "box")
 
 MAX_TEXT = 8000
 MAX_LINES = 200
@@ -41,6 +67,8 @@ _HELP = {
     "var": "a variable, or a derived expression such as a - b",
     "time": "a step number (0 is the first, -1 the last) or the step's label",
     "level": "a level number, 0 first",
+    "kind": "the plot: map, contourf, contour, pcolormesh, hist, series, ...",
+    "point": "lon, lat of the place a series or a profile is read at",
     "cmap": "a palette name",
     "vmin": "the bottom of the colour range",
     "vmax": "the top of the colour range",
@@ -54,6 +82,10 @@ _HELP = {
 
 class ScriptError(ValueError):
     """A script that cannot be applied; the message names the line."""
+
+
+class _Unused(ScriptError):
+    """A name was defined and nothing used it."""
 
 
 def keys() -> dict[str, str]:
@@ -106,6 +138,14 @@ def _value(key: str, text: str):
         return [w, e, s, n]
     if key == "box":
         return _four(key, text)
+    if key == "point":
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) != 2:
+            raise ValueError("point takes a longitude and a latitude: point = 147.4, -2")
+        lon, lat = (_number(key, p) for p in parts)
+        if not -90 <= lat <= 90:
+            raise ValueError("point: latitudes run from -90 to 90")
+        return [lon, lat]
     return text
 
 
@@ -120,6 +160,23 @@ def parse(text: str) -> dict:
     lines = text.splitlines()
     if len(lines) > MAX_LINES:
         raise ScriptError(f"a script has at most {MAX_LINES} lines")
+    if _CALL_LINE.search(text):
+        return _parse_python(text)
+    try:
+        return _parse_lines(lines)
+    except ScriptError:
+        # `spd = hypot(u, v)` and then `var = spd`: a definition makes it the
+        # Python form even with no call in it. A name set and never used is
+        # not a definition, though -- it is a key spelled wrong.
+        if _defines(text):
+            try:
+                return _parse_python(text)
+            except _Unused:
+                pass
+        raise
+
+
+def _parse_lines(lines: list[str]) -> dict:
     out: dict = {}
     colour: dict = {}
     where: dict[str, int] = {}
@@ -144,6 +201,12 @@ def parse(text: str) -> dict:
             out[key] = _value(key, value) if value else None
         except ValueError as exc:
             raise ScriptError(f"line {n}: {exc}") from None
+    return _finish(out, colour, where)
+
+
+def _finish(out: dict, colour: dict, where: dict[str, int]) -> dict:
+    """The checks that take the whole script: colour options against each
+    other, and settings that only make sense together."""
     if colour:
         given = {k: v for k, v in colour.items() if v is not None}
         try:
@@ -165,6 +228,327 @@ def parse(text: str) -> dict:
     return out
 
 
+# ------------------------------------------------------------ the Python form
+
+#: A line that calls something, which only the Python form has.
+_CALL_LINE = re.compile(r"^[ \t]*(view|shade|[A-Za-z_]\w*)[ \t]*\(.*\)[ \t]*$", re.M)
+#: What draws one field, and the plot kind it is.
+_FIELD = {"shade": "map", "contourf": "contourf", "contour": "contour",
+          "pcolormesh": "pcolormesh", "imshow": "imshow", "hist": "hist",
+          "series": "series", "profile": "profile", "hovmoller": "hovmoller"}
+#: What draws winds, and the layer it is.
+_VECTOR = {"vectors": "quiver", "quiver": "quiver", "barbs": "barbs",
+           "streamlines": "streamplot", "streamplot": "streamplot"}
+#: A field call as a layer of a figure; the rest cannot be layered.
+_AS_LAYER = {"shade": "pcolormesh", "contourf": "contourf", "contour": "contour",
+             "pcolormesh": "pcolormesh", "imshow": "imshow"}
+_DRAW = (*_FIELD, *_VECTOR)
+_AT_POINT = ("series", "profile")
+_LATER = ("section", "save", "animate")
+_VIEW_KEYS = {"region": "region", "box": "box", "proj": "proj",
+              "lon0": "plon", "lat0": "plat", "plon": "plon", "plat": "plat"}
+_FUNCS = ("hypot", "diff")
+
+
+def _is_key(name: str) -> bool:
+    return name in KEYS or name in _colour.OPTIONS
+
+
+def _defines(text: str) -> bool:
+    text = "\n".join(line.lstrip() for line in text.splitlines())
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    return any(isinstance(s, ast.Assign) and len(s.targets) == 1
+               and isinstance(s.targets[0], ast.Name) and not _is_key(s.targets[0].id)
+               for s in tree.body)
+
+
+def _near(name: str, choices) -> str:
+    """` Did you mean x?` when one of `choices` is close to `name`, else ``."""
+    hit = difflib.get_close_matches(name, list(choices), n=1, cutoff=0.6)
+    return f"; did you mean {hit[0]}?" if hit else ""
+
+
+def _fail(node, message: str):
+    raise ScriptError(f"line {node.lineno}: {message}")
+
+
+def _number_of(node):
+    """The number a node writes, or None: 5, -5, 2.5e3."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        inner = _number_of(node.operand)
+        return None if inner is None else (-inner if isinstance(node.op, ast.USub)
+                                           else inner)
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return node.value
+    return None
+
+
+def _setting_text(key: str, node) -> str | None:
+    """A setting's value as the line form writes it, or None to clear it."""
+    if isinstance(node, ast.Constant) and node.value is None:
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, bool):
+        return "true" if node.value else "false"
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.strip() or None
+    number = _number_of(node)
+    if number is not None:
+        return repr(number)
+    if isinstance(node, ast.Name):                   # cmap = viridis, norm = log
+        return node.id
+    if isinstance(node, (ast.Tuple, ast.List)):
+        parts = [_number_of(e) for e in node.elts]
+        if None in parts:
+            _fail(node, f"{key} takes numbers")
+        return ", ".join(repr(v) for v in parts)
+    _fail(node, f"{key} takes a number, a name or a quoted string")
+
+
+class _Fields:
+    """Expressions over the file's fields, with the names a script defined."""
+
+    def __init__(self):
+        self.defs: dict[str, tuple[str, dict]] = {}
+        self.used: set[str] = set()
+
+    def read(self, node) -> tuple[str, dict]:
+        """`node` as (the expression the derive box takes, {time, level})."""
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            how = node.func.attr
+            if how not in ("isel", "sel"):
+                _fail(node, f".{how}() is not understood; .isel() and .sel() are")
+            text, picked = self.read(node.func.value)
+            if node.args:
+                _fail(node, f".{how}() takes names: .{how}(time=0)")
+            for kw in node.keywords:
+                if kw.arg not in ("time", "level"):
+                    _fail(node, f".{how}() takes time and level, not {kw.arg}")
+                if kw.arg in picked:
+                    _fail(node, f"{kw.arg} is picked twice")
+                picked[kw.arg] = self._pick(how, kw)
+            return text, picked
+        if isinstance(node, ast.Name) and node.id in self.defs:
+            self.used.add(node.id)
+            text, picked = self.defs[node.id]
+            return text, dict(picked)
+        return ast.unparse(self._plain(node)), {}
+
+    def _pick(self, how: str, kw):
+        value = kw.value
+        number = _number_of(value)
+        if how == "isel":
+            if type(number) is not int:
+                _fail(value, f".isel({kw.arg}=) takes a whole number, counted from 0")
+            return number
+        if kw.arg == "level":
+            _fail(value, "a level is picked by number for now: .isel(level=0)")
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            _fail(value, '.sel(time=) takes a step\'s label in quotes: '
+                         '.sel(time="2012-03-01 12:00")')
+        return value.value
+
+    def _plain(self, node):
+        """`node` with defined names written out, refusing what is not
+        arithmetic over fields."""
+        if isinstance(node, ast.Name):
+            if node.id in self.defs:
+                self.used.add(node.id)
+                text, picked = self.defs[node.id]
+                if picked:
+                    _fail(node, f"{node.id} already picks a step or a level; "
+                                f"pick after combining fields, not before")
+                return ast.parse(text, mode="eval").body
+            return node
+        if _number_of(node) is not None:
+            return node
+        if isinstance(node, ast.BinOp) and \
+                isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
+            node.left, node.right = self._plain(node.left), self._plain(node.right)
+            return node
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and not node.keywords:
+            if node.func.id not in _FUNCS:
+                _fail(node, f"{node.func.id}() is not a function here"
+                            f"{_near(node.func.id, _FUNCS)}; "
+                            f"{', '.join(f + '()' for f in _FUNCS)} are")
+            node.args = [self._plain(a) for a in node.args]
+            return node
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            _fail(node, "pick a step or a level after combining fields: "
+                        "(a - b).isel(time=0)")
+        _fail(node, "not understood; a field, a number, + - * /, hypot(a, b) "
+                    "or diff(a)")
+
+
+def _literal(node):
+    """A layer option as written: a number, text, True/False/None, or a list
+    of numbers and text."""
+    if isinstance(node, ast.Constant) and \
+            (node.value is None or isinstance(node.value, (bool, str))):
+        return node.value
+    number = _number_of(node)
+    if number is not None:
+        return number
+    if isinstance(node, (ast.Tuple, ast.List)):
+        # the layer options take a list as the form writes one: 0, 5, 10
+        return ", ".join(str(_literal(e)) for e in node.elts)
+    _fail(node, "an option takes a number, quoted text, True, False or a list")
+
+
+def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
+    """Several draw calls as a figure of layers: (the stack, {var, time})."""
+    layers, times, first = [], {}, None
+    for verb, call in draws:
+        vector = verb in _VECTOR
+        if not vector and verb not in _AS_LAYER:
+            _fail(call, f"{verb}() is a plot of its own and cannot be layered")
+        want = 2 if vector else 1
+        if len(call.args) != want:
+            _fail(call, f"{verb}() takes u and v: {verb}(u, v)" if vector
+                  else f"{verb}() takes one field")
+        layer = {"kind": _VECTOR[verb] if vector else _AS_LAYER[verb],
+                 "visible": True, "opacity": 1, "level": "follow", "options": {}}
+        levels = set()
+        for need, arg in zip(("u", "v") if vector else ("var",), call.args, strict=True):
+            name, picked = fields.read(arg)
+            if not name.isidentifier():
+                _fail(arg, f"a layer draws a field of the file, not {name!r}")
+            layer[need] = name
+            first = first or name
+            if "time" in picked:
+                times[picked["time"]] = call
+            levels.add(picked.get("level"))
+        if len(levels) > 1:
+            _fail(call, "u and v are drawn at one level")
+        if None not in levels:
+            layer["level"] = levels.pop()
+        for kw in call.keywords:
+            layer["options"][kw.arg] = _literal(kw.value)
+        layers.append(layer)
+    if len(times) > 1:
+        _fail(list(times.values())[-1], "a figure is of one time step; "
+                                        "every layer must pick the same")
+    for kind in ("coastlines", "gridlines"):
+        layers.append({"kind": kind, "visible": True, "opacity": 1,
+                       "level": "follow", "options": {}})
+    extra = {"var": first}
+    if times:
+        extra["time"] = next(iter(times))
+    return {"figure": {}, "layers": layers}, extra
+
+
+def _parse_python(text: str) -> dict:
+    """The Python form: definitions, settings, view() and what draws."""
+    # the script has no blocks, so how far a line is indented means nothing
+    text = "\n".join(line.lstrip() for line in text.splitlines())
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as exc:
+        raise ScriptError(f"line {exc.lineno}: {exc.msg}; a script with view() or "
+                          f"shade() is read as Python, so text goes in quotes: "
+                          f'levels = "(0,30,2)"') from None
+    fields = _Fields()
+    out: dict = {}
+    colour: dict = {}
+    where: dict[str, int] = {}
+    defined: dict[str, int] = {}
+    draws: list = []
+
+    def put(key: str, node, line: int, written=None):
+        if key in where:
+            raise ScriptError(f"line {line}: {key} is already set on line {where[key]}")
+        where[key] = line
+        value = _setting_text(key, node) if written is None else written
+        if key in _colour.OPTIONS:
+            colour[key] = value
+            return
+        try:
+            out[key] = _value(key, value) if value is not None else None
+        except ValueError as exc:
+            raise ScriptError(f"line {line}: {exc}") from None
+
+    def field(node, line: int):
+        expr, picked = fields.read(node)
+        put("var", node, line, expr)
+        for key, value in picked.items():
+            put(key, node, line, str(value))
+
+    for stmt in tree.body:
+        line = stmt.lineno
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 \
+                and isinstance(stmt.targets[0], ast.Name):
+            name = stmt.targets[0].id
+            if name == "var":
+                field(stmt.value, line)
+            elif _is_key(name):
+                put(name, stmt.value, line)
+            elif name in (*_FUNCS, *_DRAW, *_LATER, "view"):
+                _fail(stmt, f"{name} is a word of the script and cannot be defined")
+            else:
+                fields.defs[name] = fields.read(stmt.value)
+                defined[name] = line
+            continue
+        call = stmt.value if isinstance(stmt, ast.Expr) else None
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+            _fail(stmt, "expected name = value, view(...) or a call that draws, "
+                        "such as shade(...)")
+        verb = call.func.id
+        if verb == "view":
+            if call.args:
+                _fail(call, "view() takes names: view(region=(90, 150, -15, 15))")
+            for kw in call.keywords:
+                if kw.arg not in _VIEW_KEYS:
+                    _fail(call, f"view() has no {kw.arg}{_near(kw.arg or '', _VIEW_KEYS)}; "
+                                f"it takes {', '.join(_VIEW_KEYS)}")
+                put(_VIEW_KEYS[kw.arg], kw.value, line)
+        elif verb in _DRAW:
+            draws.append((verb, call))
+        elif verb in _LATER:
+            _fail(call, f"{verb}() is not in the script yet")
+        else:
+            words = ["view", *_DRAW, *_LATER]
+            if verb in _FUNCS:
+                _fail(call, f"{verb}() makes a field; draw it: shade({verb}(...))")
+            _fail(call, f"{verb}() is not understood{_near(verb, words)}")
+    if len(draws) == 1 and draws[0][0] in _FIELD:
+        verb, call = draws[0]
+        line = call.lineno
+        if len(call.args) != 1:
+            _fail(call, f"{verb}() takes one field: {verb}(t2m)")
+        field(call.args[0], line)
+        put("kind", call, line, _FIELD[verb])
+        point = {}
+        for kw in call.keywords:
+            if verb in _AT_POINT and kw.arg in ("lon", "lat"):
+                point[kw.arg] = _number_of(kw.value)
+                if point[kw.arg] is None:
+                    _fail(call, f"{kw.arg} takes a number")
+                continue
+            if kw.arg not in ("cmap", "vmin", "vmax") and kw.arg not in _colour.OPTIONS:
+                choices = ["cmap", "vmin", "vmax", *_colour.OPTIONS]
+                _fail(call, f"{verb}() has no {kw.arg}{_near(kw.arg or '', choices)}")
+            put(kw.arg, kw.value, line)
+        if point:
+            if len(point) != 2:
+                _fail(call, f"{verb}() takes both lon and lat")
+            put("point", call, line, f"{point['lon']!r}, {point['lat']!r}")
+    elif draws:
+        stack, extra = _stack(draws, fields)
+        line = draws[0][1].lineno
+        put("kind", draws[0][1], line, "layers")
+        for key, value in extra.items():
+            put(key, draws[0][1], line, str(value))
+        out["layers"] = stack
+    for name, line in defined.items():
+        if name not in fields.used:
+            raise _Unused(f"line {line}: {name} is set and never used"
+                          f"{_near(name, keys())}")
+    return _finish(out, colour, where)
+
+
 def resolve(state: dict, meta: dict) -> dict:
     """`state` checked against one open file, as the page applies it.
 
@@ -181,7 +565,11 @@ def resolve(state: dict, meta: dict) -> dict:
             try:
                 _derive.parse(state["var"], variables)
             except KeyError as exc:
-                raise ScriptError(f"var: {exc.args[0]}") from None
+                words = re.findall(r"[A-Za-z_]\w*", state["var"])
+                hint = next((h for h in (_near(w, variables) for w in words
+                                         if w not in variables and w not in _FUNCS)
+                             if h), "")
+                raise ScriptError(f"var: {exc.args[0]}{hint}") from None
         else:
             out["var"] = name
             levels = variables[name].get("levels", 1)
@@ -203,8 +591,33 @@ def resolve(state: dict, meta: dict) -> dict:
             raise ScriptError(f"level: {lev} is outside {out['var']}'s "
                               f"{levels} level(s)" if levels is not None
                               else f"level: {lev} is below 0")
+    kind = state.get("kind")
+    if kind is not None:
+        named = out.get("var")
+        offered = variables[named].get("kinds") if named in variables else None
+        if offered is None:
+            offered = list(meta.get("kind_labels") or ["map"])
+            if named is not None and named not in variables:
+                offered = ["map"]                # a derived field is the map only
+        if kind not in offered:
+            what = f"{named} has" if named else "this page has"
+            raise ScriptError(f"kind: {what} no {kind!r} plot{_near(kind, offered)}; "
+                              f"one of {', '.join(offered)}")
+        if kind != "map" and state.get("proj") not in (None, LONLAT):
+            raise ScriptError(f"kind: a {kind} plot is drawn on the {LONLAT} map; "
+                              f"leave proj out or set proj = {LONLAT}")
+    if state.get("layers") is not None:
+        if not meta.get("layer_schema"):
+            raise ScriptError("layers: this page draws one field at a time")
+        spatial = [v["name"] for v in meta.get("variables", []) if v.get("spatial")]
+        counts = {v["name"]: v.get("levels", 1) for v in meta.get("variables", [])}
+        try:
+            _layers.clean(state["layers"], spatial, counts)
+        except ValueError as exc:
+            raise ScriptError(f"layers: {exc}") from None
     if state.get("cmap") is not None and state["cmap"] not in meta.get("cmaps", []):
-        raise ScriptError(f"cmap: {state['cmap']!r} is not one of this page's palettes")
+        raise ScriptError(f"cmap: {state['cmap']!r} is not one of this page's palettes"
+                          f"{_near(state['cmap'], meta.get('cmaps', []))}")
     if "proj" in state:
         offered = meta.get("projections") or []
         name = state["proj"]
