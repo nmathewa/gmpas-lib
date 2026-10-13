@@ -385,7 +385,9 @@ def _rounds(cfg, messages, meta, post, record, shown=None) -> dict:
         settings = [line for line in written.splitlines() if line[0] not in "#!"]
         if not settings:
             said = written.strip().lstrip("#! ").strip() or reply.strip()[:200]
-            raise ChatError(said or "the model wrote no script", "said")
+            if not said:             # nothing at all: a fault, not an answer
+                raise ChatError("the model gave no answer", "server")
+            raise ChatError(said, "said")
         try:
             written, state = _script.read(written, meta, shown)
             _fits(state, shown, meta)

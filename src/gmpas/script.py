@@ -881,7 +881,10 @@ def resolve(state: dict, meta: dict) -> dict:
         if offered is None:
             offered = list(meta.get("kind_labels") or ["map"])
             if named is not None and named not in variables:
-                offered = ["map"]                # a derived field is the map only
+                # a derived field is the map, or a layer where a figure can
+                # draw an expression
+                offered = ["map"] + (["layers"] if meta.get("layer_expressions")
+                                     and meta.get("layer_schema") else [])
         if kind == "series" and meta.get("steps", 0) <= 1:
             raise ScriptError("series: this file has one time step, so there is "
                               "nothing to plot against time")

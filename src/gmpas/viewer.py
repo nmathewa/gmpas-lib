@@ -1378,9 +1378,16 @@ def _serve_series(handler, viewer, q: dict) -> None:
         if hasattr(viewer, "warm_readers"):
             viewer.warm_readers()
         return handler._send(b'{"state":"warming"}', "application/json")
-    if q.get("stop") and hasattr(viewer, "cancel_series"):
-        stopped = viewer.cancel_series(float(q["lon"]), float(q["lat"]),
-                                       q["var"], int(q.get("level", 0)))
+    if q.get("stop"):
+        # A viewer with no reads to cancel, or a field that has no series (an
+        # expression), has nothing running: say so, and start nothing.
+        stopped = False
+        if hasattr(viewer, "cancel_series"):
+            try:
+                stopped = viewer.cancel_series(float(q["lon"]), float(q["lat"]),
+                                               q["var"], int(q.get("level", 0)))
+            except (KeyError, ValueError):
+                stopped = False
         return handler._send(json.dumps({"state": "stopped",
                                          "was_running": stopped}).encode(),
                              "application/json")
@@ -2690,7 +2697,10 @@ async function chatAsk(){
     $("#scriptBox").value=d.script;
     a.textContent=d.script.trim();
     const ok=await scriptRun(d.script);
-    if(ok && ANSWER) chatLine("q", ANSWER);
+    if(ok && ANSWER){
+      chatLine("q", ANSWER);
+      CHAT[CHAT.length-1].reply+="# "+ANSWER+"\\n";      // a follow-up may refer to it
+    }
     if(!ok){
       a.textContent+="\\n"+$("#scripthint").textContent; a.classList.add("bad"); }
   }catch(e){ a.textContent="no answer: "+e; a.classList.add("bad"); }
@@ -2714,8 +2724,14 @@ function scriptPy(v){
   if(typeof v==="number") return String(v);
   return JSON.stringify(String(v));
 }
+// The view box in degrees as a script may write it: a frame can reach past a
+// pole on screen, a region cannot.
+function regionOf(v){
+  const b=boxOf(v);
+  return [b[0], b[1], Math.max(-90, b[2]), Math.min(90, b[3])];
+}
 function scriptLayers(){
-  const t=$("#time").value, rows=[`view(region=(${boxOf(view).map(scriptNum).join(", ")}))`];
+  const t=$("#time").value, rows=[`view(region=(${regionOf(view).map(scriptNum).join(", ")}))`];
   for(const L of LY.layers){
     const verb=LY_VERB[L.kind];
     if(!verb || L.visible===false) continue;
@@ -2749,7 +2765,8 @@ function scriptText(){
     if(P && P.plon!=null) rows.push(["plon", scriptNum(P.plon)]);
     if(P && P.plat!=null) rows.push(["plat", scriptNum(P.plat)]);
   }
-  rows.push([P ? "box" : "region", boxOf(view).map(scriptNum).join(", ")]);
+  rows.push([P ? "box" : "region",
+             (P ? boxOf(view) : regionOf(view)).map(scriptNum).join(", ")]);
   if(M.colour_options) Object.keys(M.colour_options).forEach(k=>{
     if(COL[k]!=null) rows.push([k, String(COL[k])]); });
   const w=Math.max(...rows.map(r=>r[0].length));
@@ -3868,7 +3885,7 @@ function animRow(key, entry){
   div.className="animrow"+(playingKey===key?" on":"");
   const status=entry.loading ? `${entry.ready}/${entry.total}` : "ready";
   div.innerHTML=
-    `<span class="animrow-name" title="${entry.varName}">${entry.varName}</span>`+
+    `<span class="animrow-name" title="${esc(entry.varName)}">${esc(entry.varName)}</span>`+
     `<span class="animrow-status">${status}</span>`+
     `<button class="animrow-play" title="play">${playingKey===key?"\u23f8":"\u25b6"}</button>`+
     `<button class="animrow-clear" title="clear">\u00d7</button>`;
@@ -4393,8 +4410,8 @@ function ptValue(value, step){
   const at=(step===undefined) ? (+$("#time").value) : step;
   const text=(value===null||value===undefined||!isFinite(value))
     ? "no data" : (+value).toPrecision(6);
-  $("#ptnow").innerHTML=`${cur?cur.label:""}<br><b>${text}</b>`+
-    `<span class="at"> at ${(M.labels[at]||"")}</span>`;
+  $("#ptnow").innerHTML=`${esc(cur?cur.label:"")}<br><b>${text}</b>`+
+    `<span class="at"> at ${esc(M.labels[at]||"")}</span>`;
 }
 // The slider moved: the panel's number belongs to the new step, not the old
 let ptValueTimer=null;
@@ -4683,8 +4700,8 @@ function ptChart(){
     `<line class="ax" x1="${L}" y1="${T}" x2="${L}" y2="${H-B}"/>`+
     `<line class="ax" x1="${L}" y1="${H-B}" x2="${W-R}" y2="${H-B}"/>`+
     ticks.join("")+
-    `<text x="${L}" y="${H-6}">${ends[0].slice(0,16)}</text>`+
-    `<text x="${W-R}" y="${H-6}" text-anchor="end">${ends[1].slice(0,16)}</text>`+
+    `<text x="${L}" y="${H-6}">${esc(ends[0].slice(0,16))}</text>`+
+    `<text x="${W-R}" y="${H-6}" text-anchor="end">${esc(ends[1].slice(0,16))}</text>`+
     (nowX!==null ? `<line class="now" x1="${nowX.toFixed(1)}" y1="${T}" `+
                    `x2="${nowX.toFixed(1)}" y2="${H-B}"/>` : "")+
     `<path class="ln${coarse?" coarse":""}" d="${d.trim()}"/>`+dots+
@@ -4728,13 +4745,13 @@ async function ptRefresh(){
   PT.var=cur.name;
   ptProfOffer();
   if(again && cur.levels>1 && varNamed(cur.name)) ptProfile();
-  $("#ptnow").innerHTML=`${cur.label}<br><b>\u2026</b>`;
+  $("#ptnow").innerHTML=`${esc(cur.label)}<br><b>\u2026</b>`;
   const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
                                time:$("#time").value, level:$("#level").value});
   try{
     const r=await fetch("api/probe?"+q);
     if(!r.ok){ $("#pthint").textContent=(await r.json()).error||"probe failed";
-               $("#ptnow").innerHTML=`${cur.label}<br><b>no data</b>`; return; }
+               $("#ptnow").innerHTML=`${esc(cur.label)}<br><b>no data</b>`; return; }
     const d=await r.json();
     if(!PT || cur.name!==PT.var) return;
     PT.cell=d.cell; PT.snapped={lon:+d.lon, lat:+d.lat};
@@ -4744,7 +4761,17 @@ async function ptRefresh(){
   }catch(e){ $("#pthint").textContent="probe failed: "+e; }
 }
 async function ptAt(lon, lat, what){
-  if(!cur || plotMode()) return;
+  if(!cur) return;
+  if(plotMode()){
+    scriptSay("a place is marked on the map, and a figure is on screen: "+
+              "go back to the map first", true);
+    return;
+  }
+  // the same place, in the longitudes this file uses (210 for -150, or back)
+  if(!P && M.home){
+    if(lon<M.home[0] && lon+360<=M.home[1]+1e-9) lon+=360;
+    else if(lon>M.home[1] && lon-360>=M.home[0]-1e-9) lon-=360;
+  }
   lastClickPx=null; probePt={lon, lat};
   const q=new URLSearchParams({lon, lat, var:cur.name,
     time:$("#time").value, level:$("#level").value});
@@ -4855,7 +4882,10 @@ async function dimsAfter(){
   const first=M.variables.find(v=>!v.static) ?? M.variables[0];
   if(first) pick(first.name);
 }
-const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");
+// A name, a label or a time label comes from a file or from what was typed:
+// it is text, and is escaped wherever markup is built around it.
+const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+                      .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 
 foldBoot();
 boot();

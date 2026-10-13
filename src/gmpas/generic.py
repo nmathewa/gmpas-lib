@@ -1023,6 +1023,9 @@ class GenericViewer:
 
     def kinds(self, name: str) -> list[str]:
         """What `plot` can draw for this variable, first entry the default."""
+        if name not in self.ds.variables:        # an expression of map fields
+            _derive.parse(name, self._spatial_vars())
+            return ["map", "layers"]
         da = self.ds[name]
         if self.lat_dim in da.dims and self.lon_dim in da.dims:
             out = ["map", *_GRID_KINDS, "hist"]
@@ -1082,6 +1085,8 @@ class GenericViewer:
             "kind_labels": KIND_LABELS,
             "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),
+            # a layer may be an expression of fields: `_cropped` evaluates one
+            "layer_expressions": True,
             "setup": self.setup(),
             "variables": variables,
         }
@@ -1832,7 +1837,30 @@ class GenericViewer:
 
     def _cropped(self, var: str, time: int, level: int, extent):
         """One step on the map, cut to `extent` in file order, coordinates kept
-        -- so xarray labels the axes and titles the scalar coordinates itself."""
+        -- so xarray labels the axes and titles the scalar coordinates itself.
+
+        An expression of fields is evaluated from its operands' crops in
+        float64, as the fast map evaluates it (`_gather`), so a figure, a
+        question and a click on the map give one number for one cell.
+        """
+        if var in self.ds.data_vars:
+            return self._cropped_field(var, time, level, extent)
+        plan = _derive.parse(var, self._spatial_vars())
+        crops: list = []
+
+        def read(name, step):
+            da = self._cropped_field(name, step, level, extent).transpose(
+                self.lat_dim, self.lon_dim)
+            crops.append(da)
+            return np.asarray(da.values, dtype=np.float64)
+
+        values = _derive.evaluate(plan, time, read)
+        out = crops[0].copy(data=values)
+        out.name, out.attrs = var, {}          # the operand's units are not its own
+        return out
+
+    def _cropped_field(self, var: str, time: int, level: int, extent):
+        """`_cropped` for a variable of the file."""
         lon_min, lon_max, lat_min, lat_max = extent
         # One cell beyond each edge of the box, so a fill reaches the frame
         # instead of stopping at the last centre inside it -- and so a view
@@ -2137,7 +2165,15 @@ class GenericViewer:
             return stack
         if stack is None or stack == "":
             stack = _layers.default_stack(var)
-        return _layers.clean(stack, self._spatial_vars(), self._level_counts())
+        names = self._spatial_vars()
+
+        def derived(name: str) -> bool:
+            try:
+                _derive.parse(name, names)
+            except KeyError:
+                return False
+            return True
+        return _layers.clean(stack, names, self._level_counts(), derived)
 
     def _level_counts(self) -> dict[str, int]:
         """Each map variable's level-axis length, for checking pinned levels."""
@@ -2205,7 +2241,15 @@ class GenericViewer:
         from .style import Style
 
         st = Style.preset(style)
-        if var not in self._spatial_vars() and kind == "map":
+        if kind == "map" and var not in self.ds.variables:
+            # An expression of map fields has no figure of its own kind: it is
+            # drawn as the one layer it is, over coastlines.
+            options = {k: v for k, v in (("cmap", cmap), ("vmin", vmin), ("vmax", vmax))
+                       if v not in (None, "")}
+            kind, layers = "layers", {"figure": {}, "layers": [
+                {"kind": "pcolormesh", "var": var, "options": options},
+                {"kind": "coastlines"}, {"kind": "gridlines"}]}
+        elif var not in self._spatial_vars() and kind == "map":
             kind = "auto"
         return self._render(var, time, level, kind, extent, st.figsize, st.dpi,
                             cmap, vmin, vmax, lon, lat, hov, None, layers, colour, sec)

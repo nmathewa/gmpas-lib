@@ -566,7 +566,10 @@ def clean(stack, spatial_vars, level_counts: dict[str, int], derived=None) -> di
         else:
             idx = _coerce("level", {"type": "int", "min": 0}, level, where)
             for need in spec["needs"]:
-                n = level_counts.get(clean_layer[need], 1)
+                n = level_counts.get(clean_layer[need])
+                if n is None:            # an expression: its fields' levels
+                    n = max((level_counts.get(w, 1) for w in re.findall(
+                        r"[A-Za-z_]\w*", clean_layer[need])), default=1)
                 if idx >= n:
                     raise ValueError(f"{where}level {idx} is out of range for "
                                      f"{clean_layer[need]!r} ({n} level(s))")
@@ -944,12 +947,28 @@ def _norm(opts: dict, vmin, vmax):
     return None
 
 
+def _source(viewer, name: str):
+    """(the file's variable a layer's field is drawn from, whether the field
+    IS that variable). An expression of fields has no variable of its own: the
+    first field in it stands in for its level axis, and for nothing else."""
+    try:
+        return viewer.ds[name], True
+    except KeyError:
+        for word in re.findall(r"[A-Za-z_]\w*", name):
+            try:
+                return viewer.ds[word], False
+            except KeyError:
+                continue
+    return None, False
+
+
 def _field_label(viewer, layer, da, lvl: int) -> str:
     label = layer["options"].get("colorbar_label")
     if label:
         return label
-    text = _data.field_label(viewer.ds[layer["var"]])
-    stack = viewer._stack_dims(viewer.ds[layer["var"]])
+    source, own = _source(viewer, layer["var"])
+    text = _data.field_label(source) if own else layer["var"]
+    stack = viewer._stack_dims(source) if source is not None else []
     if stack and stack[0] in viewer.ds.variables:
         coord = viewer.ds[stack[0]]
         value = coord.values[lvl]
@@ -1013,7 +1032,8 @@ def _grid_values(ax, viewer, da, shifted, opts: dict, crs, alpha: float, z: int)
 
 
 def _speed_units(viewer, name: str) -> str:
-    return str(viewer.ds[name].attrs.get("units", ""))
+    source, own = _source(viewer, name)
+    return str(source.attrs.get("units", "")) if own else ""
 
 
 def draw(viewer, fig, stack: dict, time: int, level: int, extent):
@@ -1397,7 +1417,8 @@ def _cell(viewer) -> float:
 
 
 def _level_text(viewer, var: str, lvl: int) -> str:
-    stack = viewer._stack_dims(viewer.ds[var])
+    source, _ = _source(viewer, var)
+    stack = viewer._stack_dims(source) if source is not None else []
     if not stack:
         return ""
     dim = stack[0]
