@@ -2713,8 +2713,10 @@ function scriptLayers(){
       const what=/^\\w+$/.test(n) ? n : `(${n})`;       // (a - b).isel(...)
       return `${what}.isel(time=${t}${v && v.levels>1 ? `, level=${lev}` : ""})`; };
     const args=(L.var ? [pick(L.var)] : L.u ? [pick(L.u), pick(L.v)] : []).concat(
-      Object.entries(L.options||{}).filter(([,v])=>v!=null && v!=="")
-        .map(([k,v])=>`${k}=${scriptPy(v)}`));
+      Object.entries({...(L.options||{}), mpl:undefined, ...((L.options||{}).mpl||{})})
+        .filter(([,v])=>v!=null && v!=="")
+        .map(([k,v])=>`${k}=${Array.isArray(v) ? "["+v.map(scriptPy).join(", ")+"]"
+                                                : scriptPy(v)}`));
     rows.push(`${verb}(${args.join(", ")})`);
   }
   const fig=Object.entries(LY.figure||{}).filter(([,v])=>v!=null && v!=="")

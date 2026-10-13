@@ -201,7 +201,7 @@ def test_winds_alone_are_layers_too_and_a_definition_may_name_a_field():
     ("contourf(hypot(u, v))", "kind: hypot\\(u, v\\) has no 'contourf' plot"),
     ("contourf(t2m)\nview(proj='Mercator')", "is drawn on the lonlat map"),
     ("contourf(t2m)\nvectors(u, w)", "layers: layer 2 \\(quiver\\): v='w' is not"),
-    ("contourf(t2m, stride=3)\nvectors(u, v)", "layers: layer 1 \\(contourf\\)"),
+    ("contourf(t2m, cmpa='jet')\nvectors(u, v)", "layer 1 \\(contourf\\): unknown option"),
     ("contourf(t2m)\ncontour(u.isel(level=7))", "layers: .*level 7 is out of range"),
     ("contourf(u - v)\ncontour(u)", "var='u - v' is not a map variable"),
 ])
@@ -346,3 +346,19 @@ def test_a_question_the_script_cannot_answer_is_refused(text, says):
 def test_a_question_is_checked_against_the_file(text, says):
     with pytest.raises(script.ScriptError, match=says):
         script.resolve(script.parse(text), META)
+
+
+def test_an_option_matplotlib_takes_is_passed_on_as_a_plain_value():
+    got = script.resolve(script.parse(
+        'contourf(t2m, antialiased=True)\n'
+        'vectors(u, v, stride=4, pivot="mid", headlength=7)\n'
+        'contour(t2m, levels=[270, 280], corner_mask=[1, 2])'), KINDS)
+    fill, arrows, lines = got["layers"]["layers"][:3]
+    assert fill["options"] == {"antialiased": True}
+    assert arrows["options"] == {"stride": 4, "pivot": "mid", "headlength": 7}
+    # its own option takes the list as its form writes it; matplotlib's keeps it
+    assert lines["options"] == {"levels": "270, 280", "corner_mask": [1, 2]}
+    # one call with a layer's option is a figure of that one layer
+    alone = script.resolve(script.parse("contourf(t2m, antialiased=True)"), KINDS)
+    assert alone["kind"] == "layers"
+    assert script.resolve(script.parse("contourf(t2m)"), KINDS)["kind"] == "contourf"

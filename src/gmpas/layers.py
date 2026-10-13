@@ -426,15 +426,68 @@ def _coerce(name: str, spec: dict, value, where: str):
     raise ValueError(f"{where}{name}: unknown option type {kind}")
 
 
-def _clean_options(given, table: dict, where: str) -> dict:
+#: The layers whose drawing call takes options this module does not list.
+PASS_THROUGH = ("contourf", "contour", "pcolormesh", "imshow", "quiver", "barbs",
+                "streamplot")
+MAX_EXTRA = 12
+#: What the drawing code sets itself; a stack may not set these in its place.
+_RESERVED = frozenset({"ax", "x", "y", "data", "transform", "zorder", "add_colorbar",
+                       "add_labels", "figure", "clip_path", "clip_box"})
+
+
+def _plain_value(value) -> bool:
+    if value is None or isinstance(value, (bool, int, float)):
+        return True
+    if isinstance(value, str):
+        return len(value) <= MAX_TEXT
+    return isinstance(value, list) and len(value) <= 64 and all(
+        not isinstance(v, list) and _plain_value(v) for v in value)
+
+
+def _clean_options(given, table: dict, where: str, extra: bool = False) -> dict:
+    """The options a layer was given, checked against its table.
+
+    With `extra`, a name the table does not have is kept under "mpl" and
+    handed to the matplotlib call as it is -- any option matplotlib takes, as
+    a plain value, never as code. A name that is nearly one of the table's is
+    still a mistake: `colour` is not passed on as if it were not `color`.
+    """
     if given is None:
         return {}
     if not isinstance(given, dict):
         raise ValueError(f"{where}options must be an object")
+    passed = dict(given.get("mpl") or {}) if extra and isinstance(given.get("mpl"), dict) \
+        else {}
+    given = {k: v for k, v in given.items() if not (extra and k == "mpl")}
     unknown = sorted(set(given) - set(table))
+    if unknown and extra:
+        import difflib
+
+        for name in unknown:
+            if name in _RESERVED:
+                raise ValueError(f"{where}unknown option {name!r}: the layer sets "
+                                 f"that itself")
+            others = sorted(k for k, spec in LAYER_KINDS.items()
+                            if name in spec["options"])
+            if others:               # another layer's option, not matplotlib's
+                raise ValueError(f"{where}unknown option {name!r}: that is an "
+                                 f"option of {', '.join(others)}")
+            near = difflib.get_close_matches(name, list(table), n=1, cutoff=0.75)
+            if near:
+                raise ValueError(f"{where}unknown option {name!r}; did you mean "
+                                 f"{near[0]!r}?")
+            passed[name] = given.pop(name)
+        unknown = []
     if unknown:
         raise ValueError(f"{where}unknown option(s) {unknown}; allowed: {sorted(table)}")
-    out = {}
+    for name, value in passed.items():
+        if not (isinstance(name, str) and name.isidentifier() and len(name) <= 40
+                and not name.startswith("_")) or not _plain_value(value):
+            raise ValueError(f"{where}{name!r} must be a plain option: a number, "
+                             f"text, true/false or a list of those")
+    if len(passed) > MAX_EXTRA:
+        raise ValueError(f"{where}at most {MAX_EXTRA} options beyond the listed ones")
+    out = {"mpl": passed} if passed else {}
     for name, value in given.items():
         coerced = _coerce(name, table[name], value, where)
         if coerced is not None:
@@ -487,7 +540,8 @@ def clean(stack, spatial_vars, level_counts: dict[str, int], derived=None) -> di
                                where) is not False,
             "opacity": _coerce("opacity", {"type": "float", "min": 0.0, "max": 1.0},
                                layer.get("opacity", 1.0), where),
-            "options": _clean_options(layer.get("options"), spec["options"], where),
+            "options": _clean_options(layer.get("options"), spec["options"], where,
+                                      extra=kind in PASS_THROUGH),
         }
         if clean_layer["opacity"] is None:
             clean_layer["opacity"] = 1.0
@@ -959,6 +1013,19 @@ def _speed_units(viewer, name: str) -> str:
 
 def draw(viewer, fig, stack: dict, time: int, level: int, extent):
     """Draw a cleaned stack onto `fig`, bottom layer first. Returns the axes."""
+    try:
+        return _draw(viewer, fig, stack, time, level, extent)
+    except (TypeError, AttributeError) as exc:
+        passed = sorted({name for layer in stack["layers"]
+                         for name in layer["options"].get("mpl", {})})
+        if not passed:
+            raise
+        # an option handed on to matplotlib that it does not take
+        raise ValueError(f"matplotlib refused an option ({', '.join(passed)}): "
+                         f"{exc}") from None
+
+
+def _draw(viewer, fig, stack: dict, time: int, level: int, extent):
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     import matplotlib.ticker as mticker
@@ -998,6 +1065,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
         alpha = layer["opacity"]
         kind, spec = layer["kind"], LAYER_KINDS[layer["kind"]]
         opts = {name: _option(layer, name) for name in spec["options"]}
+        more = layer["options"].get("mpl", {})   # matplotlib's own, passed on
         lvl = _level_of(layer, level)
 
         if spec["group"] == "field":
@@ -1024,7 +1092,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                     kw["cmap"] = palettes.get(opts["cmap"] or look["palette"])
                 else:
                     kw["colors"] = opts["colors"]
-                artist = shifted.plot.contour(**common, **kw)
+                artist = shifted.plot.contour(**{**common, **kw, **more})
                 # after drawing, not before: a count (or no levels at all)
                 # leaves matplotlib to choose them, and which line is the Nth
                 # can only be answered once they exist
@@ -1064,7 +1132,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                     kw["shading"] = opts["shading"]
                 elif kind == "imshow":
                     kw["interpolation"] = opts["interpolation"]
-                artist = getattr(shifted.plot, kind)(**common, **kw)
+                artist = getattr(shifted.plot, kind)(**{**common, **kw, **more})
                 if kind == "contourf":
                     # a discrete cmap built from `levels` would drop the extremes
                     artist.set_cmap(artist.get_cmap().with_extremes(
@@ -1100,7 +1168,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                     kw.update(color=speed, cmap=palette(layer, opts))
                 else:
                     kw["color"] = opts["color"]
-                artist = ax.streamplot(lon, lat, uu, vv, **kw)
+                artist = ax.streamplot(lon, lat, uu, vv, **{**kw, **more})
                 artist.lines.set_alpha(alpha)
                 artist.arrows.set_alpha(alpha)
                 if opts["colorize"] and opts["colorbar"]:
@@ -1120,6 +1188,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                         kw["scale"] = opts["scale"]
                     if opts["width"]:
                         kw["width"] = opts["width"]
+                    kw.update(more)
                     if opts["colorize"]:
                         artist = ax.quiver(X, Y, U, V, np.hypot(U, V),
                                            cmap=palette(layer, opts), **kw)
@@ -1143,9 +1212,9 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                         qk.text.set_bbox(dict(facecolor="white", edgecolor="none",
                                               alpha=0.8, pad=1.5))
                 else:
-                    ax.barbs(X, Y, U, V, transform=data_crs, color=opts["color"],
-                             length=opts["length"], linewidth=opts["linewidth"],
-                             alpha=alpha, zorder=z)
+                    ax.barbs(X, Y, U, V, **{**dict(
+                        transform=data_crs, color=opts["color"], length=opts["length"],
+                        linewidth=opts["linewidth"], alpha=alpha, zorder=z), **more})
             described.append(f"{spec['label']} {layer['u']}/{layer['v']}"
                              + _level_text(viewer, layer["u"], lvl))
 

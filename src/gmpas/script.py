@@ -458,9 +458,19 @@ def _literal(node):
     if number is not None:
         return number
     if isinstance(node, (ast.Tuple, ast.List)):
-        # the layer options take a list as the form writes one: 0, 5, 10
-        return ", ".join(str(_literal(e)) for e in node.elts)
+        return [_literal(e) for e in node.elts]
     _fail(node, "an option takes a number, quoted text, True, False or a list")
+
+
+def _option_of(kind: str, name: str, node):
+    """A layer's option as `gmpas.layers` takes it: one of its own listed
+    options takes a list as its form writes one -- 0, 5, 10 -- and an option
+    passed on to matplotlib keeps the list."""
+    value = _literal(node)
+    listed = name in _layers.LAYER_KINDS.get(kind, {}).get("options", {})
+    if isinstance(value, list) and (listed or kind == "figure"):
+        return ", ".join(str(v) for v in value)
+    return value
 
 
 def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
@@ -470,7 +480,8 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
         if verb == "figure" or verb in _FEATURE:
             if call.args:
                 _fail(call, f"{verb}() takes options by name: {verb}(color=\"gray\")")
-            options = {kw.arg: _literal(kw.value) for kw in call.keywords}
+            options = {kw.arg: _option_of(verb, kw.arg, kw.value)
+                       for kw in call.keywords}
             if verb == "figure":
                 figure.update(options)
             else:
@@ -501,7 +512,7 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
         if None not in levels:
             layer["level"] = levels.pop()
         for kw in call.keywords:
-            layer["options"][kw.arg] = _literal(kw.value)
+            layer["options"][kw.arg] = _option_of(layer["kind"], kw.arg, kw.value)
         layers.append(layer)
     if len(times) > 1:
         _fail(list(times.values())[-1], "a figure is of one time step; "
@@ -619,7 +630,13 @@ def _parse_python(text: str) -> dict:
             if verb in _FUNCS:
                 _fail(call, f"{verb}() makes a field; draw it: shade({verb}(...))")
             _fail(call, f"{verb}() is not understood{_near(verb, words)}")
-    if len(draws) == 1 and draws[0][0] in _FIELD:
+    # one call is the page's own plot of that kind -- unless it is given an
+    # option only a layer has, and then it is a figure of that one layer
+    own = ("cmap", "vmin", "vmax", "lon", "lat", *_colour.OPTIONS)
+    alone = len(draws) == 1 and draws[0][0] in _FIELD and not (
+        draws[0][0] in _AS_LAYER and draws[0][0] != "shade"
+        and any(kw.arg not in own for kw in draws[0][1].keywords))
+    if alone:
         verb, call = draws[0]
         line = call.lineno
         if len(call.args) != 1:

@@ -416,7 +416,7 @@ def test_a_preset_names_every_variable_the_file_lacks(gv):
 
 def test_a_preset_goes_through_the_same_validation_as_a_stack(gv):
     bad = json.loads(json.dumps(PRESET))
-    bad["layers"][0]["options"]["alpha"] = 0.5
+    bad["layers"][0]["options"]["transform"] = 0.5        # the layer's own to set
     with pytest.raises(ValueError, match="unknown option"):
         gv.bind_preset(bad)
     bad = json.loads(json.dumps(PRESET))
@@ -544,3 +544,23 @@ def test_map_features_default_to_the_scale_of_the_view(gv, monkeypatch, extent, 
     pinned = gv.layer_stack({"layers": [{"kind": "coastlines",
                                          "options": {"resolution": "110m"}}]}, "t")
     assert pinned["layers"][0]["options"]["resolution"] == "110m"
+
+
+def test_an_unlisted_option_is_passed_on_and_a_near_miss_is_not():
+    stack = {"figure": {}, "layers": [
+        {"kind": "quiver", "u": "u", "v": "v", "options": {"pivot": "mid", "stride": 3}},
+        {"kind": "coastlines"}]}
+    got = L.clean(stack, ["u", "v"], {})
+    assert got["layers"][0]["options"] == {"mpl": {"pivot": "mid"}, "stride": 3}
+    assert L.clean(got, ["u", "v"], {})["layers"][0]["options"]["mpl"] == {"pivot": "mid"}
+    for options, says in [({"colour": "red"}, "did you mean 'color'"),
+                          ({"pivot": {"a": 1}}, "must be a plain option"),
+                          ({"_private": 1}, "must be a plain option"),
+                          ({f"o{i}": i for i in range(13)}, "at most 12")]:
+        with pytest.raises(ValueError, match=says):
+            L.clean({"figure": {}, "layers": [{"kind": "quiver", "u": "u", "v": "v",
+                                               "options": options}]}, ["u", "v"], {})
+    # the map's own layers take only what they list
+    with pytest.raises(ValueError, match="unknown option"):
+        L.clean({"figure": {}, "layers": [{"kind": "rivers",
+                                           "options": {"zorder": 3}}]}, [], {})
