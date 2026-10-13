@@ -1639,8 +1639,10 @@ def _handler(viewer: Viewer, html: str = ""):
                         got = _chat.ask(q.get("text", ""), viewer.describe(),
                                         q.get("script", ""), history=said)
                     except _chat.ChatError as exc:
-                        return self._send(json.dumps({"error": str(exc)}).encode(),
-                                          "application/json", 400)
+                        # `kind` tells the model's own words from a fault
+                        return self._send(
+                            json.dumps({"error": str(exc), "kind": exc.kind}).encode(),
+                            "application/json", 400)
                     return self._send(json.dumps(got).encode(), "application/json")
                 if url.path == "/api/projbox":
                     # a lon/lat region as the box that holds it in a projection
@@ -2127,6 +2129,7 @@ body.chat:not(.allctl) #extentsec{display:none!important}
 #chatlog .a{font:11px monospace;white-space:pre-wrap;color:var(--dim);
             border-left:2px solid var(--line);padding-left:6px}
 #chatlog .a.bad{color:#e88}
+#chatlog .a.said{font:inherit;color:var(--fg)}
 #lyJsonBox{width:100%;box-sizing:border-box;height:180px;font:11px monospace;margin-top:6px}
 #lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
 #hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
@@ -2679,7 +2682,11 @@ async function chatAsk(){
     // what was said is sent with the next request: "no, the other one" and
     // "still the same" mean nothing without it
     CHAT.push({request:text, reply:r.ok ? d.script : "# "+d.error});
-    if(!r.ok){ a.textContent=String(d.error); a.classList.add("bad"); return; }
+    // the model's own words -- it cannot, or it was not asked about the map --
+    // are an answer, not a fault: only a fault is shown as one
+    if(!r.ok){
+      a.textContent=String(d.error); a.classList.add(d.kind==="said" ? "said" : "bad");
+      return; }
     $("#scriptBox").value=d.script;
     a.textContent=d.script.trim();
     const ok=await scriptRun(d.script);
@@ -2835,6 +2842,8 @@ async function scriptSet(s, first){
     ANSWER=`${s.ask.what==="max" ? "largest" : "smallest"} ${s.ask.var} `+
       `${P ? "in the data" : "in view"}: ${+d.value.toPrecision(6)} at `+
       `${fmtLat(d.lat)}, ${fmtLon(d.lon)}`;
+    // mark(x.max()): the place is marked too, where the map can be marked
+    if(s.ask.mark) setTimeout(()=>ptAt(d.lon, d.lat, "mark"), 0);
     scriptSay(ANSWER);
     return true;
   }

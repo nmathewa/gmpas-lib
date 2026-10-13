@@ -151,6 +151,8 @@ Make a field (then draw it with shade):
 Ask where a field is largest or smallest in view. The page answers with the
 value and the place and leaves the picture alone, so write this line only:
   snow.max()                       also .min(); .isel() picks a step or level
+  mark(snow.max())                 the same, and the place is marked on the map
+  mark(lon=147.4, lat=-2.0)        marks a place and shows the value there
 Frame the map:
   view(region=(west, east, south, north))
   view(proj="Mercator")            a projection; shade() only
@@ -239,6 +241,9 @@ def system_prompt(meta: dict) -> str:
         "or time; saving or animating (the page's export buttons do those); a "
         "cross-section. Say so in one line starting `# `, and do not draw "
         "something else in its place.\n"
+        "- Asked why something was not done, or what you can do, answer in one "
+        "line starting `# `. Small talk gets one friendly `# ` line that says "
+        "what can be asked about the map.\n"
         "- If the file does not hold what is asked for, or the request is not "
         "about the map, reply with one line starting `# ` that says why. If only "
         "part can be met, write that part and add a `# ` line saying what was "

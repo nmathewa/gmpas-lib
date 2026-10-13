@@ -459,3 +459,37 @@ def test_an_overlay_written_alone_is_drawn_over_the_field_on_screen():
     # where the field shown cannot be a layer, the overlay is drawn alone
     text, state = script.read("vectors(u, v)", KINDS, shown="t2m - 273.15")
     assert text == "vectors(u, v)" and state["layers"]["layers"][0]["kind"] == "quiver"
+
+
+def test_var_in_an_expression_is_the_field_on_screen():
+    assert script.parse("var.max()", shown="t2m")["ask"] == {"what": "max", "var": "t2m"}
+    assert script.parse("shade(var - 273.15)", shown="t2m")["var"] == "t2m - 273.15"
+    # a var line in the script itself is what `var` means after it
+    got = script.parse("var = u\nvar.isel(level=2).min()", shown="t2m")
+    assert got["ask"] == {"what": "min", "var": "u", "level": 2}
+    assert script.read("var.max()", META, shown="T2M")[1]["ask"]["var"] == "t2m"
+    # with nothing on screen to mean, it is a name the file does not have
+    with pytest.raises(script.ScriptError, match="'var' is not a variable"):
+        script.resolve(script.parse("var.max()"), META)
+
+
+def test_mark_puts_the_answer_or_a_place_on_the_map():
+    got = script.parse("mark(t2m.isel(time=1).max())")
+    assert got == {"ask": {"what": "max", "var": "t2m", "time": 1, "mark": True}}
+    assert script.resolve(got, META)["ask"]["mark"] is True
+    assert "mark" not in script.parse("t2m.max()")["ask"]      # asking marks nothing
+    got = script.resolve(script.parse("mark(lon=147.4, lat=-2)"), META)
+    assert (got["point"], got["panel"]) == ([147.4, -2.0], "mark")
+
+
+@pytest.mark.parametrize("text, says", [
+    ("mark(t2m)", "mark\\(\\) takes a question or a place"),
+    ("mark(lon=147)", "mark\\(\\) takes a question or a place"),
+    ("mark(lon='a', lat=1)", "mark\\(\\) takes numbers"),
+    ("mark(lon=1, lat=95)", "latitudes run from -90 to 90"),
+    ("mark(t2m.max())\nu.min()", "one question to a script"),
+    ("mark = 3\nshade(t2m)", "mark is a word of the script"),
+])
+def test_a_mark_that_names_nothing_is_refused(text, says):
+    with pytest.raises(script.ScriptError, match=says):
+        script.parse(text)
