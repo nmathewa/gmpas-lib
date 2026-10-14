@@ -156,3 +156,92 @@ def test_a_stop_request_stops_and_starts_nothing(served, gv):
         assert (status, got) == (200, {"state": "stopped", "was_running": False})
     if before is not None:
         assert len(gv._series_jobs.cache._items) == before
+
+
+# ------------------------------------------------------ a field over time
+
+@pytest.fixture(scope="module")
+def monthly(tmp_path_factory):
+    """Three years of monthly fields in two files, north first, with gaps that
+    move from step to step and one cell that never has a value."""
+    from gmpas.generic import GenericViewer
+
+    lat = np.arange(30.0, -30.1, -5.0)
+    lon = np.arange(0.0, 360.0, 10.0)
+    time = pd.date_range("2011-01-01", periods=36, freq="MS")
+    rng = np.random.default_rng(7)
+    sst = (20 + 5 * rng.random((36, lat.size, lon.size))).astype("f4")
+    sst[rng.random(sst.shape) < 0.2] = np.nan
+    sst[:, 4, 9] = np.nan
+    folder = tmp_path_factory.mktemp("monthly")
+    whole = xr.Dataset({"sst": (("time", "lat", "lon"), sst, {"units": "degC"})},
+                       coords={"time": time, "lat": lat, "lon": lon})
+    whole.isel(time=slice(0, 20)).to_netcdf(folder / "sst_a.nc")
+    whole.isel(time=slice(20, 36)).to_netcdf(folder / "sst_b.nc")
+    viewer = GenericViewer(folder, strict=True)
+    yield viewer, whole.sst.astype("f8")
+    viewer.close()
+
+
+WHOLE = (0.0, 350.0, -30.0, 30.0)
+
+
+@pytest.mark.parametrize("expr, pick", [
+    ("sst.sel(month=12).mean('time')",
+     lambda s: s.sel(time=s.time.dt.month == 12).mean("time")),
+    ("sst.sel(season='DJF').mean('time')",
+     lambda s: s.sel(time=s.time.dt.season == "DJF").mean("time")),
+    ("sst.sel(year=2012).max('time')", lambda s: s.sel(time="2012").max("time")),
+    ("sst.sel(time='2012').min('time')", lambda s: s.sel(time="2012").min("time")),
+    ("sst.sel(time=slice('2012-11', '2013-02')).mean('time')",
+     lambda s: s.sel(time=slice("2012-11", "2013-02")).mean("time")),
+    ("sst.isel(time=slice(18, 24)).mean('time')",
+     lambda s: s.isel(time=slice(18, 24)).mean("time")),
+    ("sst.mean('time')", lambda s: s.mean("time")),
+])
+def test_a_reduction_over_time_is_xarrays_on_the_same_numbers(monthly, expr, pick):
+    viewer, sst = monthly
+    got = viewer._cropped(expr, 0, 0, WHOLE)
+    want = pick(sst).transpose("lat", "lon").sel(lat=got.lat, lon=got.lon)
+    assert got.dtype == np.float64 and got.attrs == {"units": "degC"}
+    np.testing.assert_array_equal(got.values, want.values)      # NaN where xarray has NaN
+    assert np.isnan(got.values).any() and np.isfinite(got.values).any()
+
+
+def test_an_anomaly_is_one_field_on_the_map_under_a_click_and_in_a_figure(monthly):
+    viewer, sst = monthly
+    expr = "sst - sst.sel(month=1).mean('time')"
+    want = (sst.isel(time=30) - sst.sel(time=sst.time.dt.month == 1).mean("time")) \
+        .transpose("lat", "lon")
+    crop = viewer._cropped(expr, 30, 0, WHOLE)
+    np.testing.assert_array_equal(crop.values, want.sel(lat=crop.lat, lon=crop.lon).values)
+    assert crop.attrs == {}                                   # a difference has no units
+    clicked = viewer.probe(120.0, 10.0, expr, 30, 0)
+    assert clicked["value"] == float(want.sel(lon=clicked["lon"], lat=clicked["lat"]))
+    found = viewer.extreme(expr, 30, 0, WHOLE, "max")
+    assert found["value"] == float(np.nanmax(want.values))
+    png, lo, hi = viewer.frame(expr, 30, 0, WHOLE, "RdBu_r", None, None)[:3]
+    assert png[:4] == b"\x89PNG" and lo < 0 < hi
+    state = script.resolve(script.parse(
+        'anom = sst.sel(time="2013-07") - sst.sel(month=7).mean("time")\n'
+        'shade(anom)\ncontour(anom, levels=[1])'), viewer.describe())
+    assert state["time"] == 30
+    assert viewer.plot("sst", 30, 0, "layers", WHOLE, 640, 420, layers=state["layers"])
+
+
+def test_a_reduced_field_is_built_once_and_refused_when_it_cannot_be(monthly):
+    viewer, _ = monthly
+    viewer._reduced_fields.clear()
+    for _ in range(3):
+        viewer._cropped("sst.sel(month=6).mean('time')", 0, 0, WHOLE)
+        viewer.probe(120.0, 10.0, "sst - sst.sel(month=6).mean('time')", 5, 0)
+    assert len(viewer._reduced_fields) == 1
+    with pytest.raises(ValueError, match="no time step matches"):
+        viewer._cropped("sst.sel(year=1999).mean('time')", 0, 0, WHOLE)
+    viewer.scanning = True
+    try:
+        with pytest.raises(ValueError, match="still being read"):
+            viewer._cropped("sst.mean('time')", 0, 0, WHOLE)
+    finally:
+        viewer.scanning = False
+    assert viewer.describe()["time_statistics"] is True

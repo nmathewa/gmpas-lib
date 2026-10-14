@@ -490,6 +490,7 @@
     ],
     "level_units": "hPa"
    }
-  ]
+  ],
+  "time_statistics": true
  }
 }

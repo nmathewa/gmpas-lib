@@ -81,7 +81,7 @@ def test_view_frames_the_map():
 @pytest.mark.parametrize("text, says", [
     ("shade(t2m.isel(time=1.5))", "line 1: .isel\\(time=\\) takes a whole number"),
     ("shade(t2m.isel(step=1))", "takes time and level, not step"),
-    ("shade(t2m.mean('time'))", ".mean\\(\\) is not understood"),
+    ("shade(t2m.median('time'))", ".median\\(\\) is not understood"),
     ("shade(t2m.isel(time=1).isel(time=2))", "time is picked twice"),
     ("shade(t2m, colormap='viridis')", "shade\\(\\) has no colormap"),
     ("shade(t2m, cmpa='viridis')", "has no cmpa; did you mean cmap"),
@@ -527,8 +527,10 @@ def test_a_projection_named_beside_a_figure_is_the_figures_own():
 
 
 def test_a_question_takes_no_argument():
-    for text in ('t2m.max("time")', "t2m.min(dim='time')", 'mark(t2m.max("time"))'):
-        with pytest.raises(script.ScriptError, match="over time|takes a question"):
+    for text in ('t2m.max("time")', "t2m.min(dim='time')", 'mark(t2m.max("time"))',
+                 't2m.mean("time")', "t2m.max(3)"):
+        with pytest.raises(script.ScriptError,
+                           match="is a field, not a question|takes a question|in view"):
             script.parse(text)
 
 
@@ -537,3 +539,93 @@ def test_an_overlay_goes_over_a_derived_field_too():
     text, got = script.read("vectors(u, v)", meta, shown="hypot(u, v)")
     assert text.startswith("var = hypot(u, v)") and got["var"] == "u"
     assert got["layers"]["layers"][0]["var"] == "hypot(u, v)"
+
+
+# ------------------------------------------------------ a field over time
+
+MONTHLY = {**META, "time_statistics": True, "steps": 36,
+           "labels": [f"{y}-{m:02d}-01 00:00" for y in (2011, 2012, 2013)
+                      for m in range(1, 13)]}
+
+
+def test_a_field_reduced_over_time_is_a_field():
+    got = script.resolve(script.parse('shade(t2m.sel(season="djf").mean("time"))'),
+                         MONTHLY)
+    assert got == {"var": "t2m.sel(season='DJF').mean('time')", "kind": "map"}
+    for text, var in [
+            ('shade(t2m.sel(month=[6, 7, 8]).max(dim="time"))',
+             "t2m.sel(month=[6, 7, 8]).max('time')"),
+            ('shade(t2m.sel(time=slice("2012-12", "2013-02")).min("time"))',
+             "t2m.sel(time=slice('2012-12', '2013-02')).min('time')"),
+            ('shade(t2m.isel(time=slice(0, 12)).mean("time"))',
+             "t2m.isel(time=slice(0, 12)).mean('time')"),
+            ('clim = t2m.sel(month=12).mean("time")\nshade(t2m - clim)',
+             "t2m - t2m.sel(month=12).mean('time')"),
+            ('x = t2m\nshade(x.mean("time") - 273.15)', "t2m.mean('time') - 273.15")]:
+        assert script.resolve(script.parse(text), MONTHLY)["var"] == var
+    # the step of the plain field is still picked; the mean has none to pick
+    got = script.resolve(script.parse(
+        'shade(t2m.sel(time="2012-12") - t2m.sel(month=12).mean("time"))'), MONTHLY)
+    assert (got["var"], got["time"]) == ("t2m - t2m.sel(month=12).mean('time')", 23)
+    asked = script.resolve(script.parse('t2m.sel(year=2012).mean("time").max()'), MONTHLY)
+    assert asked["ask"] == {"what": "max", "var": "t2m.sel(year=2012).mean('time')"}
+    marked = script.read('mark(var.mean("time").min())', MONTHLY, shown="t2m")[1]
+    assert marked["ask"]["var"] == "t2m.mean('time')" and marked["ask"]["mark"]
+
+
+def test_a_date_given_in_part_is_a_time_when_it_is_one_step():
+    one = script.resolve(script.parse('shade(t2m.sel(time="2012-12"))'), MONTHLY)
+    assert one["time"] == 23
+    assert script.resolve(script.parse("time = 2012-1"), MONTHLY)["time"] == 12
+    assert script.resolve(script.parse('shade(t2m.sel(time="2012-12-01 00:00"))'),
+                          MONTHLY)["time"] == 23
+    with pytest.raises(script.ScriptError, match="'2012' is 12 steps, 2012-01-01 00:00 "
+                                                 "to 2012-12-01 00:00; reduce them"):
+        script.resolve(script.parse('shade(t2m.sel(time="2012"))'), MONTHLY)
+    with pytest.raises(script.ScriptError, match="no step is labelled '2015-01'"):
+        script.resolve(script.parse('shade(t2m.sel(time="2015-01"))'), MONTHLY)
+    # a bare number in the line form is still a step number
+    assert script.resolve(script.parse("time = 20"), MONTHLY)["time"] == 20
+
+
+@pytest.mark.parametrize("text, says", [
+    ('shade(t2m.sel(month=12))', "picks several time steps.*reduce them"),
+    ('shade(t2m.isel(time=slice(0, 3)))', "picks several time steps"),
+    ('shade(t2m.mean())', "reduces over time and says so"),
+    ('shade(t2m.mean("lat"))', "reduces over time and says so"),
+    ('shade((t2m - u).mean("time"))', "a field of the file is reduced over time"),
+    ('a = t2m - 1\nshade(a.mean("time"))', "a is not a field of the file as it stands"),
+    ('shade(t2m.sel(month=13).mean("time"))', "takes 1 to 12"),
+    ('shade(t2m.sel(season="winter").mean("time"))', "DJF, MAM, JJA or SON"),
+    ('shade(t2m.sel(level=3).mean("time"))', "not a way to pick time steps"),
+    ('shade(t2m.mean("time").mean("time"))', "reduced over time once"),
+    ('shade(t2m.sel(time="December").mean("time"))', "takes a date such as"),
+])
+def test_a_reduction_that_does_not_parse_says_why(text, says):
+    with pytest.raises(script.ScriptError, match=says):
+        script.parse(text)
+
+
+@pytest.mark.parametrize("meta, text, says", [
+    (MONTHLY, 'shade(t2m.sel(year=1999).mean("time"))', "no time step matches"),
+    (MONTHLY, 'shade(nope.mean("time"))', "'nope' is not a variable"),
+    ({**MONTHLY, "scanning": True}, 'shade(t2m.mean("time"))', "still being read"),
+    ({**MONTHLY, "time_statistics": False}, 'shade(t2m.mean("time"))',
+     "for lat/lon files so far, not for an MPAS run"),
+    ({**MONTHLY, "labels": [f"step {i}" for i in range(36)]},
+     'shade(t2m.sel(month=1).mean("time"))', "carry no dates.*pick them by number"),
+    ({**MONTHLY, "labels": MONTHLY["labels"][:12] * 3},
+     'shade(t2m.sel(month=1).mean("time"))', "both labelled"),
+])
+def test_a_reduction_the_file_cannot_make_is_refused(meta, text, says):
+    with pytest.raises(script.ScriptError, match=says):
+        script.resolve(script.parse(text), meta)
+
+
+def test_an_expression_has_one_spelling_however_it_was_typed():
+    typed = script.resolve(script.parse('var = t2m.sel(month=12).mean("time")-273.15'),
+                           MONTHLY)
+    drawn = script.resolve(script.parse(
+        "shade(t2m.sel(month=12).mean('time') - 273.15)"), MONTHLY)
+    assert typed["var"] == drawn["var"] == "t2m.sel(month=12).mean('time') - 273.15"
+    assert script.resolve(script.parse("var = hypot( u,v )"), META)["var"] == "hypot(u, v)"

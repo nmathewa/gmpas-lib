@@ -341,6 +341,13 @@ C("era5", "geopotential height in metres", var=re.compile(r"z/9\.8\d*"),
 C("era5", "change of temperature since the previous hour", var="diff(t)",
   view={"time": 2}, core=False, **E)
 C("era5", "temperature at 850 hPa", var="t", level=5, **E)
+C("era5", "mean temperature over all the time steps", var="t.mean('time')", **E)
+C("era5", "temperature anomaly from the time mean",
+  var="t - t.mean('time')", **E)
+C("era5", "maximum wind speed... the largest u over the first two hours",
+  var=("u.isel(time=slice(0, 2)).max('time')",
+       "u.sel(time=slice('2012-02-13 00', '2012-02-13 01')).max('time')"), core=False, **E)
+C("cannot", "average sst over time", refuse=True, core=False)
 C("era5", "wind speed at 500 hPa", var=("hypot(u, v)",), level=10, core=False, **E)
 C("cannot", "t_oml at 850 hPa", refuse="level", core=False)
 

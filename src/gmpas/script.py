@@ -384,12 +384,21 @@ class _Fields:
         """`node` as (the expression the derive box takes, {time, level})."""
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             how = node.func.attr
+            if how in _derive.REDUCTIONS:
+                return self._over_time(node), {}
             if how not in ("isel", "sel"):
-                _fail(node, f".{how}() is not understood; .isel() and .sel() are")
+                _fail(node, f".{how}() is not understood; .isel(), .sel() and, over "
+                            f"time, .mean(\"time\"), .max(\"time\"), .min(\"time\") are")
             text, picked = self.read(node.func.value)
             if node.args:
                 _fail(node, f".{how}() takes names: .{how}(time=0)")
             for kw in node.keywords:
+                if kw.arg in ("month", "season", "year") or (
+                        kw.arg == "time" and isinstance(kw.value, (ast.Call, ast.List,
+                                                                   ast.Tuple))):
+                    _fail(node, f".{how}({kw.arg}=...) picks several time steps, and "
+                                f"a map shows one field: reduce them with "
+                                f".mean(\"time\"), .max(\"time\") or .min(\"time\")")
                 if kw.arg not in ("time", "level"):
                     _fail(node, f".{how}() takes time and level, not {kw.arg}")
                 if kw.arg in picked:
@@ -404,6 +413,30 @@ class _Fields:
             return self.shown, {}
         picked: dict = {}
         return ast.unparse(self._plain(node, picked)), picked
+
+    def _over_time(self, node) -> str:
+        """A field reduced over time -- `sst.sel(month=12).mean("time")` -- in
+        the one spelling `gmpas.derive` gives it. The field is a field of the
+        file, or a name defined as one."""
+        inner = node
+        while isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute):
+            inner = inner.func.value
+        if not isinstance(inner, ast.Name):
+            _fail(node, "a field of the file is reduced over time, not an "
+                        "expression: reduce each field, then combine them")
+        named = self.defs.get(inner.id) or (
+            (self.shown, {}) if inner.id == "var" and self.shown else None)
+        if named is not None:
+            text, picked = named
+            if picked or not text.isidentifier():
+                _fail(node, f"{inner.id} is not a field of the file as it stands; "
+                            f"reduce a field over time, then combine")
+            self.used.add(inner.id)
+            inner.id = text
+        try:
+            return _derive.reduced(ast.unparse(node), [inner.id])[4]
+        except KeyError as exc:
+            _fail(node, exc.args[0])
 
     def _pick(self, how: str, kw):
         value = kw.value
@@ -598,7 +631,7 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
         expr, picked = fields.read(node)
         put("var", node, line, expr, call)
         for key, value in picked.items():
-            if isinstance(value, dict):
+            if isinstance(value, (dict, str)):     # a level's value; a date in quotes
                 put(key, node, line, call=call, ready=value)
             else:
                 put(key, node, line, str(value), call)
@@ -623,12 +656,19 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
         if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
                 and call.func.attr in (*_STATS, "mean", "sum", "std", "median"):
             if call.func.attr not in _STATS:
+                if call.func.attr == "mean" and (call.args or call.keywords):
+                    _fail(call, 'x.mean("time") is a field, not a question: draw '
+                                'it, shade(x.mean("time"))')
                 _fail(call, f".{call.func.attr}() is not in the script yet; "
-                            f".max() and .min() are")
+                            f".max() and .min() are, and over time .mean(\"time\")")
             if call.args or call.keywords:
+                if call.func.attr in _derive.REDUCTIONS:
+                    _fail(call, f"x.{call.func.attr}(\"time\") is a field, not a "
+                                f"question: draw it, shade(x.{call.func.attr}"
+                                f"(\"time\")), or ask where it is largest, "
+                                f"x.{call.func.attr}(\"time\").max()")
                 _fail(call, f".{call.func.attr}() with nothing in the brackets asks "
-                            f"where a field is largest or smallest in view; over "
-                            f"time or another axis is not in the script yet")
+                            f"where a field is largest or smallest in view")
             if "ask" in out:
                 _fail(call, "one question to a script")
             expr, picked = fields.read(call.func.value)
@@ -784,6 +824,54 @@ def _projection(name, offered: list[str]):
     return {p.lower(): p for p in offered}.get(key, name)
 
 
+def _plan(expr: str, variables: dict, meta: dict, what: str) -> None:
+    """Check an expression of fields against the file: its names, and, for a
+    field reduced over time, that this page can reduce one and that its picks
+    select steps of this file. Raises ScriptError."""
+    try:
+        plan = _derive.parse(expr, variables)
+    except KeyError as exc:
+        words = re.findall(r"[A-Za-z_]\w*", expr)
+        hint = next((h for h in (_near(w, variables) for w in words
+                                 if w not in variables and w not in _FUNCS) if h), "")
+        raise ScriptError(f"{what}: {exc.args[0]}{hint}") from None
+    for term in _derive.terms(plan):
+        if not meta.get("time_statistics"):
+            raise ScriptError(f"{what}: {term[4]}: a field reduced over time is "
+                              f"for lat/lon files so far, not for an MPAS run")
+        if meta.get("scanning"):
+            raise ScriptError(f"{what}: this run's time axis is still being read; "
+                              f"ask again in a moment")
+        try:
+            _derive.steps_for(term[3], meta.get("labels") or [])
+        except KeyError as exc:
+            raise ScriptError(f"{what}: {term[4]}: {exc.args[0]}") from None
+
+
+def _step(t, meta: dict) -> int:
+    """A time as a step number: a number as it is, a label by its text, a
+    date by as much of it as is given -- when that is one step."""
+    steps, labels = meta.get("steps", 0), meta.get("labels", [])
+    if isinstance(t, str):
+        if t in labels:
+            return labels.index(t)
+        try:
+            found = _derive.steps_for((("sel", "time", t),), labels) \
+                if _derive._KEY.match(t.strip()) else []
+        except KeyError:
+            found = []
+        if len(found) == 1:
+            return found[0]
+        if found:
+            raise ScriptError(f"time: {t!r} is {len(found)} steps, {labels[found[0]]} "
+                              f"to {labels[found[-1]]}; reduce them with "
+                              f".mean(\"time\") or name one")
+        raise ScriptError(f"time: no step is labelled {t!r}")
+    if not -steps <= t < steps:
+        raise ScriptError(f"time: step {t} is outside this run's {steps} step(s)")
+    return t % steps
+
+
 def _level_index(lev, expr, variables: dict):
     """A level given by its value as its number, where the file lists them."""
     if not isinstance(lev, dict):
@@ -815,29 +903,18 @@ def resolve(state: dict, meta: dict) -> dict:
     if state.get("var") is not None:
         name = _derive.resolve(state["var"], variables)
         if name is None:
-            try:
-                _derive.parse(state["var"], variables)
-            except KeyError as exc:
-                words = re.findall(r"[A-Za-z_]\w*", state["var"])
-                hint = next((h for h in (_near(w, variables) for w in words
-                                         if w not in variables and w not in _FUNCS)
-                             if h), "")
-                raise ScriptError(f"var: {exc.args[0]}{hint}") from None
+            _plan(state["var"], variables, meta, "var")
+            try:        # one spelling, however it was typed: spacing and quotes
+                out["var"] = ast.unparse(ast.parse(state["var"].strip(), mode="eval"))
+            except SyntaxError:
+                pass
         else:
             out["var"] = name
             levels = variables[name].get("levels", 1)
     elif "var" in state:
         raise ScriptError("var cannot be cleared; name a variable")
     if state.get("time") is not None:
-        steps, labels = meta.get("steps", 0), meta.get("labels", [])
-        t = state["time"]
-        if isinstance(t, str):
-            if t not in labels:
-                raise ScriptError(f"time: no step is labelled {t!r}")
-            t = labels.index(t)
-        elif not -steps <= t < steps:
-            raise ScriptError(f"time: step {t} is outside this run's {steps} step(s)")
-        out["time"] = t % steps
+        out["time"] = _step(state["time"], meta)
     if state.get("level") is not None:
         lev = out["level"] = _level_index(state["level"], out.get("var"), variables)
         if lev < 0 or (levels is not None and lev >= levels):
@@ -848,24 +925,11 @@ def resolve(state: dict, meta: dict) -> dict:
         ask = dict(state["ask"])
         name = _derive.resolve(ask["var"], variables)
         if name is None:
-            try:
-                _derive.parse(ask["var"], variables)
-            except KeyError as exc:
-                raise ScriptError(f"{ask['what']}: {exc.args[0]}"
-                                  f"{_near(ask['var'], variables)}") from None
+            _plan(ask["var"], variables, meta, ask["what"])
         else:
             ask["var"] = name
-        steps, labels = meta.get("steps", 0), meta.get("labels", [])
-        t = ask.get("time")
-        if isinstance(t, str):
-            if t not in labels:
-                raise ScriptError(f"time: no step is labelled {t!r}")
-            ask["time"] = labels.index(t)
-        elif t is not None:
-            if not -steps <= t < steps:
-                raise ScriptError(f"time: step {t} is outside this run's "
-                                  f"{steps} step(s)")
-            ask["time"] = t % steps
+        if ask.get("time") is not None:
+            ask["time"] = _step(ask["time"], meta)
         count = variables[name].get("levels", 1) if name in variables else None
         lev = ask.get("level")
         if lev is not None:

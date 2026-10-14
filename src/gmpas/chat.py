@@ -148,7 +148,7 @@ Pick from a field:
   t.sel(level=850)                 a level, by its value, where the file lists them
 Make a field (then draw it with shade):
   spd = hypot(u, v)                also a - b, a * 1000, a / b, diff(a)
-Ask where a field is largest or smallest in view. The page answers with the
+{TIME}Ask where a field is largest or smallest in view. The page answers with the
 value and the place and leaves the picture alone, so write this line only:
   snow.max()                       also .min(); .isel() picks a step or level
   mark(snow.max())                 the same, and the place is marked on the map
@@ -189,6 +189,22 @@ Draw several things as one figure, in order, the first underneath:
 """
 
 
+_OVER_TIME = """\
+A field reduced over time is a field too (draw it, combine it, ask about it):
+  sst.sel(month=12).mean("time")           every December, averaged
+  sst.sel(season="DJF").mean("time")       a season: DJF, MAM, JJA, SON
+  sst.sel(year=2012).max("time")           also .min("time"); month and year
+                                           take a list: month=[6, 7, 8]
+  sst.sel(time="2012").mean("time")        a date, as far as it is given
+  sst.sel(time=slice("2012-12", "2013-02")).mean("time")   both ends included
+  sst.isel(time=slice(0, 12)).mean("time")                 by number
+  sst.mean("time")                         every step
+  An anomaly is a field minus its mean: sst - sst.sel(month=12).mean("time").
+  One step by its date needs no reduction: sst.sel(time="2012-12").
+  Reduce a field of the file, then combine: not (a - b).mean("time").
+"""
+
+
 def system_prompt(meta: dict) -> str:
     """What the model is told: the task, the language, and the open file."""
     def line(v):
@@ -217,6 +233,10 @@ def system_prompt(meta: dict) -> str:
                    "contour(skintemp - 273.15).\n") if meta.get("layer_expressions") \
         else "  A layer draws a field of the file, not an expression.\n"
     projections = [p for p in meta.get("projections") or [] if p != "auto"]
+    over_time = _OVER_TIME if meta.get("time_statistics") else \
+        "  (No average over time on this file: say so if one is asked for.)\n"
+    language = _LANGUAGE.replace("{EXPRESSIONS}", expressions) \
+                        .replace("{TIME}", over_time)
     layers = "" if meta.get("layer_schema") else \
         "This file is drawn one field at a time: no layers, no winds.\n"
     return (
@@ -239,10 +259,10 @@ def system_prompt(meta: dict) -> str:
         "nothing after the equals sign: `vmin =`. A layer is not a setting: to "
         "take one out of a figure, write the figure's other calls again without "
         "it.\n"
-        "- Not possible yet: an average, a sum or another statistic over space "
-        "or time; saving or animating (the page's export buttons do those); a "
-        "cross-section. Say so in one line starting `# `, and do not draw "
-        "something else in its place.\n"
+        "- Not possible yet: an average or a sum over space; a trend; a sum or "
+        "a standard deviation over time; saving or animating (the page's export "
+        "buttons do those); a cross-section. Say so in one line starting `# `, "
+        "and do not draw something else in its place.\n"
         "- Asked why something was not done, or what you can do, answer in one "
         "line starting `# `. Small talk gets one friendly `# ` line that says "
         "what can be asked about the map.\n"
@@ -253,7 +273,7 @@ def system_prompt(meta: dict) -> str:
         "about the map, reply with one line starting `# ` that says why. If only "
         "part can be met, write that part and add a `# ` line saying what was "
         "left out.\n\n"
-        f"{_LANGUAGE.replace('{EXPRESSIONS}', expressions)}\n"
+        f"{language}\n"
         "The view now is given as a script: `key = value` lines for one field, "
         "draw calls for a figure of layers. To change a figure of layers, write "
         "all of its calls again with the change.\n\n"
