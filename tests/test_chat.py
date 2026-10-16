@@ -301,3 +301,90 @@ def test_no_server_is_reported_as_no_answer():
     cfg = {"url": "http://127.0.0.1:9", "model": "m", "timeout": 2.0, "log": "off"}
     with pytest.raises(chat.ChatError, match="no answer from the model server"):
         chat.ask("temperature", META, cfg=cfg)
+
+
+@pytest.fixture
+def api_server():
+    """A server speaking both the OpenAI chat API and Anthropic's Messages API."""
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append((self.path, body, {k.lower(): v for k, v in self.headers.items()}))
+            if body["model"] == "missing":
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'{"error": {"message": "no such model"}}')
+                return
+            if self.path.endswith("/chat/completions"):
+                out = {"choices": [{"message": {"role": "assistant",
+                                                "content": "var = t2m\n"}}]}
+            else:
+                out = {"content": [{"type": "text", "text": "var = t2m\n"}]}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(out).encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", seen
+    srv.shutdown()
+
+
+def test_an_openai_compatible_server_is_asked_at_chat_completions(api_server):
+    url, seen = api_server
+    cfg = {"provider": "openai", "url": url + "/v1", "model": "m", "key": "secret",
+           "timeout": 5.0, "log": "off"}
+    assert chat.ask("temperature", META, cfg=cfg)["state"]["var"] == "t2m"
+    path, body, headers = seen[0]
+    assert path == "/v1/chat/completions" and headers["authorization"] == "Bearer secret"
+    assert body["temperature"] == 0 and body["stream"] is False
+    assert body["messages"][0]["role"] == "system" and "tools" not in body
+
+
+def test_anthropic_gets_the_system_prompt_beside_the_turns(api_server, monkeypatch):
+    url, seen = api_server
+    monkeypatch.setenv("GMPAS_CHAT_KEY", "from-env")
+    cfg = {"provider": "anthropic", "url": url, "model": "m", "timeout": 5.0, "log": "off"}
+    assert chat.ask("temperature", META, cfg=cfg)["state"]["var"] == "t2m"
+    path, body, headers = seen[0]
+    assert path == "/v1/messages" and headers["x-api-key"] == "from-env"
+    assert headers["anthropic-version"] and body["max_tokens"] > 0
+    assert "t2m: 2 m temperature" in body["system"] and "tools" not in body
+    assert [m["role"] for m in body["messages"]] == ["user"]
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_an_api_error_is_reported_with_what_it_said(api_server, provider):
+    url, _ = api_server
+    cfg = {"provider": provider, "url": url, "model": "missing", "timeout": 5.0,
+           "log": "off"}
+    with pytest.raises(chat.ChatError, match="404: no such model"):
+        chat.ask("temperature", META, cfg=cfg)
+
+
+def test_the_provider_is_named_in_the_file(tmp_path):
+    path = tmp_path / "chat.conf"
+    path.write_text("provider = Anthropic\nmodel = claude-haiku-5-5\n")
+    assert chat.load_config(path) == {"provider": "anthropic", "model": "claude-haiku-5-5",
+                                      "url": "https://api.anthropic.com", "timeout": 120.0}
+    path.write_text("provider = openai\nmodel = m\n")
+    with pytest.raises(chat.ChatError, match="url is not set"):
+        chat.load_config(path)
+    path.write_text("provider = gemini\nurl = http://x\nmodel = m\n")
+    with pytest.raises(chat.ChatError, match="provider is one of"):
+        chat.load_config(path)
+
+
+def test_think_off_asks_ollama_not_to_reason_and_caps_the_reply(model_server):
+    url, seen = model_server
+    cfg = {"url": url, "model": "m", "timeout": 5.0, "log": "off", "think": "off"}
+    assert chat.ask("temperature", META, cfg=cfg)["state"]["var"] == "t2m"
+    body = seen[0][1]
+    assert body["think"] is False
+    assert body["options"]["num_predict"] == chat.MAX_REPLY_TOKENS

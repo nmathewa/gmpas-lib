@@ -9,10 +9,12 @@ becomes
     proj   = Mercator
     region = 90, 150, -15, 15
 
-The model is one the user runs: an Ollama server, named in a small file (see
-`config_path`). gmpas ships no model and calls no hosted service. Chat is an
-optional install -- `pip install "gmpas[chat]"` brings the Ollama client --
-and without it the page is as it always was.
+The model is the one named in a small file (see `config_path`): an Ollama
+server by default, or any server that speaks the OpenAI chat API (vLLM,
+llama.cpp, LM Studio, a hosted one), or Anthropic's API. gmpas ships no model
+and talks to no server but that one. Chat is an optional install --
+`pip install "gmpas[chat]"` brings the Ollama client -- and without it the
+page is as it always was.
 
 The model is told what the open file holds and which keys a script may set,
 and is asked for script lines and nothing else. Its reply is text, and it is
@@ -25,7 +27,12 @@ The configuration is `key = value` lines, as a script is:
     url   = http://127.0.0.1:11434
     model = qwen2.5-coder:7b
 
-`key` (sent as a bearer token), `timeout` (seconds) and `log` are optional.
+`provider` is `ollama` (the default), `openai` -- `url` is then the API's base,
+such as http://127.0.0.1:8000/v1 -- or `anthropic`, whose `url` may be left
+out. `key` (sent as the server expects it), `timeout` (seconds) and `log` are
+optional; with no `key`, `$GMPAS_CHAT_KEY` is used. `think = off` asks an
+Ollama model not to reason before it answers, and caps the reply's length: a
+small model can otherwise reason for thousands of tokens over a two-line script.
 
 Every request is written down, with each reply the model gave and what became
 of it, as one JSON line in `log_path()` -- on this machine only. That file is
@@ -47,7 +54,12 @@ from . import script as _script
 #: The longest request taken, in characters.
 MAX_TEXT = 500
 DEFAULT_TIMEOUT = 120.0
-_KEYS = ("url", "model", "key", "timeout", "log")
+_KEYS = ("provider", "url", "model", "key", "timeout", "log", "think")
+PROVIDERS = ("ollama", "openai", "anthropic")
+_ANTHROPIC_URL = "https://api.anthropic.com"
+_ANTHROPIC_VERSION = "2023-06-01"
+#: The longest reply asked of a server that needs a limit (Anthropic's).
+MAX_REPLY_TOKENS = 2048
 
 
 _CALLS = re.compile(r"[A-Za-z_(][\w.() +*/-]*\(")
@@ -127,6 +139,13 @@ def load_config(path=None) -> dict | None:
             raise ChatError(f"{path}, line {n}: expected one of "
                             f"{', '.join(_KEYS)} = value")
         out[name] = value
+    provider = out.get("provider", "ollama").lower()
+    if provider not in PROVIDERS:
+        raise ChatError(f"{path}: provider is one of {', '.join(PROVIDERS)}")
+    if "provider" in out:
+        out["provider"] = provider
+    if provider == "anthropic" and not out.get("url"):
+        out["url"] = _ANTHROPIC_URL
     for name in ("url", "model"):
         if not out.get(name):
             raise ChatError(f"{path}: {name} is not set")
@@ -288,17 +307,35 @@ def system_prompt(meta: dict) -> str:
         f"Palettes: {', '.join(meta.get('cmaps') or [])}.\n")
 
 
+def _key(cfg: dict) -> str:
+    return cfg.get("key") or os.environ.get("GMPAS_CHAT_KEY") or ""
+
+
 def _post(cfg: dict, messages: list[dict]) -> str:
     """One round with the model: the reply's text."""
+    provider = cfg.get("provider", "ollama")
+    if provider == "openai":
+        return _post_openai(cfg, messages)
+    if provider == "anthropic":
+        return _post_anthropic(cfg, messages)
     try:
         import ollama
     except ImportError:
         raise ChatError('chat is not installed: pip install "gmpas[chat]"') from None
-    headers = {"Authorization": f"Bearer {cfg['key']}"} if cfg.get("key") else {}
+    key = _key(cfg)
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
         client = ollama.Client(host=cfg["url"], headers=headers, timeout=cfg["timeout"])
+        options = {"temperature": 0}
+        extra = {}
+        think = cfg.get("think", "").lower()
+        if think in ("off", "no", "false", "0"):
+            extra["think"] = False
+            options["num_predict"] = MAX_REPLY_TOKENS
+        elif think:
+            extra["think"] = True if think in ("on", "yes", "true", "1") else think
         got = client.chat(model=cfg["model"], messages=messages, stream=False,
-                          options={"temperature": 0})
+                          options=options, **extra)
         return got["message"]["content"] or ""
     except ollama.ResponseError as exc:
         raise ChatError(f"the model server answered {exc.status_code}: "
@@ -309,6 +346,60 @@ def _post(cfg: dict, messages: list[dict]) -> str:
     except Exception as exc:                 # no route, refused, timed out
         raise ChatError(f"no answer from the model server at {cfg['url']}: "
                         f"{exc}", "server") from None
+
+
+def _post_json(cfg: dict, url: str, headers: dict, body: dict) -> dict:
+    """POST `body` as JSON and read the JSON answer; any failure is a ChatError."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as got:
+            return json.loads(got.read())
+    except urllib.error.HTTPError as exc:
+        said = exc.read().decode("utf-8", "replace")[:300]
+        try:
+            err = json.loads(said).get("error", said)
+            said = err.get("message", said) if isinstance(err, dict) else str(err)
+        except (ValueError, AttributeError):
+            pass
+        raise ChatError(f"the model server answered {exc.code}: {said}", "server") from None
+    except ValueError:
+        raise ChatError("the model server's answer was not JSON", "server") from None
+    except Exception as exc:                 # no route, refused, timed out
+        raise ChatError(f"no answer from the model server at {cfg['url']}: "
+                        f"{exc}", "server") from None
+
+
+def _post_openai(cfg: dict, messages: list[dict]) -> str:
+    """The OpenAI chat API, which most servers speak: vLLM, llama.cpp, LM Studio."""
+    key = _key(cfg)
+    got = _post_json(cfg, cfg["url"] + "/chat/completions",
+                     {"Authorization": f"Bearer {key}"} if key else {},
+                     {"model": cfg["model"], "messages": messages, "temperature": 0,
+                      "stream": False})
+    try:
+        return got["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        raise ChatError("the model server's answer had no message in it",
+                        "server") from None
+
+
+def _post_anthropic(cfg: dict, messages: list[dict]) -> str:
+    """Anthropic's Messages API: the system prompt goes beside the turns."""
+    system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+    turns = [m for m in messages if m["role"] != "system"]
+    got = _post_json(cfg, cfg["url"] + "/v1/messages",
+                     {"x-api-key": _key(cfg), "anthropic-version": _ANTHROPIC_VERSION},
+                     {"model": cfg["model"], "system": system, "messages": turns,
+                      "max_tokens": MAX_REPLY_TOKENS, "temperature": 0})
+    try:
+        return "".join(b.get("text", "") for b in got["content"] if b.get("type") == "text")
+    except (KeyError, TypeError, AttributeError):
+        raise ChatError("the model server's answer had no message in it",
+                        "server") from None
 
 
 def script_of(reply: str) -> str:
@@ -364,6 +455,7 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
                      {"role": "assistant", "content": turn["reply"][:2000]}]
     messages.append({"role": "user", "content": asked})
     record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "model": cfg["model"],
+              "provider": cfg.get("provider", "ollama"),
               "file": meta.get("file"), "request": text, "view": current.strip(),
               "system": messages[0]["content"],
               "history": said[-MAX_HISTORY:], "rounds": []}
