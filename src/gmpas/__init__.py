@@ -24,7 +24,7 @@ from __future__ import annotations
 from .accessor import MpasAccessor, open_mpas
 from .data import field_label, open_data, plottable, select, spatial_dim
 from .mesh import MpasMesh, has_mesh, reconstruct_cell_winds
-from .paths import cache_dir, data_dir, resolve_path
+from .paths import cache_dir, resolve_path
 from .plot import cell_field, edge_field, mesh_structure, vectors
 from .raster import RASTER_THRESHOLD, rasterize, should_raster, target_grid
 from .style import CMAPS, EXTENTS, Style, resolve_extent, save_figure
@@ -45,6 +45,6 @@ __all__ = [
     "select", "spatial_dim", "field_label", "plottable", "has_mesh",
     # configuration
     "Style", "EXTENTS", "CMAPS", "resolve_extent",
-    "cache_dir", "data_dir", "resolve_path",
+    "cache_dir", "resolve_path",
     "__version__",
 ]

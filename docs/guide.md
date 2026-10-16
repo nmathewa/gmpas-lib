@@ -604,7 +604,6 @@ More in [notebook.md](notebook.md).
 | Variable | What it does |
 |---|---|
 | `GMPAS_CACHE_DIR` | where mesh geometry is cached (default `~/.cache/gmpas/mesh`) |
-| `GMPAS_DATA_DIR` | tried first when resolving relative paths |
 | `GMPAS_VALUES_CACHE_MB` | memory budget for cached field reads (default 512 MB) |
 | `JIGSAWDIR`, `MKGRIDFILE` | the mesh-generation programs |
 

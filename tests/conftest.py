@@ -28,7 +28,6 @@ EDGE_ANGLES = np.arange(6) * np.pi / 6.0
 def isolated_cache(tmp_path, monkeypatch):
     """Never touch the user's real ~/.cache/gmpas during tests."""
     monkeypatch.setenv("GMPAS_CACHE_DIR", str(tmp_path / "cache"))
-    monkeypatch.delenv("GMPAS_DATA_DIR", raising=False)
 
 
 def _ring(lon_deg: float, lat_deg: float, radius_deg: float, n: int = 6):

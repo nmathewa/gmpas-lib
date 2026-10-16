@@ -67,7 +67,6 @@ Environment variables that matter on a shared machine:
   `~/.cache/gmpas/mesh`; point it at scratch if your home quota is small.
   The cache is memory-mapped, so several processes reading the same mesh share
   one copy through the page cache.
-- `GMPAS_DATA_DIR` — tried first when resolving relative paths.
 - `GMPAS_VALUES_CACHE_MB` (default 512) and `GMPAS_VIEW_CACHE_MB` (default 256)
   — memory budgets, in megabytes. Lower them on a login node with a small
   cgroup limit; see [configuration.md](configuration.md).

@@ -65,15 +65,7 @@ def test_absolute_paths_pass_through(tmp_path):
     assert resolve_path(tmp_path / "x.nc") == tmp_path / "x.nc"
 
 
-def test_relative_paths_try_the_data_dir_first(monkeypatch, tmp_path):
-    monkeypatch.setenv("GMPAS_DATA_DIR", str(tmp_path))
-    (tmp_path / "diag.nc").touch()
-
-    assert resolve_path("diag.nc") == tmp_path / "diag.nc"
-
-
-def test_relative_paths_fall_back_to_the_working_directory(monkeypatch, tmp_path):
-    monkeypatch.setenv("GMPAS_DATA_DIR", str(tmp_path / "empty"))
+def test_relative_paths_resolve_against_the_working_directory(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
     assert resolve_path("absent.nc") == tmp_path / "absent.nc"
