@@ -7,6 +7,8 @@ and a missing value is left out of its own cell's result.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -83,7 +85,10 @@ def test_steps_with_no_dates_are_still_picked_by_number():
 def test_a_cell_missing_in_a_step_is_left_out_of_its_own_result():
     a = np.array([[1.0, np.nan, 5.0], [np.nan, np.nan, 2.0]])
     b = np.array([[3.0, 4.0, np.nan], [np.nan, np.nan, 8.0]])
-    with np.errstate(all="ignore"):
+    # nanmean/nanmax/nanmin warn on a cell missing in every step; that warning
+    # is about the reference here, not about accumulate
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
         stack = np.stack([a, b])
         np.testing.assert_array_equal(derive.accumulate("mean", [a, b]),
                                       np.nanmean(stack, axis=0))
