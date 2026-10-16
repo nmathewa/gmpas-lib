@@ -155,6 +155,7 @@ value and the place and leaves the picture alone, so write this line only:
   mark(lon=147.4, lat=-2.0)        marks a place and shows the value there
 Frame the map:
   view(region=(west, east, south, north))
+  view()                           the whole area again
   view(proj="Mercator")            a projection; shade() only
   view(proj="Orthographic", lon0=120, lat0=10)
   view(proj="lonlat")              back to the plain map
@@ -263,6 +264,8 @@ def system_prompt(meta: dict) -> str:
         "a standard deviation over time; saving or animating (the page's export "
         "buttons do those); a cross-section. Say so in one line starting `# `, "
         "and do not draw something else in its place.\n"
+        "- A request that leaves a choice open -- any projection, another "
+        "palette -- is met by picking one, not by asking which.\n"
         "- Asked why something was not done, or what you can do, answer in one "
         "line starting `# `. Small talk gets one friendly `# ` line that says "
         "what can be asked about the map.\n"

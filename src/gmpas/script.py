@@ -576,10 +576,15 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
     return {"figure": figure, "layers": layers}, extra
 
 
+_EMPTY_VIEW = re.compile(r"(\bview\([^()]*?\b(?:region|box)\s*=)\s*(?=[,)])")
+
+
 def _parse_python(text: str, shown: str | None = None) -> dict:
     """The Python form: definitions, settings, view() and what draws."""
     # the script has no blocks, so how far a line is indented means nothing
     text, plain = _split(text)
+    # view(region=) -- a setting left empty, as a plain line clears one
+    text = _EMPTY_VIEW.sub(r"\1None", text)
     try:
         tree = ast.parse(text)
     except SyntaxError as exc:
@@ -702,6 +707,8 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
         if verb == "view":
             if call.args:
                 _fail(call, "view() takes names: view(region=(90, 150, -15, 15))")
+            if not call.keywords:                   # view(): the whole area
+                put("region", ast.Constant(None), line)
             for kw in call.keywords:
                 if kw.arg not in _VIEW_KEYS:
                     _fail(call, f"view() has no {kw.arg}{_near(kw.arg or '', _VIEW_KEYS)}; "
@@ -939,6 +946,8 @@ def resolve(state: dict, meta: dict) -> dict:
         out["ask"] = ask
     proj = _projection(state.get("proj"), meta.get("projections") or [])
     kind = state.get("kind")
+    if kind == "shade":                      # what shade() draws: the map
+        kind = out["kind"] = "map"
     if kind is not None:
         named = out.get("var")
         offered = variables[named].get("kinds") if named in variables else None

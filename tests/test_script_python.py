@@ -629,3 +629,15 @@ def test_an_expression_has_one_spelling_however_it_was_typed():
         "shade(t2m.sel(month=12).mean('time') - 273.15)"), MONTHLY)
     assert typed["var"] == drawn["var"] == "t2m.sel(month=12).mean('time') - 273.15"
     assert script.resolve(script.parse("var = hypot( u,v )"), META)["var"] == "hypot(u, v)"
+
+
+def test_kind_shade_is_the_map():
+    got = script.resolve(script.parse('var = t2m.mean("time")\nkind = shade'), MONTHLY)
+    assert got == {"var": "t2m.mean('time')", "kind": "map"}
+
+
+@pytest.mark.parametrize("text", ["view()", "view(region=)", "view(region=None)"])
+def test_view_back_to_the_whole_area(text):
+    assert script.parse(text) == {"region": None}
+    assert script.parse('view(region=, proj="Mercator")') == \
+        {"region": None, "proj": "Mercator"}
