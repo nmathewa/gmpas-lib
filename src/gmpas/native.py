@@ -448,6 +448,10 @@ def draw_section(ax, da, cmap=None, vmin=None, vmax=None):
         Y = np.repeat(bounds[:, None], 2 * nc, axis=1)
     else:
         Y = np.repeat(bounds, 2, axis=1)
+        # a column off the mesh has no heights; its values are masked, and
+        # pcolormesh still wants a finite corner to hang the nothing on
+        if not np.isfinite(Y).all():
+            Y = np.where(np.isfinite(Y), Y, np.nanmin(Y) if np.isfinite(Y).any() else 0.0)
     Xg = np.repeat(X[None, :], nl + 1, axis=0)
     C = np.full((nl, 2 * nc - 1), np.nan)
     C[:, 0::2] = v

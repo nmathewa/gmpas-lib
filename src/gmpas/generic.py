@@ -1128,7 +1128,7 @@ class GenericViewer:
         lon, lat, on = _projection.projected_lonlat(
             _projection.make_crs(*proj), extent, nx, ny)
         lon, lat = np.where(on, lon, 0.0), np.where(on, lat, 0.0)
-        cols, col_in = _nearest_along(self.lon, lon, self.cyclic)
+        cols, col_in = _nearest_along(self.lon, self._lon_as_filed(lon), self.cyclic)
         rows, row_in = _nearest_along(self.lat, lat, False)
         got = (rows, cols, (on & row_in & col_in).reshape(ny, nx))
         self._proj_index[key] = got
@@ -1262,9 +1262,21 @@ class GenericViewer:
         lon, lat, on = _projection.unproject(_projection.make_crs(*proj), [x], [y], tol)
         return {"lon": float(lon[0]), "lat": float(lat[0]), "on": bool(on[0])}
 
+    def _lon_as_filed(self, lon):
+        """Longitudes moved by whole turns into the grid's own range: a region
+        filed as 200..250 is asked about as -160..-110 by a projection, and by
+        anyone who writes longitudes the other way round. A grid around the
+        whole circle wraps in `_nearest_along` already."""
+        lon = np.asarray(lon, dtype=np.float64)
+        if self.cyclic:
+            return lon
+        mid = 0.5 * (float(self.lon[0]) + float(self.lon[-1]))
+        return mid + np.mod(lon - mid + 180.0, 360.0) - 180.0
+
     def _point(self, lon: float, lat: float) -> tuple[int, int]:
         """Ascending (row, col) of the cell nearest a point, or an error off-grid."""
-        cols, col_in = _nearest_along(self.lon, np.array([float(lon)]), self.cyclic)
+        cols, col_in = _nearest_along(self.lon, self._lon_as_filed([float(lon)]),
+                                      self.cyclic)
         rows, row_in = _nearest_along(self.lat, np.array([float(lat)]), False)
         if not (row_in[0] and col_in[0]):
             raise ValueError(f"({lat:g}, {lon:g}) is outside the grid")

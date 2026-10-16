@@ -528,7 +528,8 @@ def _hold_chunks(var, block: int) -> None:
     are the same bytes.
     """
     chunking = var.chunking()
-    if chunking == "contiguous" or not var.shape:
+    # None: a classic-format file (netCDF3, CDF5) has no chunks to cache
+    if chunking is None or chunking == "contiguous" or not var.shape:
         return
     lead = chunking[0]
     across = 1
