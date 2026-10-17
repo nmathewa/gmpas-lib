@@ -95,3 +95,28 @@ def test_the_input_is_the_layout_it_was_taught():
         "places: peru = -81.4, -68.7, -18.4, 0\n"
         "before: show t => var = t ; level = 1\n"
         "ask: now in red")
+
+
+@pytest.mark.parametrize("text, names", [
+    ("rain over india.", ["india"]), ("India!", ["india"]), ("(india)", ["india"]),
+    ("temperature over Papua New Guinea.", ["papua new guinea"]),
+    ("st. kitts and nevis", ["st. kitts and nevis"]),
+    ("over guinea-bissau", ["guinea-bissau"])])
+def test_punctuation_ends_a_place_name(text, names):
+    assert [name for name, _ in chatmodel.find_places(text)] == names
+
+
+def test_without_onnxruntime_nothing_is_downloaded(release, tmp_path, monkeypatch):
+    # conftest already says onnxruntime is missing
+    with pytest.raises(chatmodel.ModelError, match="onnxruntime"):
+        chatmodel.generate("ask: anything")
+    assert not (tmp_path / "model").exists()
+
+
+def test_two_fetches_at_once_both_end_with_the_model(release, tmp_path):
+    import concurrent.futures as cf
+
+    with cf.ThreadPoolExecutor(4) as pool:
+        got = list(pool.map(lambda _: chatmodel.fetch(), range(4)))
+    assert set(got) == {tmp_path / "model"} and chatmodel.ready()
+    assert not list((tmp_path / "model").glob("*.part"))

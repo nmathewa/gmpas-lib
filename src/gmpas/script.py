@@ -396,6 +396,8 @@ class _Fields:
         self.used: set[str] = set()
         #: the field on screen: what `var` means where no `var = ...` line says
         self.shown = shown
+        #: what the fields of the expression being read are: "bare", "picked"
+        self._mix: set = set()
 
     def read(self, node) -> tuple[str, dict]:
         """`node` as (the expression the derive box takes, {time, level})."""
@@ -429,7 +431,19 @@ class _Fields:
         if isinstance(node, ast.Name) and node.id == "var" and self.shown:
             return self.shown, {}
         picked: dict = {}
-        return ast.unparse(self._plain(node, picked)), picked
+        # `t - t.sel(level=850)` would be t at level 850 on both sides, zero:
+        # a field picked inside an expression must not meet one that is not
+        saved = getattr(self, "_mix", None)
+        self._mix = set()
+        try:
+            text = ast.unparse(self._plain(node, picked))
+            if self._mix == {"bare", "picked"}:
+                _fail(node, "a field picked with .sel() or .isel() inside an "
+                            "expression is mixed with one that is not; pick "
+                            "the whole expression: (a - b).sel(level=850)")
+        finally:
+            self._mix = saved
+        return text, picked
 
     def _over_time(self, node) -> str:
         """A field reduced over time -- `sst.sel(month=12).mean("time")` -- in
@@ -480,6 +494,7 @@ class _Fields:
         field: the picks belong to the whole expression, so they must agree.
         """
         def gather(inner, found: dict):
+            self._mix.add("picked" if found else "bare")
             for key, value in found.items():
                 if picked.setdefault(key, value) != value:
                     _fail(node, f"the fields of one expression are picked at one "
@@ -492,6 +507,7 @@ class _Fields:
                 return gather(*self.defs[node.id])
             if node.id == "var" and self.shown:
                 return gather(self.shown, {})
+            self._mix.add("bare")
             return node
         if _number_of(node) is not None:
             return node
@@ -509,7 +525,12 @@ class _Fields:
             node.args = [self._plain(a, picked) for a in node.args]
             return node
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            return gather(*self.read(node))
+            text, found = self.read(node)
+            if not found and node.func.attr in ("mean", "max", "min"):
+                # a field reduced over time has no step to pick, and its
+                # level is the expression's: it is neither picked nor bare
+                return ast.parse(text, mode="eval").body
+            return gather(text, found)
         _fail(node, "not understood; a field, a number, + - * /, hypot(a, b) "
                     "or diff(a)")
 
@@ -908,10 +929,13 @@ def _level_index(lev, expr, variables: dict, shown: str | None = None):
         raise ScriptError(f"level: {expr or 'this field'} lists no level values in "
                           f"this file; pick by number: .isel(level=0)")
     values, want = variables[owner]["level_values"], lev["value"]
+    if not math.isfinite(want):
+        raise ScriptError(f"level: {want} is not a level")
     units = (variables[owner].get("level_units") or "").strip()
-    if lev.get("units") and units and units.lower() not in _PRESSURE_UNITS:
+    if lev.get("units") and units.lower() not in _PRESSURE_UNITS:
         raise ScriptError(f"level: {want:g} {lev['units']} was asked for, but "
-                          f"{owner}'s levels are in {units}")
+                          f"{owner}'s levels are " +
+                          (f"in {units}" if units else "given with no units"))
     for i, value in enumerate(values):
         if abs(value - want) <= 1e-6 * max(1.0, abs(want)):
             return i

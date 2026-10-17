@@ -434,7 +434,10 @@ def test_a_pick_on_a_var_line_is_refused_where_the_call_form_is(text, says):
 def test_a_level_may_be_said_as_a_pressure():
     assert script.parse("level = 500 hPa") == {"level": {"value": 500.0, "units": "hPa"}}
     assert _read("var = t\nlevel = 850 hPa")["level"] == 1
-    assert _read("var = u\nlevel = 500 mb")["level"] == 2
+    assert _read("var = t\nlevel = 500 mb")["level"] == 2
+    # u's levels have no units: 500 there may be anything but hPa
+    with pytest.raises(script.ScriptError, match="no units"):
+        _read("var = u\nlevel = 500 mb")
     # with no field named, it is a level of the field on screen
     assert _read("level = 850 hPa", shown="t")["level"] == 1
     # a level the file does not list is not matched to a nearby one
@@ -696,3 +699,35 @@ def test_view_back_to_the_whole_area(text):
     assert script.parse(text) == {"region": None}
     assert script.parse('view(region=, proj="Mercator")') == \
         {"region": None, "proj": "Mercator"}
+
+
+ERA = {"steps": 2, "labels": ["a", "b"], "projections": ["lonlat"], "cmaps": ["viridis"],
+       "home": [0, 10, 0, 10], "variables": [
+           {"name": "t", "label": "T", "levels": 3, "level_values": [1000.0, 850.0, 500.0],
+            "level_units": "hPa", "spatial": True, "kinds": ["shade"]},
+           {"name": "u", "label": "U", "levels": 3, "level_values": [1.0, 5.0, 500.0],
+            "level_units": "", "spatial": True, "kinds": ["shade"]}]}
+
+
+@pytest.mark.parametrize("text", ["var = t - t.sel(level=850)",
+                                  "var = t.isel(time=0) - t",
+                                  "a = t.sel(level=850)\nvar = t - a"])
+def test_a_picked_field_does_not_meet_an_unpicked_one(text):
+    with pytest.raises(script.ScriptError, match="mixed"):
+        script.read(text, ERA)
+
+
+def test_a_pick_of_the_whole_expression_is_kept():
+    assert script.read("var = (t - 273.15).isel(time=1)", ERA)[1] == \
+        {"var": "t - 273.15", "time": 1}
+
+
+def test_a_level_in_hpa_needs_levels_in_pressure():
+    with pytest.raises(script.ScriptError, match="no units"):
+        script.read("var = u\nlevel = 500 hPa", ERA)
+    assert script.read("var = t\nlevel = 500 hPa", ERA)[1]["level"] == 2
+
+
+def test_an_infinite_level_is_not_a_level():
+    with pytest.raises(script.ScriptError, match="not a level"):
+        script.read("var = t.sel(level=1e999)", ERA)

@@ -112,7 +112,9 @@ def installed() -> bool:
         cfg = load_config()
     except ChatError:
         return True                  # shown, so that what is wrong is said
-    return cfg is not None and cfg.get("provider") != "builtin"
+    # a file naming the built-in model shows the panel too, to say it is not
+    # installed; with no file and no extra, the page is as it always was
+    return cfg is not None
 
 
 def builtin_config() -> dict:
@@ -416,8 +418,13 @@ def _post_json(cfg: dict, url: str, headers: dict, body: dict) -> dict:
     except ValueError:
         raise ChatError("the model server's answer was not JSON", "server") from None
     except Exception as exc:                 # no route, refused, timed out
-        raise ChatError(f"no answer from the model server at {cfg['url']}: "
-                        f"{exc}", "server") from None
+        raise ChatError(f"no answer from the model server at {_shown_url(cfg['url'])}: "
+                        f"{_shown_url(str(exc))}", "server") from None
+
+
+def _shown_url(text: str) -> str:
+    """`text` with any user:password@ taken out of the addresses in it."""
+    return re.sub(r"(\w+://)[^/@\s]*@", r"\1", text)
 
 
 def _post_openai(cfg: dict, messages: list[dict]) -> str:
@@ -786,7 +793,8 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
     asked = text if not current.strip() else \
         f"The view now:\n{current.strip()}\n\nRequest: {text}"
     messages = [{"role": "system", "content": system_prompt(meta)}]
-    said = [h for h in (history or []) if isinstance(h, dict)
+    said = [h for h in (history if isinstance(history, list) else [])
+            if isinstance(h, dict)
             and isinstance(h.get("request"), str) and isinstance(h.get("reply"), str)]
     for turn in said[-MAX_HISTORY:]:
         messages += [{"role": "user", "content": turn["request"][:MAX_TEXT]},
@@ -803,20 +811,30 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
             # it reads one block in the layout it was taught, not the prompt;
             # it would give a refused script again, so it has one round
             before = (said[-1]["request"], said[-1]["reply"].strip()) if said else None
-            src = _builtin.encode(meta, current, text, _builtin.find_places(text), before)
+            try:
+                src = _builtin.prompt(meta, current, text, before)
+            except _builtin.ModelError as exc:
+                raise ChatError(str(exc), "server") from None
             record["system"], record["input"] = "", src
             return _rounds(cfg, [{"role": "user", "content": src}], meta, post,
                            record, shown, tries=1)
         if cfg.get("agent") and post is _post:
             record["agent"] = True
-            reply = _agent(cfg, messages, meta, record, shown)
+            try:
+                reply = _agent(cfg, messages, meta, record, shown)
+            except ChatError as exc:
+                # a model that takes no tools is asked the one-shot way
+                if exc.kind != "server" or "tool" not in str(exc).lower():
+                    raise
+                record["no_tools"], reply = str(exc), None
             if reply is not None:
                 # the run's last word is the first reply; a retry is one-shot
                 first = [reply]
                 return _rounds(cfg, messages, meta,
                                lambda c, m: first.pop(0) if first else _post(c, m),
                                record, shown)
-            record["exhausted"] = True       # out of steps: ask the one-shot way
+            if "no_tools" not in record:
+                record["exhausted"] = True   # out of steps: ask the one-shot way
         return _rounds(cfg, messages, meta, post, record, shown)
     except ChatError as exc:
         record["error"], record["outcome"] = str(exc), exc.kind

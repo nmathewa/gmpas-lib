@@ -30,6 +30,7 @@ import importlib.util
 import json
 import os
 import re
+import tempfile
 import threading
 from functools import lru_cache
 from pathlib import Path
@@ -96,12 +97,18 @@ def fetch(say=None) -> Path:
                 continue
             if say:
                 say(f"{base}/{asset} -> {path}")
-            where.mkdir(parents=True, exist_ok=True)
-            part = path.with_name(path.name + ".part")
+            try:
+                where.mkdir(parents=True, exist_ok=True)
+                # a name of this process's own: another one may be fetching too
+                fd, named = tempfile.mkstemp(prefix=name + ".", suffix=".part",
+                                             dir=where)
+            except OSError as exc:
+                raise ModelError(f"{NAME} cannot be kept in {where}: {exc}") from None
+            part = Path(named)
             sha = hashlib.sha256()
             try:
                 with urllib.request.urlopen(f"{base}/{asset}", timeout=60) as got, \
-                        part.open("wb") as out:
+                        os.fdopen(fd, "wb") as out:
                     while chunk := got.read(1 << 20):
                         sha.update(chunk)
                         out.write(chunk)
@@ -115,7 +122,11 @@ def fetch(say=None) -> Path:
                 part.unlink(missing_ok=True)
                 raise ModelError(f"{asset} from {base} is not the published file "
                                  f"(its sha256 differs); nothing was kept")
-            part.replace(path)
+            try:
+                part.replace(path)
+            except OSError as exc:
+                part.unlink(missing_ok=True)
+                raise ModelError(f"{NAME} cannot be kept in {where}: {exc}") from None
     return where
 
 
@@ -125,12 +136,22 @@ def places() -> dict:
     return json.loads((Path(__file__).with_name("places.json")).read_text())
 
 
+def _words(text: str) -> str:
+    """Lower case, each run of punctuation and spaces one space, padded: so
+    "over borneo." and "(india)" name places, and "St. Kitts" is "st kitts"."""
+    return " " + " ".join(re.findall(r"[\w-]+", text.lower())) + " "
+
+
+@lru_cache(maxsize=1)
+def _by_words() -> dict:
+    return {_words(k): k for k in places()}
+
+
 def find_places(text: str) -> list:
     """The places named in `text`, longest name first, at most two."""
-    t = " " + text.lower() + " "
+    t = _words(text)
     known = places()
-    hits = sorted((k for k in known if f" {k} " in t or f" {k}?" in t or f" {k}," in t),
-                  key=len, reverse=True)
+    hits = sorted((k for w, k in _by_words().items() if w in t), key=len, reverse=True)
     out, used = [], ""
     for k in hits:
         if k not in used:
@@ -170,19 +191,75 @@ def encode(meta: dict, view: str, ask: str, found: list, before=None) -> str:
             f"places: {pl or 'none'}{prev}\nask: {ask}")
 
 
-@lru_cache(maxsize=1)
-def _sessions(where: str):
-    try:
-        import onnxruntime as ort
-        from tokenizers import Tokenizer
+#: The longest input the model reads, in tokens; what is past it is cut.
+MAX_INPUT = 512
+_loading = threading.Lock()
+_loaded: dict = {}
 
-        opts = ort.SessionOptions()
-        opts.intra_op_num_threads = _THREADS
-        return (ort.InferenceSession(f"{where}/encoder.onnx", opts),
-                ort.InferenceSession(f"{where}/decoder.onnx", opts),
-                Tokenizer.from_file(f"{where}/tokenizer.json"))
-    except Exception as exc:
-        raise ModelError(f"{NAME} in {where} could not be loaded: {exc}") from None
+
+def _sessions(where: str):
+    """The model's two sessions and its tokenizer, loaded once: requests that
+    come together while it loads wait for the one load."""
+    with _loading:
+        if where not in _loaded:
+            if not available():
+                raise ModelError(f'{NAME} needs onnxruntime: pip install "gmpas[chat]"')
+            try:
+                import onnxruntime as ort
+                from tokenizers import Tokenizer
+
+                opts = ort.SessionOptions()
+                opts.intra_op_num_threads = _THREADS
+                _loaded.clear()
+                _loaded[where] = (ort.InferenceSession(f"{where}/encoder.onnx", opts),
+                                  ort.InferenceSession(f"{where}/decoder.onnx", opts),
+                                  Tokenizer.from_file(f"{where}/tokenizer.json"))
+            except Exception as exc:
+                raise ModelError(f"{NAME} in {where} could not be loaded: {exc}") from None
+        return _loaded[where]
+
+
+def _model():
+    if not available():
+        raise ModelError(f'{NAME} needs onnxruntime: pip install "gmpas[chat]"')
+    return _sessions(str(model_dir() if ready() else fetch()))
+
+
+def _named(v: dict, words: set) -> int:
+    """How many of the request's words a field's name and label hold."""
+    own = set(re.findall(r"\w+", f"{v['name']} {v.get('label', '')}".lower()))
+    return len(own & words)
+
+
+def prompt(meta: dict, view: str, ask: str, before=None) -> str:
+    """The model's input for a request, fitted to the MAX_INPUT tokens it reads.
+
+    A file with many fields does not fit, and the request comes last, so the
+    field list is cut instead: the fields the view shows, then those whose
+    name or label share a word with the request (or the one before), then
+    the rest in the file's order, as many as fit."""
+    found = find_places(ask)
+    src = encode(meta, view, ask, found, before)
+    tok = _model()[2]
+    if len(tok.encode(src).ids) < MAX_INPUT:
+        return src
+    fields = meta.get("variables", [])
+    shown = set(re.findall(r"\w+", view))
+    words = set(re.findall(r"\w+", (ask + " " + (before[0] if before else "")).lower()))
+    order = sorted(range(len(fields)), key=lambda i: (
+        fields[i]["name"] not in shown, -_named(fields[i], words), i))
+    kept: list = []
+    for i in order:
+        trial = sorted(kept + [i])
+        if len(tok.encode(encode({**meta, "variables": [fields[j] for j in trial]},
+                                 view, ask, found, before)).ids) >= MAX_INPUT:
+            break
+        kept = trial
+    if not kept:
+        raise ModelError(f"this request and view are too long for {NAME}; "
+                         f"shorten it, or name a larger model in the chat configuration")
+    return encode({**meta, "variables": [fields[j] for j in kept]},
+                  view, ask, found, before)
 
 
 _running = threading.Lock()
@@ -192,8 +269,7 @@ def generate(src: str) -> str:
     """The model's answer to one input, greedily decoded."""
     import numpy as np
 
-    where = model_dir() if ready() else fetch()
-    enc, dec, tok = _sessions(str(where))
+    enc, dec, tok = _model()
     ids = np.array([tok.encode(src).ids], dtype=np.int64)
     mask = np.ones_like(ids)
     with _running:

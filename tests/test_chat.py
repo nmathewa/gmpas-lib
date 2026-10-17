@@ -167,7 +167,15 @@ def test_an_empty_or_overlong_request_never_reaches_the_model():
 
 # ------------------------------------------------------------------- config
 
+class _Tokens:
+    """A tokenizer that counts words, standing in for the model's own."""
+
+    def encode(self, text):
+        return type("Encoded", (), {"ids": text.split()})()
+
+
 def test_no_file_means_the_built_in_model(tmp_path, monkeypatch):
+    monkeypatch.setattr(chatmodel, "_model", lambda: (None, None, _Tokens()))
     monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "absent.conf"))
     monkeypatch.setenv("GMPAS_CHAT_LOG", "off")
     assert chat.load_config() is None
@@ -187,7 +195,8 @@ def test_no_file_means_the_built_in_model(tmp_path, monkeypatch):
     assert messages[0]["content"].endswith("ask: temperature over peru")
 
 
-def test_the_built_in_model_is_not_asked_twice():
+def test_the_built_in_model_is_not_asked_twice(monkeypatch):
+    monkeypatch.setattr(chatmodel, "_model", lambda: (None, None, _Tokens()))
     post = _says("var = nothing\n", "var = t2m\n")
     with pytest.raises(chat.ChatError, match="refused: ") as err:
         chat.ask("temperature", META, cfg={**chat.builtin_config(), "log": "off"},
@@ -207,8 +216,9 @@ def test_a_server_needs_nothing_installed(tmp_path, monkeypatch):
     monkeypatch.setattr(chatmodel, "available", lambda: False)
     monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "chat.conf"))
     assert not chat.installed()
+    # a file naming the built-in model shows the panel, which says to install it
     (tmp_path / "chat.conf").write_text("provider = builtin\n")
-    assert not chat.installed()
+    assert chat.installed()
     (tmp_path / "chat.conf").write_text("url = http://127.0.0.1:11434\nmodel = m\n")
     assert chat.installed()
 
@@ -693,3 +703,50 @@ def test_the_tools_describe_and_check_without_drawing():
     assert "outside t's 3 level" in chat._check_script("level = 7", meta, "t")
     asked = chat._check_script("t2m.max()", META, None)
     assert "question: where t2m is largest" in asked
+
+
+def test_a_history_that_is_not_a_list_is_none():
+    post = _says("var = t2m\n")
+    for history in (5, True, "x", {"request": "a", "reply": "b"}):
+        assert chat.ask("temperature", META, cfg=CFG, post=post,
+                        history=history)["state"]["var"] == "t2m"
+        post = _says("var = t2m\n")
+
+
+def test_a_password_in_the_url_is_not_repeated():
+    cfg = {**CFG, "url": "http://user:secret@127.0.0.1:9", "timeout": 2.0}
+    with pytest.raises(chat.ChatError) as err:
+        chat.ask("temperature", META, cfg=cfg)
+    assert "secret" not in str(err.value) and "127.0.0.1:9" in str(err.value)
+
+
+def test_a_model_that_takes_no_tools_is_asked_the_one_shot_way(monkeypatch, tmp_path):
+    def talk(cfg, messages):
+        raise chat.ChatError('the model server answered 400: "m" does not support tools',
+                             "server")
+    monkeypatch.setattr(chat, "_talk", talk)
+    monkeypatch.setattr(chat, "_agent", lambda *a, **k: talk(None, None))
+    sent = []
+
+    def one_shot(cfg, messages):
+        sent.append(messages)
+        return "var = t2m\n"
+    monkeypatch.setattr(chat, "_post", one_shot)
+    log = tmp_path / "chat.jsonl"
+    cfg = {**CFG, "agent": True, "log": str(log)}
+    got = chat.ask("temperature", META, cfg=cfg, post=one_shot)
+    assert got["state"]["var"] == "t2m" and len(sent) == 1
+    assert "does not support tools" in json.loads(log.read_text())["no_tools"]
+
+
+def test_a_file_with_many_fields_is_cut_to_what_the_model_reads(monkeypatch):
+    monkeypatch.setattr(chatmodel, "_model", lambda: (None, None, _Tokens()))
+    monkeypatch.setattr(chatmodel, "MAX_INPUT", 120)
+    meta = {"steps": 1, "variables": [
+        {"name": f"f{i}", "label": f"some field number {i}"} for i in range(60)]
+        + [{"name": "mslp", "label": "mean sea level pressure"}]}
+    src = chatmodel.prompt(meta, "var = f7\n", "show the sea level pressure")
+    assert len(src.split()) < 120 and src.endswith("ask: show the sea level pressure")
+    fields = src.split("\n")[0]
+    # the field on screen and the one the request names are kept
+    assert "f7 (" in fields and "mslp (" in fields and "f59 (" not in fields
