@@ -1493,14 +1493,20 @@ def _handler(viewer: Viewer, html: str = ""):
                             "script": {"keys": _script.keys(),
                                        "startup": _script.startup()}}
                     # chat is an optional install; with it the right panel
-                    # is the chat box, once a model is named
+                    # is the chat box, answered by the built-in model unless
+                    # the configuration names another
                     if _chat.installed():
                         try:
-                            cfg = _chat.load_config()
+                            cfg = _chat.load_config() or _chat.builtin_config()
                             log = _chat.log_path(cfg)
                             meta["chat"] = {"model": cfg["model"],
-                                            "log": str(log) if log else ""} \
-                                if cfg else {"setup": str(_chat.config_path())}
+                                            "provider": cfg.get("provider", "ollama"),
+                                            "builtin": cfg.get("provider") == "builtin",
+                                            # its first answer downloads it
+                                            "ready": cfg.get("provider") != "builtin"
+                                            or _chat._builtin.ready(),
+                                            "conf": str(_chat.config_path()),
+                                            "log": str(log) if log else ""}
                         except _chat.ChatError as exc:
                             meta["chat"] = {"error": str(exc)}
                     return self._send(json.dumps(meta).encode(), "application/json")
@@ -2663,17 +2669,20 @@ function chatLine(cls, text){
 function chatBoot(){
   if(!M.chat || !M.script) return;
   $("#chatsec").style.display="";
-  if(M.chat.error || M.chat.setup){
+  if(M.chat.error){
     $("#chatGo").disabled=true; $("#chatAll").style.display="none";
-    chatSay(M.chat.error || `no model yet: write ${M.chat.setup} with\\n`+
-      `url = http://127.0.0.1:11434\\nmodel = <a model your Ollama has>`, !!M.chat.error);
+    chatSay(M.chat.error, true);
     $("#chathint").style.whiteSpace="pre-wrap";
     return;
   }
   document.body.classList.add("chat");
   $("#right h1").textContent="ask";
-  chatSay(`answered by ${M.chat.model}, a model you run`+
-          (M.chat.log ? ` \\u00b7 kept in ${M.chat.log}` : ""));
+  chatSay((M.chat.builtin
+      ? `answered by ${M.chat.model}, the small model built in to gmpas, on this machine`+
+        ` \\u00b7 for harder requests name an Ollama, OpenAI-compatible`+
+        ` or Anthropic model in ${M.chat.conf}`
+      : `answered by ${M.chat.model} (${M.chat.provider}), named in ${M.chat.conf}`)+
+    (M.chat.log ? ` \\u00b7 kept in ${M.chat.log}` : ""));
   relayout();
 }
 async function chatAsk(){
@@ -2681,11 +2690,13 @@ async function chatAsk(){
   if(!text || !cur || $("#chatGo").disabled) return;
   $("#chatGo").disabled=true; $("#chatText").value="";
   chatLine("q", text);
-  const a=chatLine("a", `asking ${M.chat.model}\\u2026`);
+  const a=chatLine("a", M.chat.ready ? `asking ${M.chat.model}\\u2026`
+    : `downloading ${M.chat.model} (about 160 MB, once)\\u2026`);
   try{
     const r=await fetch("api/chat?"+new URLSearchParams({text, script:scriptText(),
       history:JSON.stringify(CHAT.slice(-6))}));
     const d=await r.json();
+    M.chat.ready=true;
     // what was said is sent with the next request: "no, the other one" and
     // "still the same" mean nothing without it
     CHAT.push({request:text, reply:r.ok ? d.script : "# "+d.error});

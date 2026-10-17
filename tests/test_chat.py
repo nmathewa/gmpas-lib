@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from gmpas import chat
+from gmpas import chat, chatmodel
 
 META = {
     "variables": [{"name": "t2m", "label": "2 m temperature [K]", "levels": 1},
@@ -167,11 +167,50 @@ def test_an_empty_or_overlong_request_never_reaches_the_model():
 
 # ------------------------------------------------------------------- config
 
-def test_no_file_means_no_chat(tmp_path, monkeypatch):
+def test_no_file_means_the_built_in_model(tmp_path, monkeypatch):
     monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "absent.conf"))
+    monkeypatch.setenv("GMPAS_CHAT_LOG", "off")
     assert chat.load_config() is None
-    with pytest.raises(chat.ChatError, match="no model is configured"):
-        chat.ask("anything", META)
+    seen = []
+
+    def post(cfg, messages):
+        seen.append((cfg, messages))
+        return "var = t2m\n"
+
+    got = chat.ask("temperature over peru", META, post=post)
+    assert got["state"]["var"] == "t2m"
+    cfg, messages = seen[0]
+    assert cfg["provider"] == "builtin" and cfg["model"] == chatmodel.NAME
+    # one block in the layout it was taught, with the place it found
+    assert len(messages) == 1 and messages[0]["content"].startswith("fields: ")
+    assert "places: peru = " in messages[0]["content"]
+    assert messages[0]["content"].endswith("ask: temperature over peru")
+
+
+def test_the_built_in_model_is_not_asked_twice():
+    post = _says("var = nothing\n", "var = t2m\n")
+    with pytest.raises(chat.ChatError, match="refused: ") as err:
+        chat.ask("temperature", META, cfg={**chat.builtin_config(), "log": "off"},
+                 post=post)
+    assert err.value.kind == "refused" and len(post.seen) == 1
+
+
+def test_the_built_in_model_can_be_named(tmp_path):
+    path = tmp_path / "chat.conf"
+    path.write_text("provider = builtin\nlog = off\n")
+    cfg = chat.load_config(path)
+    assert cfg["provider"] == "builtin" and cfg["model"] == chatmodel.NAME
+    assert cfg["agent"] is False
+
+
+def test_a_server_needs_nothing_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr(chatmodel, "available", lambda: False)
+    monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "chat.conf"))
+    assert not chat.installed()
+    (tmp_path / "chat.conf").write_text("provider = builtin\n")
+    assert not chat.installed()
+    (tmp_path / "chat.conf").write_text("url = http://127.0.0.1:11434\nmodel = m\n")
+    assert chat.installed()
 
 
 def test_the_file_names_the_server_and_the_model(tmp_path):
@@ -248,7 +287,6 @@ def test_the_log_goes_to_the_data_directory_by_default(monkeypatch, tmp_path):
 @pytest.fixture
 def model_server():
     """A server speaking Ollama's /api/chat."""
-    pytest.importorskip("ollama", reason='the wire tests need "gmpas[chat]"')
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -301,7 +339,6 @@ def test_a_server_error_is_reported_with_what_it_said(model_server):
 
 
 def test_no_server_is_reported_as_no_answer():
-    pytest.importorskip("ollama", reason='the wire tests need "gmpas[chat]"')
     cfg = {"url": "http://127.0.0.1:9", "model": "m", "timeout": 2.0, "log": "off"}
     with pytest.raises(chat.ChatError, match="no answer from the model server"):
         chat.ask("temperature", META, cfg=cfg)
@@ -531,8 +568,6 @@ def test_a_plain_reply_ends_an_agent_run(agent_server, provider):
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_an_agent_that_runs_out_of_steps_is_asked_the_one_shot_way(
         agent_server, provider, tmp_path):
-    if provider == "ollama":
-        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
     base, seen, replies = agent_server
     replies += [_reply(provider, "", ("describe_file", {}))] * 2 \
         + [_reply(provider, "var = t2m\n")]
@@ -563,8 +598,6 @@ def test_a_fault_in_a_tool_call_is_an_answer_the_model_reads(agent_server, provi
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_an_applied_script_is_checked_and_the_retry_is_one_shot(agent_server, provider):
-    if provider == "ollama":
-        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
     base, seen, replies = agent_server
     replies += [_reply(provider, "", ("apply", {"script": "var = sst"})),
                 _reply(provider, "var = t2m\n")]
@@ -593,8 +626,6 @@ def test_an_agent_that_says_it_cannot_is_passed_on(agent_server, provider):
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_agent_off_is_the_one_shot_path(agent_server, provider):
-    if provider == "ollama":
-        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
     base, seen, replies = agent_server
     replies.append(_reply(provider, "var = t2m\n"))
     cfg = _cfg(provider, base, agent=False)

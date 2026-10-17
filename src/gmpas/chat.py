@@ -1,4 +1,4 @@
-"""A view asked for in plain words, written as a script by a local model.
+"""A view asked for in plain words, written as a script by a model.
 
     "wind speed at the third level over the Maritime Continent, in Mercator"
 
@@ -9,12 +9,13 @@ becomes
     proj   = Mercator
     region = 90, 150, -15, 15
 
-The model is the one named in a small file (see `config_path`): an Ollama
-server by default, or any server that speaks the OpenAI chat API (vLLM,
-llama.cpp, LM Studio, a hosted one), or Anthropic's API. gmpas ships no model
-and talks to no server but that one. Chat is an optional install --
-`pip install "gmpas[chat]"` brings the Ollama client -- and without it the
-page is as it always was.
+Chat is an optional install -- `pip install "gmpas[chat]"` -- and without
+it the page is as it always was. With it and no configuration, the answer
+comes from the small model that ships with gmpas (`gmpas.chatmodel`), on
+this machine. A larger model is named in a small file (see `config_path`):
+an Ollama server, any server that speaks the OpenAI chat API (vLLM,
+llama.cpp, LM Studio, a hosted one), or Anthropic's API. gmpas talks to no
+server but that one.
 
 The model is told what the open file holds and which keys a script may set,
 and is asked for script lines and nothing else. Its reply is text, and it is
@@ -28,8 +29,9 @@ The configuration is `key = value` lines, as a script is:
     model = qwen2.5-coder:7b
 
 `provider` is `ollama` (the default), `openai` -- `url` is then the API's base,
-such as http://127.0.0.1:8000/v1 -- or `anthropic`, whose `url` may be left
-out. `key` (sent as the server expects it), `timeout` (seconds) and `log` are
+such as http://127.0.0.1:8000/v1 -- `anthropic`, whose `url` may be left
+out, or `builtin`, the shipped model, which needs no `url` or `model`.
+`key` (sent as the server expects it), `timeout` (seconds) and `log` are
 optional; with no `key`, `$GMPAS_CHAT_KEY` is used. `think = off` asks an
 Ollama model not to reason before it answers, and caps the reply's length: a
 small model can otherwise reason for thousands of tokens over a two-line script.
@@ -59,20 +61,20 @@ is kept in the log.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
 import time
 from pathlib import Path
 
+from . import chatmodel as _builtin
 from . import script as _script
 
 #: The longest request taken, in characters.
 MAX_TEXT = 500
 DEFAULT_TIMEOUT = 120.0
 _KEYS = ("provider", "url", "model", "key", "timeout", "log", "think", "agent", "steps")
-PROVIDERS = ("ollama", "openai", "anthropic")
+PROVIDERS = ("ollama", "openai", "anthropic", "builtin")
 _ANTHROPIC_URL = "https://api.anthropic.com"
 _ANTHROPIC_VERSION = "2023-06-01"
 #: The longest reply asked of a server that needs a limit (Anthropic's).
@@ -101,8 +103,22 @@ class ChatError(ValueError):
 
 
 def installed() -> bool:
-    """Whether the chat extra is installed: `pip install "gmpas[chat]"`."""
-    return importlib.util.find_spec("ollama") is not None
+    """Whether chat can answer here: the built-in model's runtime is installed
+    (`pip install "gmpas[chat]"`), or a configuration names a server, which
+    needs nothing installed."""
+    if _builtin.available():
+        return True
+    try:
+        cfg = load_config()
+    except ChatError:
+        return True                  # shown, so that what is wrong is said
+    return cfg is not None and cfg.get("provider") != "builtin"
+
+
+def builtin_config() -> dict:
+    """What is used when no file names a model: the shipped one."""
+    return {"provider": "builtin", "model": _builtin.NAME, "url": "",
+            "timeout": DEFAULT_TIMEOUT, "agent": False}
 
 
 def log_path(cfg: dict | None = None) -> Path | None:
@@ -168,7 +184,10 @@ def load_config(path=None) -> dict | None:
         out["provider"] = provider
     if provider == "anthropic" and not out.get("url"):
         out["url"] = _ANTHROPIC_URL
-    for name in ("url", "model"):
+    if provider == "builtin":
+        # it calls no tools; a url or model written beside it means nothing
+        out.update(provider="builtin", model=_builtin.NAME, url="", agent="off")
+    for name in ("url", "model") if provider != "builtin" else ():
         if not out.get(name):
             raise ChatError(f"{path}: {name} is not set")
     try:
@@ -347,38 +366,33 @@ def _key(cfg: dict) -> str:
 def _post(cfg: dict, messages: list[dict]) -> str:
     """One round with the model: the reply's text."""
     provider = cfg.get("provider", "ollama")
+    if provider == "builtin":
+        try:
+            return _builtin.generate(messages[-1]["content"]).replace(" ; ", "\n") + "\n"
+        except _builtin.ModelError as exc:
+            raise ChatError(str(exc), "server") from None
     if provider == "openai":
         return _post_openai(cfg, messages)
     if provider == "anthropic":
         return _post_anthropic(cfg, messages)
-    try:
-        import ollama
-    except ImportError:
-        raise ChatError('chat is not installed: pip install "gmpas[chat]"') from None
     key = _key(cfg)
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    options = {"temperature": 0}
+    extra = {}
+    think = cfg.get("think", "").lower()
+    if think in _OFF:
+        extra["think"] = False
+        options["num_predict"] = MAX_REPLY_TOKENS
+    elif think:
+        extra["think"] = True if think in _ON else think
+    got = _post_json(cfg, cfg["url"] + "/api/chat",
+                     {"Authorization": f"Bearer {key}"} if key else {},
+                     {"model": cfg["model"], "messages": messages, "stream": False,
+                      "options": options, **extra})
     try:
-        client = ollama.Client(host=cfg["url"], headers=headers, timeout=cfg["timeout"])
-        options = {"temperature": 0}
-        extra = {}
-        think = cfg.get("think", "").lower()
-        if think in ("off", "no", "false", "0"):
-            extra["think"] = False
-            options["num_predict"] = MAX_REPLY_TOKENS
-        elif think:
-            extra["think"] = True if think in ("on", "yes", "true", "1") else think
-        got = client.chat(model=cfg["model"], messages=messages, stream=False,
-                          options=options, **extra)
         return got["message"]["content"] or ""
-    except ollama.ResponseError as exc:
-        raise ChatError(f"the model server answered {exc.status_code}: "
-                        f"{exc.error}", "server") from None
     except (KeyError, TypeError):
         raise ChatError("the model server's answer had no message in it",
                         "server") from None
-    except Exception as exc:                 # no route, refused, timed out
-        raise ChatError(f"no answer from the model server at {cfg['url']}: "
-                        f"{exc}", "server") from None
 
 
 def _post_json(cfg: dict, url: str, headers: dict, body: dict) -> dict:
@@ -768,9 +782,7 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
     if len(text) > MAX_TEXT:
         raise ChatError(f"a request is at most {MAX_TEXT} characters")
     if cfg is None:
-        cfg = load_config()
-    if cfg is None:
-        raise ChatError(f"no model is configured; write {config_path()}")
+        cfg = load_config() or builtin_config()
     asked = text if not current.strip() else \
         f"The view now:\n{current.strip()}\n\nRequest: {text}"
     messages = [{"role": "system", "content": system_prompt(meta)}]
@@ -787,6 +799,14 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
               "history": said[-MAX_HISTORY:], "rounds": []}
     shown = _shown(current, meta)
     try:
+        if cfg.get("provider") == "builtin":
+            # it reads one block in the layout it was taught, not the prompt;
+            # it would give a refused script again, so it has one round
+            before = (said[-1]["request"], said[-1]["reply"].strip()) if said else None
+            src = _builtin.encode(meta, current, text, _builtin.find_places(text), before)
+            record["system"], record["input"] = "", src
+            return _rounds(cfg, [{"role": "user", "content": src}], meta, post,
+                           record, shown, tries=1)
         if cfg.get("agent") and post is _post:
             record["agent"] = True
             reply = _agent(cfg, messages, meta, record, shown)
@@ -827,9 +847,9 @@ def _fits(state: dict, shown, meta: dict) -> None:
             f"a level by its value is {shown}.sel(level={lev})")
 
 
-def _rounds(cfg, messages, meta, post, record, shown=None) -> dict:
+def _rounds(cfg, messages, meta, post, record, shown=None, tries=2) -> dict:
     problem = ""
-    for _ in range(2):
+    for _ in range(tries):
         reply = post(cfg, messages)
         turn = {"reply": reply}
         record["rounds"].append(turn)
@@ -852,4 +872,5 @@ def _rounds(cfg, messages, meta, post, record, shown=None) -> dict:
             continue
         record["script"] = written
         return {"script": written, "state": state}
-    raise ChatError(f"the model's script was refused twice: {problem}", "refused")
+    raise ChatError(f"the model's script was refused"
+                    f"{' twice' if tries > 1 else ''}: {problem}", "refused")

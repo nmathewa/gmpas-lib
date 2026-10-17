@@ -29,11 +29,16 @@ EDGE_ANGLES = np.arange(6) * np.pi / 6.0
 @pytest.fixture(autouse=True, scope="session")
 def no_chat_model():
     """Never read the user's own chat configuration during tests, or write to
-    their chat log: with a model configured the page is the chat page, and its
-    colour, projection and extent sections are out of sight."""
+    their chat log, or fetch or run the built-in model: with a model to answer
+    the page is the chat page, and its colour, projection and extent sections
+    are out of sight. A test of the chat page or the model undoes this."""
+    from gmpas import chatmodel
+
     patch = pytest.MonkeyPatch()
     patch.setenv("GMPAS_CHAT_CONFIG", os.path.join(os.sep, "nonexistent", "chat.conf"))
     patch.setenv("GMPAS_CHAT_LOG", "off")
+    patch.setenv("GMPAS_CHAT_MODEL_URL", "http://127.0.0.1:9")
+    patch.setattr(chatmodel, "available", lambda: False)
     yield
     patch.undo()
 
