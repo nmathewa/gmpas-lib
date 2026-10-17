@@ -260,6 +260,47 @@ region = 95, 125, -10, 10
 | `region` | west, east, south, north in degrees |
 | `box` | the view box in a projection's own units (what "from view" writes there) |
 
+The same view can be written the way Python with xarray would write it, and
+that form reaches further. It is read, never run:
+
+```python
+# December 2012 against every December, with the +1 degree line
+clim = sst.sel(month=12).mean("time")
+anom = sst.sel(time="2012-12") - clim
+shade(anom, cmap="RdBu_r")
+contour(anom, levels=[1], colors="black")
+```
+
+| form | what it does |
+|---|---|
+| `x.isel(time=0, level=3)`, `x.sel(time="2012-12")`, `x.sel(level=850)` | one step, one level |
+| `spd = hypot(u, v)`, `a - b`, `a * 1000` | a field made from fields |
+| `shade(x)`, `contourf(x)`, `contour(x)`, `hist(x)`, `series(x, lon=, lat=)` | the kind of plot |
+| several draw calls, `vectors(u, v)`, `rivers()`, `figure(title=)` | one figure of layers |
+| `view(region=(w, e, s, n), proj="Mercator")` | the frame |
+| `x.max()`, `x.min()`, `mark(x.max())`, `mark(lon=, lat=)` | a question; a place marked |
+
+**Over time** (lat/lon files): a field reduced over time is a field like any
+other. Steps are picked with `.sel(time="2012")` (a date, as far as it is
+given), `.sel(time=slice("2012-12", "2013-02"))` (both ends included),
+`.isel(time=slice(0, 12))`, `.sel(month=12)`, `.sel(year=2012)` or
+`.sel(season="DJF")`, and reduced with `.mean("time")`, `.max("time")` or
+`.min("time")`. The month, year and season picks are gmpas's own shorthand,
+not xarray. What is computed:
+
+- each step counts once -- monthly means are not weighted by the days in a
+  month;
+- a cell missing in a step is left out of that cell's result, as xarray's
+  default does;
+- a season is its calendar months, as in xarray: DJF of 2012 is January,
+  February and December 2012. A winter that runs on is a slice:
+  `.sel(time=slice("2011-12", "2012-02"))`;
+- the arithmetic is in float64. On a float32 file xarray's own result is
+  float32 and differs in about the sixth digit.
+
+An MPAS run has no reductions over time yet: its steps are dated by file
+name, and a field of a 3.75 km mesh is 335 MB a step.
+
 A line starting with `#` or `!` is a comment. A script is checked against the
 open file before anything changes, and a mistake is reported with its line
 number. `gmpas view run/ --script view.txt` opens the viewer on a saved view.

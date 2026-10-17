@@ -402,14 +402,19 @@ def _coerce(name: str, spec: dict, value, where: str):
                                  f"x o O . * only")
             return [p or None for p in parts]
         if kind == "levels":
+            listed = isinstance(value, (list, tuple))     # values, never a count
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 values = [value]
+            elif listed:
+                values = list(value)
             else:
                 values = [v for v in re.split(r"[,\s]+", text.strip()) if v]
             numbers = [float(v) for v in values]
             if not numbers or len(numbers) > MAX_LEVELS \
                     or not all(math.isfinite(v) for v in numbers):
                 raise ValueError
+            if len(numbers) == 1 and listed:
+                return numbers                            # one line, at that value
             if len(numbers) == 1:
                 count = int(numbers[0])
                 if count != numbers[0] or not 2 <= count <= MAX_LEVELS:
@@ -426,15 +431,68 @@ def _coerce(name: str, spec: dict, value, where: str):
     raise ValueError(f"{where}{name}: unknown option type {kind}")
 
 
-def _clean_options(given, table: dict, where: str) -> dict:
+#: The layers whose drawing call takes options this module does not list.
+PASS_THROUGH = ("contourf", "contour", "pcolormesh", "imshow", "quiver", "barbs",
+                "streamplot")
+MAX_EXTRA = 12
+#: What the drawing code sets itself; a stack may not set these in its place.
+_RESERVED = frozenset({"ax", "x", "y", "data", "transform", "zorder", "add_colorbar",
+                       "add_labels", "figure", "clip_path", "clip_box"})
+
+
+def _plain_value(value) -> bool:
+    if value is None or isinstance(value, (bool, int, float)):
+        return True
+    if isinstance(value, str):
+        return len(value) <= MAX_TEXT
+    return isinstance(value, list) and len(value) <= 64 and all(
+        not isinstance(v, list) and _plain_value(v) for v in value)
+
+
+def _clean_options(given, table: dict, where: str, extra: bool = False) -> dict:
+    """The options a layer was given, checked against its table.
+
+    With `extra`, a name the table does not have is kept under "mpl" and
+    handed to the matplotlib call as it is -- any option matplotlib takes, as
+    a plain value, never as code. A name that is nearly one of the table's is
+    still a mistake: `colour` is not passed on as if it were not `color`.
+    """
     if given is None:
         return {}
     if not isinstance(given, dict):
         raise ValueError(f"{where}options must be an object")
+    passed = dict(given.get("mpl") or {}) if extra and isinstance(given.get("mpl"), dict) \
+        else {}
+    given = {k: v for k, v in given.items() if not (extra and k == "mpl")}
     unknown = sorted(set(given) - set(table))
+    if unknown and extra:
+        import difflib
+
+        for name in unknown:
+            if name in _RESERVED:
+                raise ValueError(f"{where}unknown option {name!r}: the layer sets "
+                                 f"that itself")
+            others = sorted(k for k, spec in LAYER_KINDS.items()
+                            if name in spec["options"])
+            if others:               # another layer's option, not matplotlib's
+                raise ValueError(f"{where}unknown option {name!r}: that is an "
+                                 f"option of {', '.join(others)}")
+            near = difflib.get_close_matches(name, list(table), n=1, cutoff=0.75)
+            if near:
+                raise ValueError(f"{where}unknown option {name!r}; did you mean "
+                                 f"{near[0]!r}?")
+            passed[name] = given.pop(name)
+        unknown = []
     if unknown:
         raise ValueError(f"{where}unknown option(s) {unknown}; allowed: {sorted(table)}")
-    out = {}
+    for name, value in passed.items():
+        if not (isinstance(name, str) and name.isidentifier() and len(name) <= 40
+                and not name.startswith("_")) or not _plain_value(value):
+            raise ValueError(f"{where}{name!r} must be a plain option: a number, "
+                             f"text, true/false or a list of those")
+    if len(passed) > MAX_EXTRA:
+        raise ValueError(f"{where}at most {MAX_EXTRA} options beyond the listed ones")
+    out = {"mpl": passed} if passed else {}
     for name, value in given.items():
         coerced = _coerce(name, table[name], value, where)
         if coerced is not None:
@@ -442,12 +500,13 @@ def _clean_options(given, table: dict, where: str) -> dict:
     return out
 
 
-def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
+def clean(stack, spatial_vars, level_counts: dict[str, int], derived=None) -> dict:
     """A validated copy of a stack, or ValueError naming what is wrong.
 
     `spatial_vars` are the variables a layer may draw; `level_counts` gives
     each one's level-axis length, so a pinned level is checked up front rather
-    than failing deep inside a read.
+    than failing deep inside a read. `derived`, where the viewer can draw an
+    expression of fields as a layer, says whether a name is one.
     """
     if isinstance(stack, (str, bytes)):
         if len(stack) > 64_000:
@@ -486,7 +545,8 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
                                where) is not False,
             "opacity": _coerce("opacity", {"type": "float", "min": 0.0, "max": 1.0},
                                layer.get("opacity", 1.0), where),
-            "options": _clean_options(layer.get("options"), spec["options"], where),
+            "options": _clean_options(layer.get("options"), spec["options"], where,
+                                      extra=kind in PASS_THROUGH),
         }
         if clean_layer["opacity"] is None:
             clean_layer["opacity"] = 1.0
@@ -495,7 +555,8 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
             _check_contour_options(clean_layer["options"], where)
         for need in spec["needs"]:
             name = layer.get(need)
-            if name not in spatial_vars:
+            if name not in spatial_vars and not (
+                    derived and isinstance(name, str) and derived(name)):
                 raise ValueError(f"{where}{need}={name!r} is not a map variable of this "
                                  f"file; one of {sorted(spatial_vars)}")
             clean_layer[need] = name
@@ -505,7 +566,10 @@ def clean(stack, spatial_vars, level_counts: dict[str, int]) -> dict:
         else:
             idx = _coerce("level", {"type": "int", "min": 0}, level, where)
             for need in spec["needs"]:
-                n = level_counts.get(clean_layer[need], 1)
+                n = level_counts.get(clean_layer[need])
+                if n is None:            # an expression: its fields' levels
+                    n = max((level_counts.get(w, 1) for w in re.findall(
+                        r"[A-Za-z_]\w*", clean_layer[need])), default=1)
                 if idx >= n:
                     raise ValueError(f"{where}level {idx} is out of range for "
                                      f"{clean_layer[need]!r} ({n} level(s))")
@@ -883,12 +947,28 @@ def _norm(opts: dict, vmin, vmax):
     return None
 
 
+def _source(viewer, name: str):
+    """(the file's variable a layer's field is drawn from, whether the field
+    IS that variable). An expression of fields has no variable of its own: the
+    first field in it stands in for its level axis, and for nothing else."""
+    try:
+        return viewer.ds[name], True
+    except KeyError:
+        for word in re.findall(r"[A-Za-z_]\w*", name):
+            try:
+                return viewer.ds[word], False
+            except KeyError:
+                continue
+    return None, False
+
+
 def _field_label(viewer, layer, da, lvl: int) -> str:
     label = layer["options"].get("colorbar_label")
     if label:
         return label
-    text = _data.field_label(viewer.ds[layer["var"]])
-    stack = viewer._stack_dims(viewer.ds[layer["var"]])
+    source, own = _source(viewer, layer["var"])
+    text = _data.field_label(source) if own else layer["var"]
+    stack = viewer._stack_dims(source) if source is not None else []
     if stack and stack[0] in viewer.ds.variables:
         coord = viewer.ds[stack[0]]
         value = coord.values[lvl]
@@ -952,11 +1032,25 @@ def _grid_values(ax, viewer, da, shifted, opts: dict, crs, alpha: float, z: int)
 
 
 def _speed_units(viewer, name: str) -> str:
-    return str(viewer.ds[name].attrs.get("units", ""))
+    source, own = _source(viewer, name)
+    return str(source.attrs.get("units", "")) if own else ""
 
 
 def draw(viewer, fig, stack: dict, time: int, level: int, extent):
     """Draw a cleaned stack onto `fig`, bottom layer first. Returns the axes."""
+    try:
+        return _draw(viewer, fig, stack, time, level, extent)
+    except (TypeError, AttributeError) as exc:
+        passed = sorted({name for layer in stack["layers"]
+                         for name in layer["options"].get("mpl", {})})
+        if not passed:
+            raise
+        # an option handed on to matplotlib that it does not take
+        raise ValueError(f"matplotlib refused an option ({', '.join(passed)}): "
+                         f"{exc}") from None
+
+
+def _draw(viewer, fig, stack: dict, time: int, level: int, extent):
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     import matplotlib.ticker as mticker
@@ -996,6 +1090,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
         alpha = layer["opacity"]
         kind, spec = layer["kind"], LAYER_KINDS[layer["kind"]]
         opts = {name: _option(layer, name) for name in spec["options"]}
+        more = layer["options"].get("mpl", {})   # matplotlib's own, passed on
         lvl = _level_of(layer, level)
 
         if spec["group"] == "field":
@@ -1022,7 +1117,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                     kw["cmap"] = palettes.get(opts["cmap"] or look["palette"])
                 else:
                     kw["colors"] = opts["colors"]
-                artist = shifted.plot.contour(**common, **kw)
+                artist = shifted.plot.contour(**{**common, **kw, **more})
                 # after drawing, not before: a count (or no levels at all)
                 # leaves matplotlib to choose them, and which line is the Nth
                 # can only be answered once they exist
@@ -1062,7 +1157,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                     kw["shading"] = opts["shading"]
                 elif kind == "imshow":
                     kw["interpolation"] = opts["interpolation"]
-                artist = getattr(shifted.plot, kind)(**common, **kw)
+                artist = getattr(shifted.plot, kind)(**{**common, **kw, **more})
                 if kind == "contourf":
                     # a discrete cmap built from `levels` would drop the extremes
                     artist.set_cmap(artist.get_cmap().with_extremes(
@@ -1098,7 +1193,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                     kw.update(color=speed, cmap=palette(layer, opts))
                 else:
                     kw["color"] = opts["color"]
-                artist = ax.streamplot(lon, lat, uu, vv, **kw)
+                artist = ax.streamplot(lon, lat, uu, vv, **{**kw, **more})
                 artist.lines.set_alpha(alpha)
                 artist.arrows.set_alpha(alpha)
                 if opts["colorize"] and opts["colorbar"]:
@@ -1118,6 +1213,7 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                         kw["scale"] = opts["scale"]
                     if opts["width"]:
                         kw["width"] = opts["width"]
+                    kw.update(more)
                     if opts["colorize"]:
                         artist = ax.quiver(X, Y, U, V, np.hypot(U, V),
                                            cmap=palette(layer, opts), **kw)
@@ -1141,9 +1237,9 @@ def draw(viewer, fig, stack: dict, time: int, level: int, extent):
                         qk.text.set_bbox(dict(facecolor="white", edgecolor="none",
                                               alpha=0.8, pad=1.5))
                 else:
-                    ax.barbs(X, Y, U, V, transform=data_crs, color=opts["color"],
-                             length=opts["length"], linewidth=opts["linewidth"],
-                             alpha=alpha, zorder=z)
+                    ax.barbs(X, Y, U, V, **{**dict(
+                        transform=data_crs, color=opts["color"], length=opts["length"],
+                        linewidth=opts["linewidth"], alpha=alpha, zorder=z), **more})
             described.append(f"{spec['label']} {layer['u']}/{layer['v']}"
                              + _level_text(viewer, layer["u"], lvl))
 
@@ -1321,7 +1417,8 @@ def _cell(viewer) -> float:
 
 
 def _level_text(viewer, var: str, lvl: int) -> str:
-    stack = viewer._stack_dims(viewer.ds[var])
+    source, _ = _source(viewer, var)
+    stack = viewer._stack_dims(source) if source is not None else []
     if not stack:
         return ""
     dim = stack[0]

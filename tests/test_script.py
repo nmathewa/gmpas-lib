@@ -73,7 +73,7 @@ def test_a_key_with_no_value_clears_it():
     ("levels = 10\nnorm = log", "levels and norm=log cannot be combined"),
     ("proj = lonlat\nplon = 30", "line 2: plon needs a projection"),
     ("proj = Mercator\nregion = 0,10,0,10\nbox = 0,1,0,1", "line 3: region and box"),
-    ("__import__('os').system('x') = 1", "unknown key"),
+    ("__import__('os').system('x') = 1", "line 1: cannot assign"),
 ])
 def test_what_does_not_parse_says_which_line(text, says):
     with pytest.raises(script.ScriptError, match=says.replace("(", r"\(")):

@@ -13,6 +13,8 @@ lookup) depends only on the cell centres, which are real.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -22,6 +24,18 @@ EARTH_RADIUS = 6_371_229.0
 #: six edge-normal angles evenly spaced over [0, pi), so that for a uniform
 #: eastward flow sum(cos^2) / n is exactly 1/2 and sum(cos*sin) is exactly 0
 EDGE_ANGLES = np.arange(6) * np.pi / 6.0
+
+
+@pytest.fixture(autouse=True, scope="session")
+def no_chat_model():
+    """Never read the user's own chat configuration during tests, or write to
+    their chat log: with a model configured the page is the chat page, and its
+    colour, projection and extent sections are out of sight."""
+    patch = pytest.MonkeyPatch()
+    patch.setenv("GMPAS_CHAT_CONFIG", os.path.join(os.sep, "nonexistent", "chat.conf"))
+    patch.setenv("GMPAS_CHAT_LOG", "off")
+    yield
+    patch.undo()
 
 
 @pytest.fixture(autouse=True)

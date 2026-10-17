@@ -36,8 +36,10 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from . import chat as _chat
 from . import colour as _colour
 from . import jobs as _jobs
+from . import layers as _layers
 from . import data as _data
 from . import derive as _derive
 from . import script as _script
@@ -77,7 +79,80 @@ KIND_CAPS = {
     # MPAS only: a vertical section along a path, native cells and levels
     "section": {"colour": True, "options": False, "pan": False, "frames": False,
                 "probe": False, "gif": False, "data": True},
+    # a figure of layers; every layer carries its own colours
+    "layers": {"colour": False, "options": False, "pan": False, "frames": False,
+               "probe": False, "gif": False, "data": False},
 }
+
+def _extreme(values, inside, lon, lat, what: str) -> dict:
+    """The answer `Viewer.extreme` and `GenericViewer.extreme` share."""
+    if what not in ("max", "min"):
+        raise ValueError(f"{what!r} is not max or min")
+    found = np.flatnonzero(inside)
+    if not found.size:
+        raise ValueError("there is no data in this view")
+    pick = found[np.argmax(values.ravel()[found]) if what == "max"
+                 else np.argmin(values.ravel()[found])]
+    return {"what": what, "value": float(values.ravel()[pick]), "cell": int(pick),
+            "lon": round(float(np.ravel(lon)[pick]), 4),
+            "lat": round(float(np.ravel(lat)[pick]), 4), "cells": int(found.size)}
+
+
+#: The most pixels along a side that a layer of an MPAS figure is sampled at.
+LAYER_SAMPLES = 480
+
+
+class _MeshOnGrid:
+    """An MPAS run as `gmpas.layers` sees a lat/lon file.
+
+    A layer is the field sampled onto the view's pixels, exactly as the fast
+    map samples it -- the cell under each pixel, no interpolation -- and then
+    contoured or drawn as arrows on that grid. Zoomed in until cells are wider
+    than pixels, a contour therefore follows cell edges.
+    """
+
+    lon_name = lon_dim = "lon"
+    lat_name = lat_dim = "lat"
+    cyclic = False
+
+    class _Fields:
+        def __init__(self, series):
+            self.series = series
+            self.variables = ()
+
+        def __getitem__(self, name):
+            import xarray as xr
+
+            try:
+                return self.series.dataarray(name, 0)
+            except KeyError:                 # an expression: it has no attributes
+                return xr.DataArray(0.0, name=name)
+
+    def __init__(self, viewer, extent, width: int, height: int):
+        self.viewer = viewer
+        self.home = tuple(viewer.home)
+        self.labels = viewer.series.labels
+        self.ds = self._Fields(viewer.series)
+        scale = LAYER_SAMPLES / max(width, height, 1)
+        self.nx = max(16, int(width * min(1.0, scale)))
+        self.ny = max(16, int(height * min(1.0, scale)))
+        self.lon, _ = target_grid(tuple(extent), self.nx, self.ny)
+        self._lon_file, self._lat_file = target_grid(tuple(extent), self.nx, self.ny)
+
+    def _stack_dims(self, da):
+        return []
+
+    def _cropped(self, var, time, level, extent):
+        import xarray as xr
+
+        extent = tuple(float(v) for v in extent)
+        lon, lat = target_grid(extent, self.nx, self.ny)
+        index = self.viewer.view(extent, self.nx, self.ny)
+        image = index.frame(self.viewer.values(var, time, level))   # south first
+        attrs = dict(self.ds[var].attrs) if var in self.viewer.plottable_cell_vars() \
+            else {}
+        return xr.DataArray(image, dims=("lat", "lon"), name=var, attrs=attrs,
+                            coords={"lat": lat, "lon": lon})
 
 
 #: largest coastline overlay, in pixels per side, a request may ask for
@@ -436,8 +511,9 @@ class Viewer:
                 "pinned": _data.level_dims(da)[1:],
             })
             if not out[-1]["static"]:
+                out[-1]["spatial"] = True
                 out[-1]["kinds"] = ["map", "hovmoller"] + (
-                    ["section"] if out[-1]["levels"] > 1 else [])
+                    ["section"] if out[-1]["levels"] > 1 else []) + ["layers"]
         out.sort(key=lambda v: (v["static"], v["name"]))
         first = self.series.files[0].name
         title = (first if self.series.n_files == 1
@@ -463,8 +539,14 @@ class Viewer:
             "projections": list(PAGE_CHOICES),
             "kind_labels": {"map": "map (native mesh)",
                             "hovmoller": "Hovmöller (time × lon, area-weighted)",
-                            "section": "vertical section along a path"},
+                            "section": "vertical section along a path",
+                            "layers": "layers (composite)"},
             "kind_caps": KIND_CAPS,
+            "layer_schema": _layers.schema(),
+            # a layer may be an expression of fields: `values` computes those
+            "layer_expressions": True,
+            # a point's series and column are read in the point panel
+            "point_panel": True,
             "variables": out,
         }
 
@@ -822,10 +904,53 @@ class Viewer:
         if kind == "section":
             return self._render_section(var, time, extent, cmap, vmin, vmax, sec,
                                         (width / 100, height / 100), 100)
+        if kind == "layers":
+            return self._render_layers(var, time, level, extent, _.get("layers"),
+                                       width, height)
         if kind != "hovmoller":
             raise ValueError(f"the MPAS viewer has no {kind!r} plot")
         return self._render_hovmoller(var, level, extent, cmap, vmin, vmax, hov,
                                       (width / 100, height / 100), 100, meta)
+
+    # -- a figure of layers: fields and winds over one another ----------------
+
+    def _spatial_vars(self) -> list[str]:
+        return [v for v in self.plottable_cell_vars()
+                if _data.time_axis(self.series.dataarray(v, 0)) is not None]
+
+    def layer_stack(self, stack, var: str):
+        """A validated layer stack; the default, one filled contour of `var`."""
+        if isinstance(stack, _layers.Stack):
+            return stack
+        if stack is None:
+            stack = _layers.default_stack(var)
+        names = self._spatial_vars()
+        counts = {v: self._level_span(self.series.dataarray(v, 0)) for v in names}
+
+        def derived(name: str) -> bool:
+            try:
+                _derive.parse(name, names)
+            except KeyError:
+                return False
+            return True
+        return _layers.clean(stack, names, counts, derived)
+
+    def _render_layers(self, var, time, level, extent, layers, width, height) -> bytes:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        stack = self.layer_stack(layers, var)
+        grid = _MeshOnGrid(self, extent, width, height)
+        fig = plt.figure(figsize=(width / 100, height / 100), dpi=100,
+                         layout="constrained")
+        try:
+            _layers.draw(grid, fig, stack, int(time), int(level), extent)
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=100)
+            return buf.getvalue()
+        finally:
+            plt.close(fig)
 
     # -- vertical section along a great circle: see gmpas.native --------------
 
@@ -886,6 +1011,18 @@ class Viewer:
         return {"cell": cell, "value": value,
                 "lon": round(float(self.mesh.lon_cell[cell]), 4),
                 "lat": round(float(self.mesh.lat_cell[cell]), 4)}
+
+    def extreme(self, var, time, level, extent, what="max") -> dict:
+        """The largest (or smallest) value among the cells in `extent`, and
+        the cell that holds it: {value, cell, lon, lat, cells}."""
+        values = np.asarray(self.values(var, time, level), dtype=np.float64)
+        w, e, s, n = (float(v) for v in extent)
+        lon = np.asarray(self.mesh.lon_cell)
+        lat = np.asarray(self.mesh.lat_cell)
+        inside = (lat >= s) & (lat <= n) & np.isfinite(values)
+        if e - w < 360.0:
+            inside &= ((lon - w) % 360.0) <= (e - w)
+        return _extreme(values, inside, lon, lat, what)
 
     def profile_at_point(self, lon, lat, var, time) -> dict:
         """The clicked cell's column: its value on every level, at one step."""
@@ -1241,9 +1378,16 @@ def _serve_series(handler, viewer, q: dict) -> None:
         if hasattr(viewer, "warm_readers"):
             viewer.warm_readers()
         return handler._send(b'{"state":"warming"}', "application/json")
-    if q.get("stop") and hasattr(viewer, "cancel_series"):
-        stopped = viewer.cancel_series(float(q["lon"]), float(q["lat"]),
-                                       q["var"], int(q.get("level", 0)))
+    if q.get("stop"):
+        # A viewer with no reads to cancel, or a field that has no series (an
+        # expression), has nothing running: say so, and start nothing.
+        stopped = False
+        if hasattr(viewer, "cancel_series"):
+            try:
+                stopped = viewer.cancel_series(float(q["lon"]), float(q["lat"]),
+                                               q["var"], int(q.get("level", 0)))
+            except (KeyError, ValueError):
+                stopped = False
         return handler._send(json.dumps({"state": "stopped",
                                          "was_running": stopped}).encode(),
                              "application/json")
@@ -1348,6 +1492,17 @@ def _handler(viewer: Viewer, html: str = ""):
                     meta = {**viewer.describe(),
                             "script": {"keys": _script.keys(),
                                        "startup": _script.startup()}}
+                    # chat is an optional install; with it the right panel
+                    # is the chat box, once a model is named
+                    if _chat.installed():
+                        try:
+                            cfg = _chat.load_config()
+                            log = _chat.log_path(cfg)
+                            meta["chat"] = {"model": cfg["model"],
+                                            "log": str(log) if log else ""} \
+                                if cfg else {"setup": str(_chat.config_path())}
+                        except _chat.ChatError as exc:
+                            meta["chat"] = {"error": str(exc)}
                     return self._send(json.dumps(meta).encode(), "application/json")
                 if url.path == "/api/dims":
                     return _serve_dims(self, viewer, q)
@@ -1472,12 +1627,30 @@ def _handler(viewer: Viewer, html: str = ""):
                                       "application/json")
                 if url.path == "/api/script":
                     try:
-                        state = _script.resolve(_script.parse(q.get("text", "")),
-                                                viewer.describe())
+                        # `shown` is the field on screen: what an overlay
+                        # written alone is drawn over (script.underlay)
+                        text, state = _script.read(q.get("text", ""), viewer.describe(),
+                                                   q.get("shown") or None)
+                        if text != q.get("text", ""):
+                            state = {**state, "text": text}
                     except _script.ScriptError as exc:
                         return self._send(json.dumps({"error": str(exc)}).encode(),
                                           "application/json", 400)
                     return self._send(json.dumps(state).encode(), "application/json")
+                if url.path == "/api/chat":
+                    try:
+                        try:
+                            said = json.loads(q.get("history") or "[]")
+                        except ValueError:
+                            said = []
+                        got = _chat.ask(q.get("text", ""), viewer.describe(),
+                                        q.get("script", ""), history=said)
+                    except _chat.ChatError as exc:
+                        # `kind` tells the model's own words from a fault
+                        return self._send(
+                            json.dumps({"error": str(exc), "kind": exc.kind}).encode(),
+                            "application/json", 400)
+                    return self._send(json.dumps(got).encode(), "application/json")
                 if url.path == "/api/projbox":
                     # a lon/lat region as the box that holds it in a projection
                     from .projection import make_crs, projected_extent
@@ -1496,12 +1669,21 @@ def _handler(viewer: Viewer, html: str = ""):
                     if not math.isfinite(out["value"]):
                         out["value"] = None       # NaN is not JSON: a missing value
                     return self._send(json.dumps(out).encode(), "application/json")
+                if url.path == "/api/extreme":
+                    out = viewer.extreme(
+                        q["var"], int(q.get("time", 0)), int(q.get("level", 0)),
+                        [float(v) for v in q["extent"].split(",")], q.get("what", "max"))
+                    return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/profile" and hasattr(viewer, "profile_at_point"):
                     out = viewer.profile_at_point(float(q["lon"]), float(q["lat"]),
                                                   q["var"], int(q.get("time", 0)))
                     return self._send(json.dumps(out).encode(), "application/json")
                 if url.path == "/api/series" and hasattr(viewer, "series_at_point"):
                     return _serve_series(self, viewer, q)
+            except (BrokenPipeError, ConnectionResetError):
+                # the page stopped waiting -- it asked for a newer frame -- so
+                # there is nobody to send this one, or an error about it, to
+                return None
             except Exception as exc:                      # surface, don't hang
                 body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
                 self.send_response(500)
@@ -1941,7 +2123,20 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #scriptBox{width:100%;box-sizing:border-box;height:150px;font:11px monospace;
            margin-top:6px;resize:vertical;white-space:pre}
 #scriptsec .row{display:flex;gap:6px}
-#scripthint.bad{color:#e88}
+#scripthint.bad,#chathint.bad{color:#e88}
+/* With a model to ask, the right panel is the chat box and what cannot be
+   asked for: animation, export, the probe. The rest is one button away. */
+body.chat #right{width:300px}
+body.chat:not(.allctl) #projsec,body.chat:not(.allctl) #cmapsec,
+body.chat:not(.allctl) #coloursec,body.chat:not(.allctl) #rangesec,
+body.chat:not(.allctl) #extentsec{display:none!important}
+#chatText{width:100%;box-sizing:border-box;resize:vertical;font:12px inherit}
+#chatlog{max-height:260px;overflow-y:auto;margin-bottom:6px}
+#chatlog .q{color:var(--fg);margin:6px 0 2px}
+#chatlog .a{font:11px monospace;white-space:pre-wrap;color:var(--dim);
+            border-left:2px solid var(--line);padding-left:6px}
+#chatlog .a.bad{color:#e88}
+#chatlog .a.said{font:inherit;color:var(--fg)}
 #lyJsonBox{width:100%;box-sizing:border-box;height:180px;font:11px monospace;margin-top:6px}
 #lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
 #hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
@@ -2134,6 +2329,15 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
 </div>
 <div id="right">
   <h1>options</h1>
+
+  <div class="sec" id="chatsec" style="display:none"><label>ask</label>
+    <div id="chatlog"></div>
+    <textarea id="chatText" maxlength="500" rows="2" spellcheck="false"
+      placeholder="wind speed over Africa, in Mercator"></textarea>
+    <div class="row" style="margin-top:6px"><button id="chatGo" style="flex:1">ask</button>
+      <button id="chatAll" title="show or hide the other controls">controls</button></div>
+    <div class="hint" id="chathint"></div>
+  </div>
 
   <div class="sec" id="dimssec" style="display:none"><label>dimensions</label>
     <div class="hint" id="dimswhy"></div>
@@ -2398,7 +2602,7 @@ async function boot(){
   // "loading…" with no explanation
   const first = M.variables.find(v=>!v.static) ?? M.variables[0];
   if(!first){ say("this file has no variables to draw"); return; }
-  scriptBoot();
+  scriptBoot(); chatBoot();
   if(M.script && M.script.startup){      // gmpas view --script
     $("#scriptBox").value=M.script.startup; $("#scriptsec").open=true;
     if(await scriptRun(M.script.startup, first.name)) return;
@@ -2444,32 +2648,137 @@ function scriptBoot(){
   $("#scripthint").title=Object.entries(M.script.keys)
     .map(([k,h])=>`${k}: ${h}`).join("\\n");
 }
+// Asking in words: a model the user runs writes the script, the server checks
+// it as it checks any script, and it lands in the script box -- so what was
+// understood is on the page to read and to correct.
+function chatSay(text, bad){
+  const h=$("#chathint"); h.textContent=text; h.classList.toggle("bad", !!bad);
+}
+const CHAT=[];
+function chatLine(cls, text){
+  const d=document.createElement("div"); d.className=cls; d.textContent=text;
+  $("#chatlog").append(d); $("#chatlog").scrollTop=1e9;
+  return d;
+}
+function chatBoot(){
+  if(!M.chat || !M.script) return;
+  $("#chatsec").style.display="";
+  if(M.chat.error || M.chat.setup){
+    $("#chatGo").disabled=true; $("#chatAll").style.display="none";
+    chatSay(M.chat.error || `no model yet: write ${M.chat.setup} with\\n`+
+      `url = http://127.0.0.1:11434\\nmodel = <a model your Ollama has>`, !!M.chat.error);
+    $("#chathint").style.whiteSpace="pre-wrap";
+    return;
+  }
+  document.body.classList.add("chat");
+  $("#right h1").textContent="ask";
+  chatSay(`answered by ${M.chat.model}, a model you run`+
+          (M.chat.log ? ` \\u00b7 kept in ${M.chat.log}` : ""));
+  relayout();
+}
+async function chatAsk(){
+  const text=$("#chatText").value.trim();
+  if(!text || !cur || $("#chatGo").disabled) return;
+  $("#chatGo").disabled=true; $("#chatText").value="";
+  chatLine("q", text);
+  const a=chatLine("a", `asking ${M.chat.model}\\u2026`);
+  try{
+    const r=await fetch("api/chat?"+new URLSearchParams({text, script:scriptText(),
+      history:JSON.stringify(CHAT.slice(-6))}));
+    const d=await r.json();
+    // what was said is sent with the next request: "no, the other one" and
+    // "still the same" mean nothing without it
+    CHAT.push({request:text, reply:r.ok ? d.script : "# "+d.error});
+    // the model's own words -- it cannot, or it was not asked about the map --
+    // are an answer, not a fault: only a fault is shown as one
+    if(!r.ok){
+      a.textContent=String(d.error); a.classList.add(d.kind==="said" ? "said" : "bad");
+      return; }
+    $("#scriptBox").value=d.script;
+    a.textContent=d.script.trim();
+    const ok=await scriptRun(d.script);
+    if(ok && ANSWER){
+      chatLine("q", ANSWER);
+      CHAT[CHAT.length-1].reply+="# "+ANSWER+"\\n";      // a follow-up may refer to it
+    }
+    if(!ok){
+      a.textContent+="\\n"+$("#scripthint").textContent; a.classList.add("bad"); }
+  }catch(e){ a.textContent="no answer: "+e; a.classList.add("bad"); }
+  finally{ $("#chatGo").disabled=false; $("#chatlog").scrollTop=1e9; }
+}
 function scriptSay(text, bad){
   const h=$("#scripthint"); h.textContent=text; h.classList.toggle("bad", !!bad);
 }
 // A script changes several things at once, and each control would ask for
 // its own frame. Held, they ask for none; one frame is drawn at the end.
-let HOLD=false;
+let HOLD=false, ANSWER="";      // ANSWER: what a script's question found
 function scriptNum(v){ return String(+(+v).toPrecision(10)); }
+// A figure of layers, as the calls that draw it: the Python form of a script
+const LY_VERB={pcolormesh:"pcolormesh", contourf:"contourf", contour:"contour",
+               imshow:"imshow", quiver:"vectors", barbs:"barbs", streamplot:"streamlines",
+               gridvalues:"gridvalues", coastlines:"coastlines", borders:"borders",
+               land:"land", ocean:"ocean", lakes:"lakes", rivers:"rivers",
+               gridlines:"gridlines"};
+function scriptPy(v){
+  if(typeof v==="boolean") return v ? "True" : "False";
+  if(typeof v==="number") return String(v);
+  return JSON.stringify(String(v));
+}
+// The view box in degrees as a script may write it: a frame can reach past a
+// pole on screen, a region cannot.
+function regionOf(v){
+  const b=boxOf(v);
+  return [b[0], b[1], Math.max(-90, b[2]), Math.min(90, b[3])];
+}
+function scriptLayers(){
+  const t=$("#time").value, rows=[`view(region=(${regionOf(view).map(scriptNum).join(", ")}))`];
+  for(const L of LY.layers){
+    const verb=LY_VERB[L.kind];
+    if(!verb || L.visible===false) continue;
+    const lev=(L.level==null || L.level==="follow") ? $("#level").value : L.level;
+    const pick=n=>{ const v=varNamed(n);
+      const what=/^\\w+$/.test(n) ? n : `(${n})`;       // (a - b).isel(...)
+      return `${what}.isel(time=${t}${v && v.levels>1 ? `, level=${lev}` : ""})`; };
+    const args=(L.var ? [pick(L.var)] : L.u ? [pick(L.u), pick(L.v)] : []).concat(
+      Object.entries({...(L.options||{}), mpl:undefined, ...((L.options||{}).mpl||{})})
+        .filter(([,v])=>v!=null && v!=="")
+        .map(([k,v])=>`${k}=${Array.isArray(v) ? "["+v.map(scriptPy).join(", ")+"]"
+                                                : scriptPy(v)}`));
+    rows.push(`${verb}(${args.join(", ")})`);
+  }
+  const fig=Object.entries(LY.figure||{}).filter(([,v])=>v!=null && v!=="")
+    .map(([k,v])=>`${k}=${scriptPy(v)}`);
+  if(fig.length) rows.push(`figure(${fig.join(", ")})`);
+  return rows.join("\\n")+"\\n";
+}
 function scriptText(){
+  if(cur.kinds && $("#kind").value==="layers" && LY && LY.layers.length)
+    return scriptLayers();
   const rows=[["var", cur.name], ["time", $("#time").value],
-              ["level", $("#level").value], ["cmap", $("#cmap").value],
-              ["vmin", $("#vmin").value.trim()], ["vmax", $("#vmax").value.trim()]];
+              ["level", $("#level").value]];
+  if(cur.kinds && $("#kind").value && $("#kind").value!=="map")
+    rows.push(["kind", $("#kind").value]);
+  rows.push(["cmap", $("#cmap").value],
+              ["vmin", $("#vmin").value.trim()], ["vmax", $("#vmax").value.trim()]);
   if(M.projections){
     rows.push(["proj", P ? P.proj : "lonlat"]);
     if(P && P.plon!=null) rows.push(["plon", scriptNum(P.plon)]);
     if(P && P.plat!=null) rows.push(["plat", scriptNum(P.plat)]);
   }
-  rows.push([P ? "box" : "region", boxOf(view).map(scriptNum).join(", ")]);
+  rows.push([P ? "box" : "region",
+             (P ? boxOf(view) : regionOf(view)).map(scriptNum).join(", ")]);
   if(M.colour_options) Object.keys(M.colour_options).forEach(k=>{
     if(COL[k]!=null) rows.push([k, String(COL[k])]); });
   const w=Math.max(...rows.map(r=>r[0].length));
   return rows.map(([k,v])=>`${k.padEnd(w)} = ${v}`.trimEnd()).join("\\n")+"\\n";
 }
 async function scriptRun(text, first){
-  const r=await fetch("api/script?"+new URLSearchParams({text}));
+  const r=await fetch("api/script?"+new URLSearchParams(
+    {text, shown:cur ? cur.name : ""}));
   const s=await r.json();
   if(!r.ok){ scriptSay(String(s.error).replace(/^[A-Za-z]*Error: /, ""), true); return false; }
+  // the script as applied: it may now name the field its overlay lies over
+  if(s.text && $("#scriptBox").value.trim()===text.trim()) $("#scriptBox").value=s.text;
   HOLD=true;
   try{ return await scriptSet(s, first); }
   finally{ HOLD=false; rendered=null; overlay(); draw(); panel(); }
@@ -2485,6 +2794,20 @@ async function scriptSet(s, first){
       $("#llab").textContent=$("#level").value; }
   }
   if(s.time!=null){ $("#time").value=s.time; $("#tlab").textContent=M.labels[s.time]; }
+  if(s.point) probePt={lon:s.point[0], lat:s.point[1]};
+  if(s.kind!=null && cur.kinds){
+    if(!cur.kinds.includes(s.kind)){
+      scriptSay(`kind: ${cur.name} has no ${s.kind} plot`, true); return false; }
+    // the other plots are drawn on the lon/lat map
+    if(s.kind!=="map" && P && !("proj" in s)){
+      $("#proj").value=""; await setProjection(""); }
+    $("#kind").value=s.kind; setMode();
+    if(s.kind==="layers" && s.layers){
+      LY=s.layers; lySel=Math.max(0, LY.layers.length-1); lyRender();
+      try{ localStorage.setItem(lyKey(), JSON.stringify(LY)); }catch(e){}
+    }
+    if(!plotMode()) layout();
+  }
   if("level" in s){
     const lev=s.level==null ? 0 : s.level;
     if(lev>cur.levels-1){ scriptSay(`level: ${lev} is outside ${cur.name}'s `+
@@ -2517,10 +2840,40 @@ async function scriptSet(s, first){
   if(box){ view=fit(box); clamp(); }
   else if("region" in s || "box" in s){ view={...home}; clamp(); }
   if(PT) ptStale("the view changed");
+  // a series or a profile at a point, on a page that reads them in the point
+  // panel: open it there once the map this script asked for is drawn
+  if(s.panel && s.point) setTimeout(()=>ptAt(s.point[0], s.point[1], s.panel), 0);
+  ANSWER="";
+  if(s.ask){
+    // a question: the largest or smallest value in view, and where it is.
+    // The picture stays as it is; in a projection the view box is not
+    // degrees, so the whole of the data is searched and the answer says so.
+    const b=P ? M.home : boxOf(view).map((v,i)=>i<2 ? v : Math.max(-90, Math.min(90, v)));
+    const q=new URLSearchParams({var:s.ask.var, what:s.ask.what, extent:b.join(","),
+      time:s.ask.time!=null ? s.ask.time : $("#time").value,
+      level:s.ask.level!=null ? s.ask.level : Math.min(+$("#level").value,
+        ((varNamed(s.ask.var)||{}).levels||1)-1)});
+    const res=await fetch("api/extreme?"+q), d=await res.json();
+    if(!res.ok){ scriptSay(String(d.error).replace(/^[A-Za-z]*Error: /, ""), true);
+      return false; }
+    ANSWER=`${s.ask.what==="max" ? "largest" : "smallest"} ${s.ask.var} `+
+      `${P ? "in the data" : "in view"}: ${+d.value.toPrecision(6)} at `+
+      `${fmtLat(d.lat)}, ${fmtLon(d.lon)}`;
+    // mark(x.max()): the place is marked too, where the map can be marked
+    if(s.ask.mark) setTimeout(()=>ptAt(d.lon, d.lat, "mark"), 0);
+    scriptSay(ANSWER);
+    return true;
+  }
   scriptSay("applied");
   return true;
 }
 $("#scriptApply").onclick = ()=>scriptRun($("#scriptBox").value);
+$("#chatGo").onclick = chatAsk;
+$("#chatAll").onclick = ()=>{ document.body.classList.toggle("allctl"); };
+$("#chatText").addEventListener("keydown", e=>{
+  e.stopPropagation();                 // typing is not the map's arrow keys
+  if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); chatAsk(); }
+});
 $("#scriptFrom").onclick = ()=>{ if(!cur) return;
   $("#scriptBox").value=scriptText(); scriptSay("this view, as a script"); };
 $("#scriptCopy").onclick = ()=>{
@@ -3532,7 +3885,7 @@ function animRow(key, entry){
   div.className="animrow"+(playingKey===key?" on":"");
   const status=entry.loading ? `${entry.ready}/${entry.total}` : "ready";
   div.innerHTML=
-    `<span class="animrow-name" title="${entry.varName}">${entry.varName}</span>`+
+    `<span class="animrow-name" title="${esc(entry.varName)}">${esc(entry.varName)}</span>`+
     `<span class="animrow-status">${status}</span>`+
     `<button class="animrow-play" title="play">${playingKey===key?"\u23f8":"\u25b6"}</button>`+
     `<button class="animrow-clear" title="clear">\u00d7</button>`;
@@ -4057,8 +4410,8 @@ function ptValue(value, step){
   const at=(step===undefined) ? (+$("#time").value) : step;
   const text=(value===null||value===undefined||!isFinite(value))
     ? "no data" : (+value).toPrecision(6);
-  $("#ptnow").innerHTML=`${cur?cur.label:""}<br><b>${text}</b>`+
-    `<span class="at"> at ${(M.labels[at]||"")}</span>`;
+  $("#ptnow").innerHTML=`${esc(cur?cur.label:"")}<br><b>${text}</b>`+
+    `<span class="at"> at ${esc(M.labels[at]||"")}</span>`;
 }
 // The slider moved: the panel's number belongs to the new step, not the old
 let ptValueTimer=null;
@@ -4347,8 +4700,8 @@ function ptChart(){
     `<line class="ax" x1="${L}" y1="${T}" x2="${L}" y2="${H-B}"/>`+
     `<line class="ax" x1="${L}" y1="${H-B}" x2="${W-R}" y2="${H-B}"/>`+
     ticks.join("")+
-    `<text x="${L}" y="${H-6}">${ends[0].slice(0,16)}</text>`+
-    `<text x="${W-R}" y="${H-6}" text-anchor="end">${ends[1].slice(0,16)}</text>`+
+    `<text x="${L}" y="${H-6}">${esc(ends[0].slice(0,16))}</text>`+
+    `<text x="${W-R}" y="${H-6}" text-anchor="end">${esc(ends[1].slice(0,16))}</text>`+
     (nowX!==null ? `<line class="now" x1="${nowX.toFixed(1)}" y1="${T}" `+
                    `x2="${nowX.toFixed(1)}" y2="${H-B}"/>` : "")+
     `<path class="ln${coarse?" coarse":""}" d="${d.trim()}"/>`+dots+
@@ -4392,13 +4745,13 @@ async function ptRefresh(){
   PT.var=cur.name;
   ptProfOffer();
   if(again && cur.levels>1 && varNamed(cur.name)) ptProfile();
-  $("#ptnow").innerHTML=`${cur.label}<br><b>\u2026</b>`;
+  $("#ptnow").innerHTML=`${esc(cur.label)}<br><b>\u2026</b>`;
   const q=new URLSearchParams({lon:PT.lon, lat:PT.lat, var:cur.name,
                                time:$("#time").value, level:$("#level").value});
   try{
     const r=await fetch("api/probe?"+q);
     if(!r.ok){ $("#pthint").textContent=(await r.json()).error||"probe failed";
-               $("#ptnow").innerHTML=`${cur.label}<br><b>no data</b>`; return; }
+               $("#ptnow").innerHTML=`${esc(cur.label)}<br><b>no data</b>`; return; }
     const d=await r.json();
     if(!PT || cur.name!==PT.var) return;
     PT.cell=d.cell; PT.snapped={lon:+d.lon, lat:+d.lat};
@@ -4406,6 +4759,27 @@ async function ptRefresh(){
                               (d.cell>=0 ? ` \u00b7 cell ${d.cell}` : "");
     ptValue(d.value);
   }catch(e){ $("#pthint").textContent="probe failed: "+e; }
+}
+async function ptAt(lon, lat, what){
+  if(!cur) return;
+  if(plotMode()){
+    scriptSay("a place is marked on the map, and a figure is on screen: "+
+              "go back to the map first", true);
+    return;
+  }
+  // the same place, in the longitudes this file uses (210 for -150, or back)
+  if(!P && M.home){
+    if(lon<M.home[0] && lon+360<=M.home[1]+1e-9) lon+=360;
+    else if(lon>M.home[1] && lon-360>=M.home[0]-1e-9) lon-=360;
+  }
+  lastClickPx=null; probePt={lon, lat};
+  const q=new URLSearchParams({lon, lat, var:cur.name,
+    time:$("#time").value, level:$("#level").value});
+  const res=await fetch("api/probe?"+q), d=await res.json();
+  if(!res.ok || d.value===undefined){
+    scriptSay(String((d && d.error) || "no value there"), true); return; }
+  ptOpen(lon, lat, d);
+  if(what==="profile") ptProfile(); else if(what==="series") ptSeries();
 }
 $("#ptgo").onclick=ptSeries;
 $("#ptprof").onclick=ptProfile;
@@ -4508,7 +4882,10 @@ async function dimsAfter(){
   const first=M.variables.find(v=>!v.static) ?? M.variables[0];
   if(first) pick(first.name);
 }
-const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;");
+// A name, a label or a time label comes from a file or from what was typed:
+// it is text, and is escaped wherever markup is built around it.
+const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+                      .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 
 foldBoot();
 boot();

@@ -50,3 +50,39 @@ gmpas.timing  mesh.tree_build    0.006s  cells=300
 `opened=` is the count that matters on a parallel filesystem: each one is a
 network round trip, and both of those stages grow with the number of files in
 the run directory rather than with the size of the mesh.
+
+## Asking for a view in words
+
+An optional install. With it, the viewer takes a request in a sentence ("wind
+speed over Africa, in Mercator") and has a language model write it as a
+[script](guide.md):
+
+```bash
+pip install "gmpas[chat]"
+```
+
+The model is one you run yourself, on an [Ollama](https://ollama.com) server;
+gmpas ships no model and calls no hosted service. Name it in a file:
+
+```
+# ~/.config/gmpas/chat.conf   (or the file $GMPAS_CHAT_CONFIG names)
+url   = http://127.0.0.1:11434
+model = qwen2.5-coder:7b
+```
+
+- `url` — the Ollama server.
+- `model` — a model that server has.
+- `key` — optional; sent as a bearer token.
+- `timeout` — optional; seconds to wait for an answer, 120 by default.
+- `log` — optional; a file to keep requests in, or `off`.
+
+With a model named, the right panel becomes the chat box. Animation, export
+and the probe stay; the colour, projection and extent controls are behind the
+"controls" button. The model is told the file's variables, times and
+projections, and replies with script lines. Those are checked exactly as a
+script typed by hand is, and shown in the script box; nothing the model writes
+is run as code.
+
+Every request is kept, with each reply and what became of it, as one JSON line
+in `~/.local/share/gmpas/chat.jsonl` (or `$GMPAS_CHAT_LOG`), on this machine
+only.

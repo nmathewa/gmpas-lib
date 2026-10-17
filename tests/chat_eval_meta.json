@@ -1,0 +1,496 @@
+{
+ "mpas": {
+  "file": "history.2020-01-28_00.00.00.nc",
+  "steps": 1,
+  "labels": [
+   "2020-01-28 00:00"
+  ],
+  "home": [
+   -180.0,
+   180.0,
+   -90.0,
+   90.0
+  ],
+  "cmaps": [
+   "viridis",
+   "plasma",
+   "magma",
+   "cividis",
+   "turbo",
+   "RdBu_r",
+   "coolwarm",
+   "BrBG",
+   "Blues",
+   "Spectral_r",
+   "cmo.thermal",
+   "cmo.haline",
+   "cmo.solar",
+   "cmo.ice",
+   "cmo.gray",
+   "cmo.oxy",
+   "cmo.deep",
+   "cmo.dense",
+   "cmo.algae",
+   "cmo.matter",
+   "cmo.turbid",
+   "cmo.speed",
+   "cmo.amp",
+   "cmo.tempo",
+   "cmo.rain",
+   "cmo.phase",
+   "cmo.topo",
+   "cmo.balance",
+   "cmo.delta",
+   "cmo.curl",
+   "cmo.diff",
+   "cmo.tarn",
+   "ferret.default",
+   "ferret.rnb2",
+   "ferret.rainbow",
+   "ferret.light_rainbow",
+   "ferret.medium_rainbow",
+   "ferret.inverse_rainbow",
+   "ferret.light_centered",
+   "ferret.white_centered",
+   "ferret.centered",
+   "ferret.red_blue_centered",
+   "ferret.no_green_centered",
+   "ferret.blue_orange",
+   "ferret.blue_darkred",
+   "ferret.brown_blue",
+   "ferret.bluescale",
+   "ferret.redscale",
+   "ferret.greenscale",
+   "ferret.grayscale",
+   "ferret.land_sea",
+   "ferret.terrestrial",
+   "ferret.dark_terrestrial",
+   "ferret.rain_cmyk",
+   "ferret.warm_cmyk",
+   "ferret.blue_green_yellow",
+   "ferret.light_bottom",
+   "ferret.ten_by_levels",
+   "ferret.fifteen_by_levels",
+   "ferret.rainbow_by_levels",
+   "ferret.categorical_12_step",
+   "grads.rainbow",
+   "grads.default16"
+  ],
+  "projections": [
+   "auto",
+   "Orthographic",
+   "NorthPolarStereo",
+   "SouthPolarStereo",
+   "LambertConformal",
+   "Mercator",
+   "Robinson",
+   "EqualEarth"
+  ],
+  "kind_labels": {
+   "map": "map (native mesh)",
+   "hovmoller": "Hovm\u00f6ller (time \u00d7 lon, area-weighted)",
+   "section": "vertical section along a path",
+   "layers": "layers (composite)"
+  },
+  "layer_expressions": true,
+  "point_panel": true,
+  "colour_options": {
+   "levels": {},
+   "reverse": {},
+   "norm": {},
+   "gamma": {},
+   "linthresh": {},
+   "extend": {},
+   "under_color": {},
+   "over_color": {},
+   "center": {},
+   "missing_color": {},
+   "bands": {}
+  },
+  "layer_schema": true,
+  "variables": [
+   {
+    "name": "h_oml",
+    "label": "ocean mixed layer depth [m]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "hu_oml",
+    "label": "ocean mixed layer integrated u (zonal velocity) [m^2 s^{-1}]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "hv_oml",
+    "label": "ocean mixed layer integrated v (meridional velocity) [m^2 s^{-1}]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "skintemp",
+    "label": "ground or water surface temperature [K]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "snow",
+    "label": "snow water equivalent [kg m^{-2}]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "snowh",
+    "label": "physical snow depth [m]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "sst",
+    "label": "sea-surface temperature [K]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "t_oml",
+    "label": "ocean mixed layer temperature [K]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "vegfra",
+    "label": "vegetation fraction [unitless]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   },
+   {
+    "name": "xice",
+    "label": "fractional area coverage of sea-ice [unitless]",
+    "levels": 1,
+    "kinds": [
+     "map",
+     "hovmoller",
+     "layers"
+    ],
+    "spatial": true
+   }
+  ]
+ },
+ "era5": {
+  "file": "era5_levels.nc",
+  "steps": 4,
+  "labels": [
+   "2012-02-13 00:00",
+   "2012-02-13 01:00",
+   "2012-02-13 02:00",
+   "2012-02-13 03:00"
+  ],
+  "home": [
+   140.0,
+   155.0,
+   -10.0,
+   5.0
+  ],
+  "cmaps": [
+   "viridis",
+   "plasma",
+   "magma",
+   "cividis",
+   "turbo",
+   "RdBu_r",
+   "coolwarm",
+   "BrBG",
+   "Blues",
+   "Spectral_r",
+   "cmo.thermal",
+   "cmo.haline",
+   "cmo.solar",
+   "cmo.ice",
+   "cmo.gray",
+   "cmo.oxy",
+   "cmo.deep",
+   "cmo.dense",
+   "cmo.algae",
+   "cmo.matter",
+   "cmo.turbid",
+   "cmo.speed",
+   "cmo.amp",
+   "cmo.tempo",
+   "cmo.rain",
+   "cmo.phase",
+   "cmo.topo",
+   "cmo.balance",
+   "cmo.delta",
+   "cmo.curl",
+   "cmo.diff",
+   "cmo.tarn",
+   "ferret.default",
+   "ferret.rnb2",
+   "ferret.rainbow",
+   "ferret.light_rainbow",
+   "ferret.medium_rainbow",
+   "ferret.inverse_rainbow",
+   "ferret.light_centered",
+   "ferret.white_centered",
+   "ferret.centered",
+   "ferret.red_blue_centered",
+   "ferret.no_green_centered",
+   "ferret.blue_orange",
+   "ferret.blue_darkred",
+   "ferret.brown_blue",
+   "ferret.bluescale",
+   "ferret.redscale",
+   "ferret.greenscale",
+   "ferret.grayscale",
+   "ferret.land_sea",
+   "ferret.terrestrial",
+   "ferret.dark_terrestrial",
+   "ferret.rain_cmyk",
+   "ferret.warm_cmyk",
+   "ferret.blue_green_yellow",
+   "ferret.light_bottom",
+   "ferret.ten_by_levels",
+   "ferret.fifteen_by_levels",
+   "ferret.rainbow_by_levels",
+   "ferret.categorical_12_step",
+   "grads.rainbow",
+   "grads.default16"
+  ],
+  "projections": [
+   "auto",
+   "Orthographic",
+   "NorthPolarStereo",
+   "SouthPolarStereo",
+   "LambertConformal",
+   "Mercator",
+   "Robinson",
+   "EqualEarth"
+  ],
+  "kind_labels": {
+   "map": "map (fast raster)",
+   "auto": "auto (as xarray)",
+   "pcolormesh": "pcolormesh",
+   "contourf": "filled contour",
+   "contour": "contour",
+   "imshow": "imshow",
+   "line": "line",
+   "step": "step",
+   "hist": "histogram",
+   "series": "line: time series at point",
+   "hovmoller": "Hovm\u00f6ller (time \u00d7 lon)",
+   "profile": "line: profile at point",
+   "section": "vertical section along a path",
+   "layers": "layers (composite)"
+  },
+  "colour_options": {
+   "levels": {},
+   "reverse": {},
+   "norm": {},
+   "gamma": {},
+   "linthresh": {},
+   "extend": {},
+   "under_color": {},
+   "over_color": {},
+   "center": {},
+   "missing_color": {},
+   "bands": {}
+  },
+  "layer_schema": true,
+  "variables": [
+   {
+    "name": "t",
+    "label": "Temperature [K]",
+    "levels": 15,
+    "kinds": [
+     "map",
+     "pcolormesh",
+     "contourf",
+     "contour",
+     "imshow",
+     "hist",
+     "series",
+     "hovmoller",
+     "profile",
+     "section",
+     "layers"
+    ],
+    "spatial": true,
+    "level_values": [
+     1000.0,
+     975.0,
+     950.0,
+     925.0,
+     900.0,
+     850.0,
+     800.0,
+     750.0,
+     700.0,
+     600.0,
+     500.0,
+     400.0,
+     300.0,
+     250.0,
+     200.0
+    ],
+    "level_units": "hPa"
+   },
+   {
+    "name": "u",
+    "label": "U component of wind [m s**-1]",
+    "levels": 15,
+    "kinds": [
+     "map",
+     "pcolormesh",
+     "contourf",
+     "contour",
+     "imshow",
+     "hist",
+     "series",
+     "hovmoller",
+     "profile",
+     "section",
+     "layers"
+    ],
+    "spatial": true,
+    "level_values": [
+     1000.0,
+     975.0,
+     950.0,
+     925.0,
+     900.0,
+     850.0,
+     800.0,
+     750.0,
+     700.0,
+     600.0,
+     500.0,
+     400.0,
+     300.0,
+     250.0,
+     200.0
+    ],
+    "level_units": "hPa"
+   },
+   {
+    "name": "v",
+    "label": "V component of wind [m s**-1]",
+    "levels": 15,
+    "kinds": [
+     "map",
+     "pcolormesh",
+     "contourf",
+     "contour",
+     "imshow",
+     "hist",
+     "series",
+     "hovmoller",
+     "profile",
+     "section",
+     "layers"
+    ],
+    "spatial": true,
+    "level_values": [
+     1000.0,
+     975.0,
+     950.0,
+     925.0,
+     900.0,
+     850.0,
+     800.0,
+     750.0,
+     700.0,
+     600.0,
+     500.0,
+     400.0,
+     300.0,
+     250.0,
+     200.0
+    ],
+    "level_units": "hPa"
+   },
+   {
+    "name": "z",
+    "label": "Geopotential [m**2 s**-2]",
+    "levels": 15,
+    "kinds": [
+     "map",
+     "pcolormesh",
+     "contourf",
+     "contour",
+     "imshow",
+     "hist",
+     "series",
+     "hovmoller",
+     "profile",
+     "section",
+     "layers"
+    ],
+    "spatial": true,
+    "level_values": [
+     1000.0,
+     975.0,
+     950.0,
+     925.0,
+     900.0,
+     850.0,
+     800.0,
+     750.0,
+     700.0,
+     600.0,
+     500.0,
+     400.0,
+     300.0,
+     250.0,
+     200.0
+    ],
+    "level_units": "hPa"
+   }
+  ],
+  "time_statistics": true
+ }
+}

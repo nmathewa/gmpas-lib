@@ -348,6 +348,13 @@ KIND_CAPS = {
 #: a non-map variable is read whole to plot it; past this it is refused
 PLOT_READ_BYTES = 256 * 1024 * 1024
 
+#: the most values (steps x cells) a field reduced over time may read: all
+#: 2,073 steps of a 2-degree grid is 33 million; a year of hourly 0.25-degree
+#: fields is 9 billion, and is refused rather than left to run for minutes
+REDUCE_MAX_VALUES = 2_000_000_000
+#: how many reduced fields are kept (each is one float64 grid)
+REDUCED_KEPT = 8
+
 #: how many steps a point series draws before it has read them all
 SERIES_PREVIEW = 100
 
@@ -541,6 +548,8 @@ class GenericViewer:
         # pixel -> grid cell for projected views: the inverse projection is
         # 60-500 ms a view, the gather that follows a few ms
         self._proj_index: OrderedDict = OrderedDict()
+        #: fields reduced over time, whole grids, by (term, level, steps in the run)
+        self._reduced_fields: OrderedDict = OrderedDict()
         # Hovmöller results and the jobs reading them; see hovmoller_progress
         self._hov_jobs = _jobs.Jobs(name="gmpas-hovmoller")
 
@@ -989,6 +998,18 @@ class GenericViewer:
         return [name for name, da in self.ds.data_vars.items()
                 if self.lat_dim in da.dims and self.lon_dim in da.dims]
 
+    def _level_values(self, dim: str) -> dict:
+        """The level axis's own values, when the file gives it a numeric
+        coordinate: what lets a level be asked for as 850 rather than as 5."""
+        coord = self.ds.variables.get(dim)
+        if coord is None or coord.ndim != 1 or coord.size > 200 \
+                or not np.issubdtype(coord.dtype, np.number):
+            return {}
+        values = [float(v) for v in np.asarray(coord.values, dtype=float)]
+        if not all(np.isfinite(values)):
+            return {}
+        return {"level_values": values, "level_units": str(coord.attrs.get("units", ""))}
+
     def _stack_dims(self, da) -> list[str]:
         """Every axis of `da` that is not lat, lon or time, vertical first.
 
@@ -1011,6 +1032,9 @@ class GenericViewer:
 
     def kinds(self, name: str) -> list[str]:
         """What `plot` can draw for this variable, first entry the default."""
+        if name not in self.ds.variables:        # an expression of map fields
+            _derive.parse(name, self._spatial_vars())
+            return ["map", "layers"]
         da = self.ds[name]
         if self.lat_dim in da.dims and self.lon_dim in da.dims:
             out = ["map", *_GRID_KINDS, "hist"]
@@ -1044,6 +1068,7 @@ class GenericViewer:
                 # the slider drives the first stacking axis, the rest are
                 # held at 0 -- the same contract as viewer.Viewer.describe
                 "levels": int(da.sizes[stack[0]]) if spatial and stack else 1,
+                **(self._level_values(stack[0]) if spatial and stack else {}),
                 "dim": stack[0] if spatial and stack else "",
                 "pinned": stack[1:] if spatial else [],
                 "spatial": spatial,
@@ -1069,11 +1094,54 @@ class GenericViewer:
             "kind_labels": KIND_LABELS,
             "kind_caps": KIND_CAPS,
             "layer_schema": _layers.schema(),
+            # a layer may be an expression of fields: `_cropped` evaluates one
+            "layer_expressions": True,
+            # and a field may be reduced over time (`_reduced`)
+            "time_statistics": True,
             "setup": self.setup(),
             "variables": variables,
         }
 
     # -- map frames ------------------------------------------------------
+
+    def _reduced(self, term: tuple, level: int):
+        """A field reduced over time (`derive.reduced`): the whole grid in the
+        file's own order, float64, with the file's coordinates and no time
+        axis. Read one step at a time, so it costs two grids of memory however
+        many steps it covers; built once for a term and level, and kept."""
+        _, name, how, picks, text = term
+        if self.scanning:
+            raise ValueError("this run's time axis is still being read; ask again "
+                             "in a moment")
+        try:
+            steps = _derive.steps_for(picks, self.labels)
+        except KeyError as exc:
+            raise ValueError(f"{text}: {exc.args[0]}") from None
+        key = (text, int(level), len(self._steps))
+        got = self._reduced_fields.get(key)
+        if got is not None:
+            self._reduced_fields.move_to_end(key)
+            return got
+
+        def one(step):
+            with self._lock:
+                da = self._pick_levels(self._read(name, step), level)
+                return da.transpose(self.lat_dim, self.lon_dim).load()
+
+        first = one(steps[0])
+        if len(steps) * first.size > REDUCE_MAX_VALUES:
+            raise ValueError(f"{text} would read {len(steps):,} steps of "
+                             f"{first.size:,} cells; pick fewer steps")
+        values = _derive.accumulate(how, (
+            np.asarray((first if s == steps[0] else one(s)).values, dtype=np.float64)
+            for s in steps))
+        got = first.drop_vars([c for c in first.coords if c not in first.dims]) \
+                   .astype(np.float64).copy(data=values)
+        got.name = text                      # its units are the field's own
+        self._reduced_fields[key] = got
+        while len(self._reduced_fields) > REDUCED_KEPT:
+            self._reduced_fields.popitem(last=False)
+        return got
 
     def _gather(self, var, step, level, rows, cols) -> np.ndarray:
         """Values at ascending-order (rows x cols) grid indices.
@@ -1082,12 +1150,13 @@ class GenericViewer:
         own order, then gathers -- a zoomed view of a global grid does not
         read the globe.
         """
+        frow = (self.lat.size - 1 - rows) if self._lat_flip else rows
+        fcol = (self.lon.size - 1 - cols) if self._lon_flip else cols
         if var not in self.ds.data_vars:
             plan = _derive.parse(var, self._spatial_vars())
             return _derive.evaluate(
-                plan, step, lambda name, s: self._gather(name, s, level, rows, cols))
-        frow = (self.lat.size - 1 - rows) if self._lat_flip else rows
-        fcol = (self.lon.size - 1 - cols) if self._lon_flip else cols
+                plan, step, lambda name, s: self._gather(name, s, level, rows, cols),
+                lambda term: self._reduced(term, level).values[np.ix_(frow, fcol)])
         r0, r1 = int(frow.min()), int(frow.max()) + 1
         c0, c1 = int(fcol.min()), int(fcol.max()) + 1
         with self._lock:
@@ -1100,12 +1169,14 @@ class GenericViewer:
     def _gather_points(self, var, step, level, rows, cols) -> np.ndarray:
         """Values at paired ascending-order (row, col) indices: `_gather` for
         a projected view, whose pixels are not a lat x lon product."""
+        frow = (self.lat.size - 1 - rows) if self._lat_flip else rows
+        fcol = (self.lon.size - 1 - cols) if self._lon_flip else cols
         if var not in self.ds.data_vars:
             plan = _derive.parse(var, self._spatial_vars())
             return _derive.evaluate(
-                plan, step, lambda name, s: self._gather_points(name, s, level, rows, cols))
-        frow = (self.lat.size - 1 - rows) if self._lat_flip else rows
-        fcol = (self.lon.size - 1 - cols) if self._lon_flip else cols
+                plan, step,
+                lambda name, s: self._gather_points(name, s, level, rows, cols),
+                lambda term: self._reduced(term, level).values[frow, fcol])
         r0, r1 = int(frow.min()), int(frow.max()) + 1
         c0, c1 = int(fcol.min()), int(fcol.max()) + 1
         with self._lock:
@@ -1292,6 +1363,16 @@ class GenericViewer:
                 "lon": round(float(self.lon[j]), 4),
                 "lat": round(float(self.lat[i]), 4),
                 "value": value}
+
+    def extreme(self, var, time, level, extent, what="max") -> dict:
+        """The largest (or smallest) value in `extent`, and where it is."""
+        from .viewer import _extreme
+
+        da = self._cropped(var, time, level, extent).transpose(self.lat_dim, self.lon_dim)
+        values = np.asarray(da.values, dtype=np.float64)
+        lon, lat = np.meshgrid(np.asarray(da[self.lon_name].values, float),
+                               np.asarray(da[self.lat_name].values, float))
+        return _extreme(values, np.isfinite(values), lon, lat, what)
 
     def profile_at_point(self, lon, lat, var, time) -> dict:
         """The clicked grid point's column, in the shape the MPAS viewer answers
@@ -1809,7 +1890,39 @@ class GenericViewer:
 
     def _cropped(self, var: str, time: int, level: int, extent):
         """One step on the map, cut to `extent` in file order, coordinates kept
-        -- so xarray labels the axes and titles the scalar coordinates itself."""
+        -- so xarray labels the axes and titles the scalar coordinates itself.
+
+        An expression of fields is evaluated from its operands' crops in
+        float64, as the fast map evaluates it (`_gather`), so a figure, a
+        question and a click on the map give one number for one cell.
+        """
+        if var in self.ds.data_vars:
+            return self._cropped_field(var, time, level, extent)
+        plan = _derive.parse(var, self._spatial_vars())
+        crops: list = []
+
+        def read(name, step):
+            da = self._cropped_field(name, step, level, extent).transpose(
+                self.lat_dim, self.lon_dim)
+            crops.append(da)
+            return np.asarray(da.values, dtype=np.float64)
+
+        def reduce(term):
+            da = self._cropped_field(term[1], time, level, extent,
+                                     whole=self._reduced(term, level))
+            crops.append(da)
+            return np.asarray(da.values, dtype=np.float64)
+
+        values = _derive.evaluate(plan, time, read, reduce)
+        out = crops[0].copy(data=values)
+        out.name = var
+        if plan[0] != "field":
+            out.attrs = {}                     # the operand's units are not its own
+        return out
+
+    def _cropped_field(self, var: str, time: int, level: int, extent, whole=None):
+        """`_cropped` for a variable of the file, or for `whole`: a field on the
+        file's grid that is already in hand (one reduced over time)."""
         lon_min, lon_max, lat_min, lat_max = extent
         # One cell beyond each edge of the box, so a fill reaches the frame
         # instead of stopping at the last centre inside it -- and so a view
@@ -1828,7 +1941,8 @@ class GenericViewer:
         if not (lat_idx.size and lon_idx.size):
             raise ValueError("the view box holds no grid cells; zoom out or reset the view")
         with self._lock:
-            da = self._pick_levels(self._read(var, time), level)
+            da = whole if whole is not None \
+                else self._pick_levels(self._read(var, time), level)
             da = da.isel({self.lat_dim: slice(int(lat_idx.min()), int(lat_idx.max()) + 1)})
             if lon_idx.size == self._lon_file.size or np.all(np.diff(lon_idx) == 1):
                 span = slice(int(lon_idx.min()), int(lon_idx.max()) + 1)
@@ -2114,7 +2228,15 @@ class GenericViewer:
             return stack
         if stack is None or stack == "":
             stack = _layers.default_stack(var)
-        return _layers.clean(stack, self._spatial_vars(), self._level_counts())
+        names = self._spatial_vars()
+
+        def derived(name: str) -> bool:
+            try:
+                _derive.parse(name, names)
+            except KeyError:
+                return False
+            return True
+        return _layers.clean(stack, names, self._level_counts(), derived)
 
     def _level_counts(self) -> dict[str, int]:
         """Each map variable's level-axis length, for checking pinned levels."""
@@ -2182,7 +2304,15 @@ class GenericViewer:
         from .style import Style
 
         st = Style.preset(style)
-        if var not in self._spatial_vars() and kind == "map":
+        if kind == "map" and var not in self.ds.variables:
+            # An expression of map fields has no figure of its own kind: it is
+            # drawn as the one layer it is, over coastlines.
+            options = {k: v for k, v in (("cmap", cmap), ("vmin", vmin), ("vmax", vmax))
+                       if v not in (None, "")}
+            kind, layers = "layers", {"figure": {}, "layers": [
+                {"kind": "pcolormesh", "var": var, "options": options},
+                {"kind": "coastlines"}, {"kind": "gridlines"}]}
+        elif var not in self._spatial_vars() and kind == "map":
             kind = "auto"
         return self._render(var, time, level, kind, extent, st.figsize, st.dpi,
                             cmap, vmin, vmax, lon, lat, hov, None, layers, colour, sec)
