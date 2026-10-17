@@ -399,6 +399,61 @@ def test_a_level_value_the_file_does_not_have_is_refused(text, says):
         script.resolve(script.parse(text), LEVELS)
 
 
+def _read(text, shown=None):
+    return script.read(text, LEVELS, shown)[1]
+
+
+def test_a_var_line_may_pick_with_sel_and_isel():
+    # the same pick as the call form, written on a `var =` line
+    got = _read("var = t.sel(level=850)")
+    assert (got["var"], got["level"]) == ("t", 1)
+    got = _read("var = t.isel(time=1, level=2)\ncmap = RdBu_r")
+    assert (got["var"], got["time"], got["level"], got["cmap"]) == ("t", 1, 2, "RdBu_r")
+    got = _read('var = u.sel(time="2012-01-01 06:00", level=500)')
+    assert (got["var"], got["time"], got["level"]) == ("u", 1, 2)
+    got = _read("var = t.sel(level=500) - 273.15\ntime = 2")
+    assert (got["var"], got["time"], got["level"]) == ("t - 273.15", 2, 2)
+
+
+def test_a_var_line_reduced_over_time_is_read_as_before():
+    assert script.parse('var = t.sel(month=12).mean("time")') == \
+        {"var": 't.sel(month=12).mean("time")'}
+
+
+@pytest.mark.parametrize("text, says", [
+    ("var = t.sel(level=860)", "level: 860 is not one of t's levels"),
+    ('var = t.sel(time="2012-03-01 12:00")', "no step is labelled"),
+    ("var = t.sel(level=850)\nlevel = 2", "level is already set"),
+    ("var = t2m.sel(level=850)", "t2m lists no level values"),
+])
+def test_a_pick_on_a_var_line_is_refused_where_the_call_form_is(text, says):
+    with pytest.raises(script.ScriptError, match=says):
+        _read(text)
+
+
+def test_a_level_may_be_said_as_a_pressure():
+    assert script.parse("level = 500 hPa") == {"level": {"value": 500.0, "units": "hPa"}}
+    assert _read("var = t\nlevel = 850 hPa")["level"] == 1
+    assert _read("var = u\nlevel = 500 mb")["level"] == 2
+    # with no field named, it is a level of the field on screen
+    assert _read("level = 850 hPa", shown="t")["level"] == 1
+    # a level the file does not list is not matched to a nearby one
+    with pytest.raises(script.ScriptError, match="860 is not one of t's levels"):
+        _read("var = t\nlevel = 860 hPa")
+    with pytest.raises(script.ScriptError, match="lists no level values"):
+        _read("level = 850 hPa")
+    with pytest.raises(script.ScriptError, match="a pressure such as 500 hPa"):
+        script.parse("level = high")
+    # pressure is not a different unit's number
+    metres = {**LEVELS, "variables": [{**LEVELS["variables"][0], "level_units": "m"}]}
+    with pytest.raises(script.ScriptError, match="levels are in m"):
+        script.read("var = t\nlevel = 850 hPa", metres)
+
+
+def test_a_time_label_may_be_quoted_on_a_plain_line():
+    assert _read('time = "2012-01-01 06:00"')["time"] == 1
+
+
 def test_the_plain_map_and_a_reversed_palette_go_by_their_usual_names():
     for name in ("PlateCarree", "lat/lon", "latlon", "lonlat"):
         assert script.resolve(script.parse(f'view(proj="{name}")'), META)["proj"] == ""
