@@ -179,7 +179,8 @@ def test_the_file_names_the_server_and_the_model(tmp_path):
     path.write_text("# my model\nurl = http://127.0.0.1:11434/\n"
                     "model = \"qwen2.5-coder:7b\"\ntimeout = 30\n")
     assert chat.load_config(path) == {"url": "http://127.0.0.1:11434",
-                                      "model": "qwen2.5-coder:7b", "timeout": 30.0}
+                                      "model": "qwen2.5-coder:7b", "timeout": 30.0,
+                                      "agent": True}
 
 
 @pytest.mark.parametrize("text, said", [
@@ -187,6 +188,9 @@ def test_the_file_names_the_server_and_the_model(tmp_path):
     ("model = m\n", "url is not set"),
     ("url = http://x\nmodel = m\nspeed = fast\n", "line 3"),
     ("url = http://x\nmodel = m\ntimeout = soon\n", "timeout"),
+    ("url = http://x\nmodel = m\nagent = maybe\n", "agent is on or off"),
+    ("url = http://x\nmodel = m\nsteps = many\n", "steps is a whole number"),
+    ("url = http://x\nmodel = m\nsteps = 0\n", "steps is a whole number"),
 ])
 def test_a_file_that_cannot_be_used_says_why(tmp_path, text, said):
     path = tmp_path / "chat.conf"
@@ -372,7 +376,8 @@ def test_the_provider_is_named_in_the_file(tmp_path):
     path = tmp_path / "chat.conf"
     path.write_text("provider = Anthropic\nmodel = claude-haiku-5-5\n")
     assert chat.load_config(path) == {"provider": "anthropic", "model": "claude-haiku-5-5",
-                                      "url": "https://api.anthropic.com", "timeout": 120.0}
+                                      "url": "https://api.anthropic.com", "timeout": 120.0,
+                                      "agent": True}
     path.write_text("provider = openai\nmodel = m\n")
     with pytest.raises(chat.ChatError, match="url is not set"):
         chat.load_config(path)
@@ -388,3 +393,272 @@ def test_think_off_asks_ollama_not_to_reason_and_caps_the_reply(model_server):
     body = seen[0][1]
     assert body["think"] is False
     assert body["options"]["num_predict"] == chat.MAX_REPLY_TOKENS
+
+
+# ------------------------------------------------------------------- agent
+
+PROVIDERS = ["ollama", "openai", "anthropic"]
+
+
+def _reply(provider, text="", *calls):
+    """What a server of this provider answers with: `text`, and the tool calls
+    (name, arguments) it asks for."""
+    if provider == "openai":
+        message = {"role": "assistant", "content": text or None}
+        if calls:
+            message["tool_calls"] = [
+                {"id": f"c{i}", "type": "function",
+                 "function": {"name": name, "arguments": args if isinstance(args, str)
+                              else json.dumps(args)}}
+                for i, (name, args) in enumerate(calls)]
+        return {"choices": [{"message": message}]}
+    if provider == "anthropic":
+        return {"content": ([{"type": "text", "text": text}] if text else [])
+                + [{"type": "tool_use", "id": f"tu{i}", "name": name, "input": args}
+                   for i, (name, args) in enumerate(calls)]}
+    message = {"role": "assistant", "content": text}
+    if calls:
+        message["tool_calls"] = [{"function": {"name": name, "arguments": args}}
+                                 for name, args in calls]
+    return {"model": "m", "message": message, "done": True}
+
+
+@pytest.fixture
+def agent_server():
+    """One server for all three wire formats. It answers each request with the
+    next of the replies it was given, and keeps what it was sent."""
+    seen, replies = [], []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append((self.path, body))
+            out = json.dumps(replies.pop(0)).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    yield base, seen, replies
+    srv.shutdown()
+
+
+def _cfg(provider, base, **more):
+    url = base + ("/v1" if provider == "openai" else "")
+    return {"provider": provider, "url": url, "model": "m", "timeout": 5.0,
+            "log": "off", "agent": True, **more}
+
+
+def _tool_results(provider, body):
+    """The tool results the last request carried: [(id or name, text)]."""
+    messages = body["messages"]
+    if provider == "anthropic":
+        return [(b["tool_use_id"], b["content"]) for b in messages[-1]["content"]
+                if b["type"] == "tool_result"]
+    out = []
+    for m in reversed(messages):             # one message to each result
+        if m["role"] != "tool":
+            break
+        out.insert(0, (m.get("tool_call_id") or m.get("tool_name"), m["content"]))
+    return out
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_an_agent_looks_checks_corrects_and_applies(agent_server, provider, tmp_path):
+    base, seen, replies = agent_server
+    replies += [
+        _reply(provider, "", ("describe_file", {})),
+        _reply(provider, "", ("check_script", {"script": "var = sst\n"})),
+        _reply(provider, "", ("check_script", {"script": "var = t2m\ntime = -1\n"})),
+        _reply(provider, "", ("apply", {"script": "var = t2m\ntime = -1\n",
+                                        "message": "the last step"}))]
+    log = tmp_path / "chat.jsonl"
+    got = chat.ask("temperature at the end", META, cfg=_cfg(provider, base, log=str(log)))
+    assert got["state"]["var"] == "t2m" and got["state"]["time"] == 3
+    assert got["script"] == "var = t2m\ntime = -1\n# the last step\n"
+    # four requests, all to the one server, all offering the same three tools
+    assert len(seen) == 4
+    assert {path for path, _ in seen} == {"/v1/chat/completions" if provider == "openai"
+                                          else "/v1/messages" if provider == "anthropic"
+                                          else "/api/chat"}
+    for _, body in seen:
+        names = [t.get("name") or t["function"]["name"] for t in body["tools"]]
+        assert names == ["describe_file", "check_script", "apply"]
+        shaped = body["tools"][0].get("input_schema") is not None
+        assert shaped == (provider == "anthropic")
+    # what each tool said went back in the provider's own shape
+    (_, file_said), = _tool_results(provider, seen[1][1])
+    assert "u: zonal wind [m s-1]; 5 levels" in file_said
+    assert "2012-03-01 18:00" in file_said
+    (key, refused), = _tool_results(provider, seen[2][1])
+    assert refused.startswith("refused:") and "sst" in refused
+    (_, accepted), = _tool_results(provider, seen[3][1])
+    assert accepted.startswith("accepted") and "time = 3 (2012-03-01 18:00)" in accepted
+    if provider == "openai":
+        assert key == "c0"
+        assert seen[1][1]["messages"][-2]["tool_calls"][0]["function"]["arguments"] == "{}"
+    if provider == "anthropic":
+        assert key == "tu0"
+        assert seen[1][1]["messages"][-2]["content"][0]["type"] == "tool_use"
+        assert "tools" in seen[0][1] and "system" in seen[0][1]
+    if provider == "ollama":
+        assert key == "check_script"
+        assert seen[2][1]["messages"][-2]["tool_calls"][0]["function"]["arguments"] \
+            == {"script": "var = sst\n"}
+    # the log has each call and what it said
+    (kept,) = _lines(log)
+    assert [t["tool"] for t in kept["tools"]] == \
+        ["describe_file", "check_script", "check_script", "apply"]
+    assert kept["tools"][1]["args"] == {"script": "var = sst\n"}
+    assert kept["tools"][1]["result"].startswith("refused:")
+    assert kept["agent"] is True and kept["script"] == got["script"]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_a_plain_reply_ends_an_agent_run(agent_server, provider):
+    base, seen, replies = agent_server
+    replies.append(_reply(provider, "Here:\nvar = t2m\n"))
+    got = chat.ask("temperature", META, cfg=_cfg(provider, base))
+    assert got["state"]["var"] == "t2m" and len(seen) == 1 and "tools" in seen[0][1]
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_an_agent_that_runs_out_of_steps_is_asked_the_one_shot_way(
+        agent_server, provider, tmp_path):
+    if provider == "ollama":
+        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
+    base, seen, replies = agent_server
+    replies += [_reply(provider, "", ("describe_file", {}))] * 2 \
+        + [_reply(provider, "var = t2m\n")]
+    log = tmp_path / "chat.jsonl"
+    got = chat.ask("temperature", META, cfg=_cfg(provider, base, steps=2, log=str(log)))
+    assert got["state"]["var"] == "t2m" and len(seen) == 3
+    assert "tools" in seen[0][1] and "tools" in seen[1][1] and not seen[2][1].get("tools")
+    (kept,) = _lines(log)
+    assert kept["exhausted"] is True and len(kept["tools"]) == 2
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_a_fault_in_a_tool_call_is_an_answer_the_model_reads(agent_server, provider):
+    base, seen, replies = agent_server
+    bad = "{not json" if provider == "openai" else {"script": 5}
+    replies += [
+        _reply(provider, "", ("check_script", bad), ("lookup", {})),
+        _reply(provider, "", ("apply", {"message": "no script"})),
+        _reply(provider, "", ("apply", {"script": "var = t2m"}))]
+    got = chat.ask("temperature", META, cfg=_cfg(provider, base))
+    assert got["script"] == "var = t2m\n" and len(seen) == 3
+    said = _tool_results(provider, seen[1][1])
+    texts = " ".join(text for _, text in said)
+    assert "error:" in texts
+    assert len(said) == 2 and "no tool 'lookup'" in texts
+    assert _tool_results(provider, seen[2][1])[0][1].startswith("error:")
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_an_applied_script_is_checked_and_the_retry_is_one_shot(agent_server, provider):
+    if provider == "ollama":
+        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
+    base, seen, replies = agent_server
+    replies += [_reply(provider, "", ("apply", {"script": "var = sst"})),
+                _reply(provider, "var = t2m\n")]
+    got = chat.ask("temperature", META, cfg=_cfg(provider, base))
+    assert got["script"] == "var = t2m\n" and len(seen) == 2
+    assert not seen[1][1].get("tools")
+    last = seen[1][1]["messages"][-1]["content"]
+    assert "was refused" in last and "sst" in last
+    # a second refusal is an error, as ever
+    replies += [_reply(provider, "", ("apply", {"script": "var = sst"})),
+                _reply(provider, "var = rain\n")]
+    with pytest.raises(chat.ChatError, match="refused twice") as err:
+        chat.ask("temperature", META, cfg=_cfg(provider, base))
+    assert err.value.kind == "refused"
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_an_agent_that_says_it_cannot_is_passed_on(agent_server, provider):
+    base, seen, replies = agent_server
+    replies.append(_reply(provider, "", ("apply", {"script": "",
+                                                   "message": "no rainfall here"})))
+    with pytest.raises(chat.ChatError, match="no rainfall here") as err:
+        chat.ask("rainfall", META, cfg=_cfg(provider, base))
+    assert err.value.kind == "said"
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_agent_off_is_the_one_shot_path(agent_server, provider):
+    if provider == "ollama":
+        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
+    base, seen, replies = agent_server
+    replies.append(_reply(provider, "var = t2m\n"))
+    cfg = _cfg(provider, base, agent=False)
+    assert chat.ask("temperature", META, cfg=cfg)["state"]["var"] == "t2m"
+    assert len(seen) == 1 and not seen[0][1].get("tools")
+
+
+def test_a_stand_in_for_the_model_is_never_an_agent(agent_server):
+    base, seen, _ = agent_server
+    got = chat.ask("temperature", META, cfg=_cfg("openai", base), post=_says("var = t2m\n"))
+    assert got["state"]["var"] == "t2m" and not seen
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_an_agent_talks_to_the_configured_url_and_no_other(
+        agent_server, provider, monkeypatch):
+    import urllib.request
+    base, seen, replies = agent_server
+    replies += [_reply(provider, "", ("describe_file", {})),
+                _reply(provider, "", ("apply", {"script": "var = t2m"}))]
+    asked = []
+    real = urllib.request.urlopen
+
+    def urlopen(req, *a, **kw):
+        asked.append(req.full_url)
+        return real(req, *a, **kw)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    chat.ask("temperature", META, cfg=_cfg(provider, base))
+    assert asked and all(u.startswith(base) for u in asked)
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_an_agent_reports_a_server_that_fails(agent_server, provider):
+    base, _, replies = agent_server
+    replies.append({"error": "overloaded"})          # no message in the answer
+    with pytest.raises(chat.ChatError, match="no message") as err:
+        chat.ask("temperature", META, cfg=_cfg(provider, base))
+    assert err.value.kind == "server"
+
+
+def test_the_agent_settings_are_read_from_the_file(tmp_path):
+    path = tmp_path / "chat.conf"
+    path.write_text("url = http://x\nmodel = m\n")
+    assert chat.load_config(path)["agent"] is True and "steps" not in chat.load_config(path)
+    path.write_text("url = http://x\nmodel = m\nagent = OFF\nsteps = 3\n")
+    assert chat.load_config(path)["agent"] is False and chat.load_config(path)["steps"] == 3
+    path.write_text("provider = anthropic\nmodel = m\nagent = yes\n")
+    assert chat.load_config(path)["agent"] is True
+
+
+def test_the_tools_describe_and_check_without_drawing():
+    meta = {**META, "variables": [{"name": "t", "levels": 3, "label": "T",
+                                   "level_values": [1000.0, 850.0, 500.0],
+                                   "level_units": "hPa"}]}
+    said = chat._describe_file(meta)
+    assert "t: T; 3 levels, numbered 0 to 2 = 1000, 850, 500 hPa" in said
+    assert "4 time step(s), numbered 0 to 3: 2012-03-01 00:00" in said
+    assert "longitude 0 to 359" in said and "Mercator" in said and "RdBu_r" in said
+    checked = chat._check_script("var = t.sel(level=850)", meta, None)
+    assert checked.startswith("accepted") and "level = 1 (850 hPa)" in checked
+    assert chat._check_script("```\nvar = t.sel(level=800)\n```", meta, None) \
+        .startswith("refused: level: 800 is not one of t's levels")
+    assert chat._check_script("", meta, None).startswith("refused:")
+    # the view on screen counts, as in a real request
+    assert "outside t's 3 level" in chat._check_script("level = 7", meta, "t")
+    asked = chat._check_script("t2m.max()", META, None)
+    assert "question: where t2m is largest" in asked
