@@ -1,4 +1,4 @@
-"""A view asked for in plain words, written as a script by a local model.
+"""A view asked for in plain words, written as a script by a model.
 
     "wind speed at the third level over the Maritime Continent, in Mercator"
 
@@ -9,12 +9,13 @@ becomes
     proj   = Mercator
     region = 90, 150, -15, 15
 
-The model is the one named in a small file (see `config_path`): an Ollama
-server by default, or any server that speaks the OpenAI chat API (vLLM,
-llama.cpp, LM Studio, a hosted one), or Anthropic's API. gmpas ships no model
-and talks to no server but that one. Chat is an optional install --
-`pip install "gmpas[chat]"` brings the Ollama client -- and without it the
-page is as it always was.
+Chat is an optional install -- `pip install "gmpas[chat]"` -- and without
+it the page is as it always was. With it and no configuration, the answer
+comes from the small model that ships with gmpas (`gmpas.chatmodel`), on
+this machine. A larger model is named in a small file (see `config_path`):
+an Ollama server, any server that speaks the OpenAI chat API (vLLM,
+llama.cpp, LM Studio, a hosted one), or Anthropic's API. gmpas talks to no
+server but that one.
 
 The model is told what the open file holds and which keys a script may set,
 and is asked for script lines and nothing else. Its reply is text, and it is
@@ -28,8 +29,9 @@ The configuration is `key = value` lines, as a script is:
     model = qwen2.5-coder:7b
 
 `provider` is `ollama` (the default), `openai` -- `url` is then the API's base,
-such as http://127.0.0.1:8000/v1 -- or `anthropic`, whose `url` may be left
-out. `key` (sent as the server expects it), `timeout` (seconds) and `log` are
+such as http://127.0.0.1:8000/v1 -- `anthropic`, whose `url` may be left
+out, or `builtin`, the shipped model, which needs no `url` or `model`.
+`key` (sent as the server expects it), `timeout` (seconds) and `log` are
 optional; with no `key`, `$GMPAS_CHAT_KEY` is used. `think = off` asks an
 Ollama model not to reason before it answers, and caps the reply's length: a
 small model can otherwise reason for thousands of tokens over a two-line script.
@@ -38,28 +40,50 @@ Every request is written down, with each reply the model gave and what became
 of it, as one JSON line in `log_path()` -- on this machine only. That file is
 what a smaller model can later be taught from. `log = off` stops it, and
 `log = <file>` moves it.
+
+Agent mode. With `agent = on` (the default, whatever the provider) the model
+may take a few steps before it answers, by calling tools the same three ways
+over: Ollama's `tools` and `tool_calls`, the OpenAI API's `tools` and `tool`
+replies, Anthropic's `tool_use` and `tool_result` blocks. The tools are
+`describe_file` (what the file holds), `check_script` (parse and check a
+script against the file and the view, nothing drawn), and `apply` (the final
+script, with a note for the user if there is one). A plain-text reply ends the
+run too, as in the one-shot path. There is no tool that computes a value:
+"where is it largest" is a question the page answers once the script is
+applied. At most `steps` rounds of tool calls are taken (default 6, each
+request bounded by `timeout`); a model that is still calling tools after that
+is asked once more the one-shot way. The script it ends with goes through the
+same checker and the same single retry as ever, and nothing it says is
+evaluated. `agent = off` keeps the one-shot path exactly, which is also the
+only path for a model that cannot call tools. Every tool call and its result
+is kept in the log.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
 import time
 from pathlib import Path
 
+from . import chatmodel as _builtin
 from . import script as _script
 
 #: The longest request taken, in characters.
 MAX_TEXT = 500
 DEFAULT_TIMEOUT = 120.0
-_KEYS = ("provider", "url", "model", "key", "timeout", "log", "think")
-PROVIDERS = ("ollama", "openai", "anthropic")
+_KEYS = ("provider", "url", "model", "key", "timeout", "log", "think", "agent", "steps")
+PROVIDERS = ("ollama", "openai", "anthropic", "builtin")
 _ANTHROPIC_URL = "https://api.anthropic.com"
 _ANTHROPIC_VERSION = "2023-06-01"
 #: The longest reply asked of a server that needs a limit (Anthropic's).
 MAX_REPLY_TOKENS = 2048
+#: How many rounds of tool calls an agent run may take.
+DEFAULT_STEPS = 6
+MAX_STEPS = 20
+_ON = ("on", "yes", "true", "1")
+_OFF = ("off", "no", "false", "0")
 
 
 _CALLS = re.compile(r"[A-Za-z_(][\w.() +*/-]*\(")
@@ -79,8 +103,24 @@ class ChatError(ValueError):
 
 
 def installed() -> bool:
-    """Whether the chat extra is installed: `pip install "gmpas[chat]"`."""
-    return importlib.util.find_spec("ollama") is not None
+    """Whether chat can answer here: the built-in model's runtime is installed
+    (`pip install "gmpas[chat]"`), or a configuration names a server, which
+    needs nothing installed."""
+    if _builtin.available():
+        return True
+    try:
+        cfg = load_config()
+    except ChatError:
+        return True                  # shown, so that what is wrong is said
+    # a file naming the built-in model shows the panel too, to say it is not
+    # installed; with no file and no extra, the page is as it always was
+    return cfg is not None
+
+
+def builtin_config() -> dict:
+    """What is used when no file names a model: the shipped one."""
+    return {"provider": "builtin", "model": _builtin.NAME, "url": "",
+            "timeout": DEFAULT_TIMEOUT, "agent": False}
 
 
 def log_path(cfg: dict | None = None) -> Path | None:
@@ -146,7 +186,10 @@ def load_config(path=None) -> dict | None:
         out["provider"] = provider
     if provider == "anthropic" and not out.get("url"):
         out["url"] = _ANTHROPIC_URL
-    for name in ("url", "model"):
+    if provider == "builtin":
+        # it calls no tools; a url or model written beside it means nothing
+        out.update(provider="builtin", model=_builtin.NAME, url="", agent="off")
+    for name in ("url", "model") if provider != "builtin" else ():
         if not out.get(name):
             raise ChatError(f"{path}: {name} is not set")
     try:
@@ -154,6 +197,17 @@ def load_config(path=None) -> dict | None:
     except ValueError:
         raise ChatError(f"{path}: timeout takes a number of seconds") from None
     out["url"] = out["url"].rstrip("/")
+    named = out.get("agent", "on").lower()
+    if named not in _ON + _OFF:
+        raise ChatError(f"{path}: agent is on or off")
+    out["agent"] = named in _ON
+    if "steps" in out:
+        try:
+            out["steps"] = int(out["steps"])
+        except ValueError:
+            out["steps"] = 0
+        if not 1 <= out["steps"] <= MAX_STEPS:
+            raise ChatError(f"{path}: steps is a whole number from 1 to {MAX_STEPS}")
     return out
 
 
@@ -314,38 +368,33 @@ def _key(cfg: dict) -> str:
 def _post(cfg: dict, messages: list[dict]) -> str:
     """One round with the model: the reply's text."""
     provider = cfg.get("provider", "ollama")
+    if provider == "builtin":
+        try:
+            return _builtin.generate(messages[-1]["content"]).replace(" ; ", "\n") + "\n"
+        except _builtin.ModelError as exc:
+            raise ChatError(str(exc), "server") from None
     if provider == "openai":
         return _post_openai(cfg, messages)
     if provider == "anthropic":
         return _post_anthropic(cfg, messages)
-    try:
-        import ollama
-    except ImportError:
-        raise ChatError('chat is not installed: pip install "gmpas[chat]"') from None
     key = _key(cfg)
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    options = {"temperature": 0}
+    extra = {}
+    think = cfg.get("think", "").lower()
+    if think in _OFF:
+        extra["think"] = False
+        options["num_predict"] = MAX_REPLY_TOKENS
+    elif think:
+        extra["think"] = True if think in _ON else think
+    got = _post_json(cfg, cfg["url"] + "/api/chat",
+                     {"Authorization": f"Bearer {key}"} if key else {},
+                     {"model": cfg["model"], "messages": messages, "stream": False,
+                      "options": options, **extra})
     try:
-        client = ollama.Client(host=cfg["url"], headers=headers, timeout=cfg["timeout"])
-        options = {"temperature": 0}
-        extra = {}
-        think = cfg.get("think", "").lower()
-        if think in ("off", "no", "false", "0"):
-            extra["think"] = False
-            options["num_predict"] = MAX_REPLY_TOKENS
-        elif think:
-            extra["think"] = True if think in ("on", "yes", "true", "1") else think
-        got = client.chat(model=cfg["model"], messages=messages, stream=False,
-                          options=options, **extra)
         return got["message"]["content"] or ""
-    except ollama.ResponseError as exc:
-        raise ChatError(f"the model server answered {exc.status_code}: "
-                        f"{exc.error}", "server") from None
     except (KeyError, TypeError):
         raise ChatError("the model server's answer had no message in it",
                         "server") from None
-    except Exception as exc:                 # no route, refused, timed out
-        raise ChatError(f"no answer from the model server at {cfg['url']}: "
-                        f"{exc}", "server") from None
 
 
 def _post_json(cfg: dict, url: str, headers: dict, body: dict) -> dict:
@@ -369,8 +418,13 @@ def _post_json(cfg: dict, url: str, headers: dict, body: dict) -> dict:
     except ValueError:
         raise ChatError("the model server's answer was not JSON", "server") from None
     except Exception as exc:                 # no route, refused, timed out
-        raise ChatError(f"no answer from the model server at {cfg['url']}: "
-                        f"{exc}", "server") from None
+        raise ChatError(f"no answer from the model server at {_shown_url(cfg['url'])}: "
+                        f"{_shown_url(str(exc))}", "server") from None
+
+
+def _shown_url(text: str) -> str:
+    """`text` with any user:password@ taken out of the addresses in it."""
+    return re.sub(r"(\w+://)[^/@\s]*@", r"\1", text)
 
 
 def _post_openai(cfg: dict, messages: list[dict]) -> str:
@@ -401,6 +455,299 @@ def _post_anthropic(cfg: dict, messages: list[dict]) -> str:
         raise ChatError("the model server's answer had no message in it",
                         "server") from None
 
+
+# ------------------------------------------------------------------- agent
+
+#: What the model may call, in JSON Schema; every provider is given the same.
+TOOLS = [
+    {"name": "describe_file",
+     "description": "What the open file holds: its fields with their levels and "
+                    "level values, its time steps and their labels, the area it "
+                    "covers, the projections and palettes on offer.",
+     "parameters": {"type": "object", "properties": {}}},
+    {"name": "check_script",
+     "description": "Check a script against the file and the view on screen "
+                    "without drawing anything. Returns what the script would "
+                    "set, or why it is refused.",
+     "parameters": {"type": "object", "required": ["script"], "properties": {
+         "script": {"type": "string", "description": "the script lines"}}}},
+    {"name": "apply",
+     "description": "Give the final script, which ends the run. It is checked "
+                    "once more and then applied to the page.",
+     "parameters": {"type": "object", "required": ["script"], "properties": {
+         "script": {"type": "string", "description": "the script lines"},
+         "message": {"type": "string",
+                     "description": "a line for the user, if there is one to say"}}}},
+]
+
+_AGENT_PROMPT = (
+    "\n\nYou may call tools before you answer. describe_file lists what the file "
+    "holds; check_script says whether a script is accepted and what it would "
+    "set, without drawing it. Check a script you are not sure of, and correct it "
+    "if it is refused. Finish by calling apply with the final script (and a "
+    "message if something could not be done), or by replying with the script "
+    "lines as text. Nothing is drawn until you finish.\n")
+
+
+def _args(value) -> dict:
+    """A tool call's arguments as a dict; some servers send them as JSON text."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "{}")
+        except ValueError:
+            raise ValueError("the arguments were not JSON") from None
+    if not isinstance(value, dict):
+        raise ValueError("the arguments were not an object")
+    return value
+
+
+def _describe_file(meta: dict) -> str:
+    """The file `meta` describes, in words: what describe_file answers."""
+    out = ["Fields:"]
+    for v in meta.get("variables", []):
+        line = f"  {v['name']}: {v.get('label') or v['name']}"
+        if v.get("levels", 1) > 1:
+            line += f"; {v['levels']} levels, numbered 0 to {v['levels'] - 1}"
+            if v.get("level_values"):
+                line += " = " + ", ".join(f"{x:g}" for x in v["level_values"]) \
+                    + f" {v.get('level_units') or ''}".rstrip()
+        if v.get("kinds"):
+            line += f"; plots: {', '.join(v['kinds'])}"
+        out.append(line)
+    labels = meta.get("labels") or []
+    steps = meta.get("steps", len(labels))
+    times = f"{steps} time step(s), numbered 0 to {max(steps - 1, 0)}"
+    if labels and len(labels) <= 40:
+        times += ": " + ", ".join(labels)
+    elif labels:
+        times += f"; the first are {', '.join(labels[:3])} and the last " \
+                 f"{', '.join(labels[-3:])}"
+    out.append(times)
+    home = meta.get("home")
+    if home:
+        out.append(f"Area: longitude {home[0]:g} to {home[1]:g}, "
+                   f"latitude {home[2]:g} to {home[3]:g}")
+    projections = [p for p in meta.get("projections") or [] if p != "auto"]
+    out.append(f"Projections: {', '.join(projections) or 'none'}")
+    out.append(f"Palettes: {', '.join(meta.get('cmaps') or [])}")
+    return "\n".join(out)
+
+
+def _summary(state: dict, meta: dict) -> str:
+    """What a checked script would set, one thing to a line."""
+    fields = {v["name"]: v for v in meta.get("variables", [])}
+    labels = meta.get("labels") or []
+    out = []
+    for key in ("var", "time", "level", "kind", "proj", "region", "cmap", "vmin", "vmax"):
+        value = state.get(key)
+        if value is None:
+            continue
+        note = ""
+        if key == "time" and 0 <= value < len(labels):
+            note = f" ({labels[value]})"
+        owner = fields.get(state.get("var")) or {}
+        values = owner.get("level_values") or []
+        if key == "level" and 0 <= value < len(values):
+            units = owner.get("level_units") or ""
+            note = f" ({values[value]:g} {units})".replace(" )", ")")
+        out.append(f"{key} = {value or 'lonlat' if key == 'proj' else value}{note}")
+    ask = state.get("ask")
+    if ask:
+        big = "largest" if ask["what"] == "max" else "smallest"
+        out.append(f"question: where {ask['var']} is {big} "
+                   f"(the page answers it; nothing is drawn)")
+    layers = (state.get("layers") or {}).get("layers")
+    if layers:
+        out.append("layers: " + ", ".join(str(x.get("kind")) for x in layers))
+    return "\n".join(out) or "nothing is changed"
+
+
+def _check_script(text, meta: dict, shown) -> str:
+    """check_script: the script read the way the page reads it."""
+    if not isinstance(text, str):
+        raise ValueError("script is the script's text")
+    written = script_of(text)
+    if not written.strip():
+        return "refused: there is no script line in that"
+    try:
+        written, state = _script.read(written, meta, shown)
+        _fits(state, shown, meta)
+    except _script.ScriptError as exc:
+        return f"refused: {exc}"
+    return "accepted. It would set:\n" + _summary(state, meta)
+
+
+def _run_tool(call: dict, meta: dict, shown) -> str:
+    """What a tool answers. A fault in the call is an answer too -- the model
+    reads it and tries again -- never an exception."""
+    try:
+        args = _args(call["args"])
+        if call["name"] == "describe_file":
+            return _describe_file(meta)
+        if call["name"] == "check_script":
+            return _check_script(args.get("script"), meta, shown)
+    except ValueError as exc:
+        return f"error: {exc}"
+    return f"error: there is no tool {call['name']!r}; the tools are " \
+           f"{', '.join(t['name'] for t in TOOLS)}"
+
+
+def _tool_list(provider: str) -> list[dict]:
+    if provider == "anthropic":
+        return [{"name": t["name"], "description": t["description"],
+                 "input_schema": t["parameters"]} for t in TOOLS]
+    return [{"type": "function", "function": t} for t in TOOLS]
+
+
+def _as_wire(provider: str, messages: list[dict]) -> list[dict]:
+    """The turns so far -- {"role", "content"}, an assistant's "calls" and a
+    tool's "id" and "name" -- in the shape one provider's API takes."""
+    out: list[dict] = []
+    for m in messages:
+        if m["role"] == "assistant" and m.get("calls"):
+            calls = m["calls"]
+            if provider == "anthropic":
+                blocks = [{"type": "text", "text": m["content"]}] if m["content"] else []
+                blocks += [{"type": "tool_use", "id": c["id"], "name": c["name"],
+                            "input": c["args"]} for c in calls]
+                out.append({"role": "assistant", "content": blocks})
+            elif provider == "openai":
+                out.append({"role": "assistant", "content": m["content"] or None,
+                            "tool_calls": [
+                                {"id": c["id"], "type": "function",
+                                 "function": {"name": c["name"],
+                                              "arguments": json.dumps(c["args"])}}
+                                for c in calls]})
+            else:
+                out.append({"role": "assistant", "content": m["content"],
+                            "tool_calls": [{"function": {"name": c["name"],
+                                                         "arguments": c["args"]}}
+                                           for c in calls]})
+        elif m["role"] == "tool":
+            if provider == "anthropic":
+                block = {"type": "tool_result", "tool_use_id": m["id"],
+                         "content": m["content"]}
+                last = out[-1]["content"] if out and out[-1]["role"] == "user" else None
+                if isinstance(last, list):
+                    last.append(block)                   # results go in one turn
+                else:
+                    out.append({"role": "user", "content": [block]})
+            elif provider == "openai":
+                out.append({"role": "tool", "tool_call_id": m["id"],
+                            "content": m["content"]})
+            else:
+                out.append({"role": "tool", "tool_name": m["name"],
+                            "content": m["content"]})
+        else:
+            out.append({"role": m["role"], "content": m["content"]})
+    return out
+
+
+def _talk(cfg: dict, messages: list[dict]) -> dict:
+    """One round with the model, tools on offer: {"text": ..., "calls":
+    [{"id", "name", "args"}]}. Arguments that were not JSON come back as the
+    text, for `_run_tool` to refuse."""
+    provider, key = cfg.get("provider", "ollama"), _key(cfg)
+    wire = _as_wire(provider, messages)
+    if provider == "anthropic":
+        system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+        got = _post_json(cfg, cfg["url"] + "/v1/messages",
+                         {"x-api-key": key, "anthropic-version": _ANTHROPIC_VERSION},
+                         {"model": cfg["model"], "system": system,
+                          "messages": [m for m in wire if m["role"] != "system"],
+                          "tools": _tool_list(provider), "max_tokens": MAX_REPLY_TOKENS,
+                          "temperature": 0})
+        try:
+            blocks = got["content"]
+            return {"text": "".join(b.get("text", "") for b in blocks
+                                    if b.get("type") == "text"),
+                    "calls": [{"id": b["id"], "name": b["name"], "args": b.get("input", {})}
+                              for b in blocks if b.get("type") == "tool_use"]}
+        except (KeyError, TypeError, AttributeError):
+            raise ChatError("the model server's answer had no message in it",
+                            "server") from None
+    auth = {"Authorization": f"Bearer {key}"} if key else {}
+    if provider == "openai":
+        got = _post_json(cfg, cfg["url"] + "/chat/completions", auth,
+                         {"model": cfg["model"], "messages": wire,
+                          "tools": _tool_list(provider), "temperature": 0, "stream": False})
+        try:
+            message = got["choices"][0]["message"]
+            calls = [{"id": c.get("id") or f"call_{i}", "name": c["function"]["name"],
+                      "args": c["function"].get("arguments") or {}}
+                     for i, c in enumerate(message.get("tool_calls") or [])]
+        except (KeyError, IndexError, TypeError, AttributeError):
+            raise ChatError("the model server's answer had no message in it",
+                            "server") from None
+    else:
+        options, extra = {"temperature": 0}, {}
+        think = cfg.get("think", "").lower()
+        if think in _OFF:
+            extra["think"] = False
+            options["num_predict"] = MAX_REPLY_TOKENS
+        elif think:
+            extra["think"] = True if think in _ON else think
+        got = _post_json(cfg, cfg["url"] + "/api/chat", auth,
+                         {"model": cfg["model"], "messages": wire,
+                          "tools": _tool_list(provider), "stream": False,
+                          "options": options, **extra})
+        try:
+            message = got["message"]
+            calls = [{"id": f"call_{i}", "name": c["function"]["name"],
+                      "args": c["function"].get("arguments") or {}}
+                     for i, c in enumerate(message.get("tool_calls") or [])]
+        except (KeyError, TypeError, AttributeError):
+            raise ChatError("the model server's answer had no message in it",
+                            "server") from None
+    return {"text": message.get("content") or "", "calls": calls}
+
+
+def _given(args) -> str:
+    """The final script from apply's arguments, with its message as a `# ` line.
+    Raises ValueError for arguments that are not a script."""
+    args = _args(args)
+    text, note = args.get("script"), args.get("message")
+    if not isinstance(text, str) or not isinstance(note, (str, type(None))):
+        raise ValueError("apply takes script and message as text")
+    return text.rstrip() + ("\n# " + " ".join(note.split()) if note else "")
+
+
+def _agent(cfg: dict, messages: list[dict], meta: dict, record: dict, shown,
+           talk=_talk) -> str | None:
+    """Let the model call tools until it ends the run: its final reply, as
+    text, or None when it was still calling tools after `steps` rounds."""
+    work = [dict(m) for m in messages]
+    work[0]["content"] += _AGENT_PROMPT
+    log = record["tools"] = []
+    for turn in range(1, cfg.get("steps", DEFAULT_STEPS) + 1):
+        got = talk(cfg, work)
+        if not got["calls"]:
+            return got["text"]
+        for call in got["calls"]:
+            try:
+                call["args"] = _args(call["args"])
+            except ValueError:
+                pass                          # left as sent; the tool refuses it
+        # what is sent back as the model's own turn has its arguments as an object
+        work.append({"role": "assistant", "content": got["text"], "calls": [
+            {**c, "args": c["args"] if isinstance(c["args"], dict) else {}}
+            for c in got["calls"]]})
+        for call in got["calls"]:
+            if call["name"] == "apply":
+                try:
+                    reply = _given(call["args"])
+                except ValueError as exc:
+                    result = f"error: {exc}"
+                else:
+                    log.append({"turn": turn, "tool": "apply", "args": call["args"]})
+                    return reply
+            else:
+                result = _run_tool(call, meta, shown)
+            log.append({"turn": turn, "tool": call["name"], "args": call["args"],
+                        "result": result})
+            work.append({"role": "tool", "id": call["id"], "name": call["name"],
+                         "content": result})
+    return None
 
 def script_of(reply: str) -> str:
     """The script in a model's reply: what is inside a code fence if it used
@@ -442,13 +789,12 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
     if len(text) > MAX_TEXT:
         raise ChatError(f"a request is at most {MAX_TEXT} characters")
     if cfg is None:
-        cfg = load_config()
-    if cfg is None:
-        raise ChatError(f"no model is configured; write {config_path()}")
+        cfg = load_config() or builtin_config()
     asked = text if not current.strip() else \
         f"The view now:\n{current.strip()}\n\nRequest: {text}"
     messages = [{"role": "system", "content": system_prompt(meta)}]
-    said = [h for h in (history or []) if isinstance(h, dict)
+    said = [h for h in (history if isinstance(history, list) else [])
+            if isinstance(h, dict)
             and isinstance(h.get("request"), str) and isinstance(h.get("reply"), str)]
     for turn in said[-MAX_HISTORY:]:
         messages += [{"role": "user", "content": turn["request"][:MAX_TEXT]},
@@ -459,8 +805,37 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
               "file": meta.get("file"), "request": text, "view": current.strip(),
               "system": messages[0]["content"],
               "history": said[-MAX_HISTORY:], "rounds": []}
+    shown = _shown(current, meta)
     try:
-        return _rounds(cfg, messages, meta, post, record, _shown(current, meta))
+        if cfg.get("provider") == "builtin":
+            # it reads one block in the layout it was taught, not the prompt;
+            # it would give a refused script again, so it has one round
+            before = (said[-1]["request"], said[-1]["reply"].strip()) if said else None
+            try:
+                src = _builtin.prompt(meta, current, text, before)
+            except _builtin.ModelError as exc:
+                raise ChatError(str(exc), "server") from None
+            record["system"], record["input"] = "", src
+            return _rounds(cfg, [{"role": "user", "content": src}], meta, post,
+                           record, shown, tries=1)
+        if cfg.get("agent") and post is _post:
+            record["agent"] = True
+            try:
+                reply = _agent(cfg, messages, meta, record, shown)
+            except ChatError as exc:
+                # a model that takes no tools is asked the one-shot way
+                if exc.kind != "server" or "tool" not in str(exc).lower():
+                    raise
+                record["no_tools"], reply = str(exc), None
+            if reply is not None:
+                # the run's last word is the first reply; a retry is one-shot
+                first = [reply]
+                return _rounds(cfg, messages, meta,
+                               lambda c, m: first.pop(0) if first else _post(c, m),
+                               record, shown)
+            if "no_tools" not in record:
+                record["exhausted"] = True   # out of steps: ask the one-shot way
+        return _rounds(cfg, messages, meta, post, record, shown)
     except ChatError as exc:
         record["error"], record["outcome"] = str(exc), exc.kind
         raise
@@ -490,9 +865,9 @@ def _fits(state: dict, shown, meta: dict) -> None:
             f"a level by its value is {shown}.sel(level={lev})")
 
 
-def _rounds(cfg, messages, meta, post, record, shown=None) -> dict:
+def _rounds(cfg, messages, meta, post, record, shown=None, tries=2) -> dict:
     problem = ""
-    for _ in range(2):
+    for _ in range(tries):
         reply = post(cfg, messages)
         turn = {"reply": reply}
         record["rounds"].append(turn)
@@ -515,4 +890,5 @@ def _rounds(cfg, messages, meta, post, record, shown=None) -> dict:
             continue
         record["script"] = written
         return {"script": written, "state": state}
-    raise ChatError(f"the model's script was refused twice: {problem}", "refused")
+    raise ChatError(f"the model's script was refused"
+                    f"{' twice' if tries > 1 else ''}: {problem}", "refused")

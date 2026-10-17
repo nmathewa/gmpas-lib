@@ -30,7 +30,7 @@ import numpy as np
 
 from ..cache import BuildCache
 from ..mesh import MpasMesh
-from ..viewer import (PageHandler, ViewIndex, _overlay, _png, bind,
+from ..viewer import (PageHandler, _px, ViewIndex, _overlay, _png, bind,
                       ramp, reach_lines)
 from .layout import page
 
@@ -174,8 +174,8 @@ def _handler(viewer: MeshViewer, html: str):
                     extent = [float(v) for v in q["extent"].split(",")]
                     png, lo, hi = viewer.frame(
                         q.get("field", "cell_width_km"), extent,
-                        int(q["nx"]) if q.get("nx") else None,
-                        int(q["ny"]) if q.get("ny") else None,
+                        _px(q, "nx"),
+                        _px(q, "ny"),
                         int(q.get("compress", 1)),
                     )
                     self.send_response(200)
@@ -188,8 +188,8 @@ def _handler(viewer: MeshViewer, html: str):
                     extent = [float(v) for v in q["extent"].split(",")]
                     return self._send(viewer.overlay(
                         extent,
-                        int(q["nx"]) if q.get("nx") else None,
-                        int(q["ny"]) if q.get("ny") else None), "image/png")
+                        _px(q, "nx"),
+                        _px(q, "ny")), "image/png")
             except Exception as exc:                      # surface, don't hang
                 body = json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode()
                 self.send_response(500)

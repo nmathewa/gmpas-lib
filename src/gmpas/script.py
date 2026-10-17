@@ -134,6 +134,13 @@ def _four(key: str, text: str) -> list[float]:
     return [a, b, c, d]
 
 
+#: A level said as a pressure: the value and nothing else is taken from it.
+_PRESSURE = re.compile(r"^(\d+(?:\.\d+)?)\s*(?:hpa|mb|mbar|millibars?|hectopascals?)$",
+                       re.I)
+_PRESSURE_UNITS = ("hpa", "mb", "mbar", "millibar", "millibars", "hectopascal",
+                   "hectopascals")
+
+
 def _value(key: str, text: str):
     if key in ("vmin", "vmax", "plon", "plat"):
         return _number(key, text)
@@ -141,12 +148,18 @@ def _value(key: str, text: str):
         try:
             return int(text)
         except ValueError:
-            raise ValueError(f"level takes a whole number, not {text!r}") from None
+            pass
+        hit = _PRESSURE.match(text)
+        if hit:                              # 500 hPa: the level's own value
+            return {"value": float(hit[1]), "units": "hPa"}
+        raise ValueError(f"level takes a whole number, or a pressure such as "
+                         f"500 hPa, not {text!r}")
     if key == "time":
         try:
             return int(text)
         except ValueError:
-            return text                      # a label, matched in `resolve`
+            quoted = _QUOTED.match(text)
+            return quoted[2] if quoted else text   # a label, matched in `resolve`
     if key == "region":
         w, e, s, n = _four(key, text)
         if s < -90 or n > 90:
@@ -177,7 +190,7 @@ def parse(text: str, shown: str | None = None) -> dict:
     lines = text.splitlines()
     if len(lines) > MAX_LINES:
         raise ScriptError(f"a script has at most {MAX_LINES} lines")
-    if _CALL_LINE.search(text):
+    if _CALL_LINE.search(text) or _PICK_LINE.search(text):
         return _parse_python(text, shown)
     try:
         return _parse_lines(lines)
@@ -249,6 +262,10 @@ def _finish(out: dict, colour: dict, where: dict[str, int]) -> dict:
 
 #: A line that calls something, which only the Python form has.
 _CALL_LINE = re.compile(r"^[ \t]*(?:[A-Za-z_][\w.]*[ \t]*)?\(", re.M)
+#: `var = t.sel(level=850)`: a field picked with xarray's .sel() or .isel(), which
+#: only the Python form reads. A field reduced over time is read as it always was.
+_PICK_LINE = re.compile(r"^[ \t]*var[ \t]*=(?![^\n]*\.(?:mean|max|min)\()"
+                        r"[^\n]*\.i?sel\(", re.M | re.I)
 #: What draws one field, and the plot kind it is.
 _FIELD = {"shade": "map", "contourf": "contourf", "contour": "contour",
           "pcolormesh": "pcolormesh", "imshow": "imshow", "hist": "hist",
@@ -379,6 +396,8 @@ class _Fields:
         self.used: set[str] = set()
         #: the field on screen: what `var` means where no `var = ...` line says
         self.shown = shown
+        #: what the fields of the expression being read are: "bare", "picked"
+        self._mix: set = set()
 
     def read(self, node) -> tuple[str, dict]:
         """`node` as (the expression the derive box takes, {time, level})."""
@@ -412,7 +431,19 @@ class _Fields:
         if isinstance(node, ast.Name) and node.id == "var" and self.shown:
             return self.shown, {}
         picked: dict = {}
-        return ast.unparse(self._plain(node, picked)), picked
+        # `t - t.sel(level=850)` would be t at level 850 on both sides, zero:
+        # a field picked inside an expression must not meet one that is not
+        saved = getattr(self, "_mix", None)
+        self._mix = set()
+        try:
+            text = ast.unparse(self._plain(node, picked))
+            if self._mix == {"bare", "picked"}:
+                _fail(node, "a field picked with .sel() or .isel() inside an "
+                            "expression is mixed with one that is not; pick "
+                            "the whole expression: (a - b).sel(level=850)")
+        finally:
+            self._mix = saved
+        return text, picked
 
     def _over_time(self, node) -> str:
         """A field reduced over time -- `sst.sel(month=12).mean("time")` -- in
@@ -463,6 +494,7 @@ class _Fields:
         field: the picks belong to the whole expression, so they must agree.
         """
         def gather(inner, found: dict):
+            self._mix.add("picked" if found else "bare")
             for key, value in found.items():
                 if picked.setdefault(key, value) != value:
                     _fail(node, f"the fields of one expression are picked at one "
@@ -475,6 +507,7 @@ class _Fields:
                 return gather(*self.defs[node.id])
             if node.id == "var" and self.shown:
                 return gather(self.shown, {})
+            self._mix.add("bare")
             return node
         if _number_of(node) is not None:
             return node
@@ -492,7 +525,12 @@ class _Fields:
             node.args = [self._plain(a, picked) for a in node.args]
             return node
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            return gather(*self.read(node))
+            text, found = self.read(node)
+            if not found and node.func.attr in ("mean", "max", "min"):
+                # a field reduced over time has no step to pick, and its
+                # level is the expression's: it is neither picked nor bare
+                return ast.parse(text, mode="eval").body
+            return gather(text, found)
         _fail(node, "not understood; a field, a number, + - * /, hypot(a, b) "
                     "or diff(a)")
 
@@ -810,10 +848,10 @@ def read(text: str, meta: dict, shown: str | None = None) -> tuple[str, dict]:
     more = underlay(text, parsed, shown)
     if more is not None:
         try:
-            return more, resolve(parse(more, shown), meta)
+            return more, resolve(parse(more, shown), meta, shown)
         except ScriptError:
             pass                  # what is shown cannot lie under a figure here
-    return text, resolve(parsed, meta)
+    return text, resolve(parsed, meta, shown)
 
 
 #: What the plain lon/lat map is also called.
@@ -879,16 +917,25 @@ def _step(t, meta: dict) -> int:
     return t % steps
 
 
-def _level_index(lev, expr, variables: dict):
-    """A level given by its value as its number, where the file lists them."""
+def _level_index(lev, expr, variables: dict, shown: str | None = None):
+    """A level given by its value as its number, where the file lists them.
+    Only a level the file lists is found: there is no nearest one."""
     if not isinstance(lev, dict):
         return lev
+    expr = expr or shown
     words = [expr] if expr in variables else re.findall(r"[A-Za-z_]\w*", expr or "")
     owner = next((w for w in words if (variables.get(w) or {}).get("level_values")), None)
     if owner is None:
         raise ScriptError(f"level: {expr or 'this field'} lists no level values in "
                           f"this file; pick by number: .isel(level=0)")
     values, want = variables[owner]["level_values"], lev["value"]
+    if not math.isfinite(want):
+        raise ScriptError(f"level: {want} is not a level")
+    units = (variables[owner].get("level_units") or "").strip()
+    if lev.get("units") and units.lower() not in _PRESSURE_UNITS:
+        raise ScriptError(f"level: {want:g} {lev['units']} was asked for, but "
+                          f"{owner}'s levels are " +
+                          (f"in {units}" if units else "given with no units"))
     for i, value in enumerate(values):
         if abs(value - want) <= 1e-6 * max(1.0, abs(want)):
             return i
@@ -897,8 +944,10 @@ def _level_index(lev, expr, variables: dict):
                       f"{', '.join(f'{v:g}' for v in values)} {units}".rstrip())
 
 
-def resolve(state: dict, meta: dict) -> dict:
+def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
     """`state` checked against one open file, as the page applies it.
+    `shown` is the field on screen, whose levels a level by its value means
+    where the script names no field.
 
     `meta` is the viewer's `describe()`. The variable comes back spelled as
     the file spells it, the time step as a number, and "proj" as "" for the
@@ -923,7 +972,8 @@ def resolve(state: dict, meta: dict) -> dict:
     if state.get("time") is not None:
         out["time"] = _step(state["time"], meta)
     if state.get("level") is not None:
-        lev = out["level"] = _level_index(state["level"], out.get("var"), variables)
+        lev = out["level"] = _level_index(state["level"], out.get("var"), variables,
+                                          shown)
         if lev < 0 or (levels is not None and lev >= levels):
             raise ScriptError(f"level: {lev} is outside {out['var']}'s "
                               f"{levels} level(s)" if levels is not None

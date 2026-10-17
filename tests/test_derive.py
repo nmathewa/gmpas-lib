@@ -50,3 +50,12 @@ def test_a_scalar_applies_to_every_value_and_keeps_nan():
     out = derive.evaluate(derive.parse("q * 2", NAMES), 0, lambda name, step: field)
     np.testing.assert_array_equal(out, [2.0, np.nan, 6.0])
     assert out.dtype == field.dtype
+
+
+def test_a_long_expression_is_refused_before_it_is_matched():
+    import time
+
+    started = time.perf_counter()
+    with pytest.raises(KeyError, match="at most"):
+        derive.parse("1" * 20000 + "." + "1" * 20000 + "x", ["t"])
+    assert time.perf_counter() - started < 0.1

@@ -20,6 +20,7 @@ import getpass
 import functools
 import gzip
 import io
+import ipaddress
 import json
 import math
 import os
@@ -157,6 +158,15 @@ class _MeshOnGrid:
 
 #: largest coastline overlay, in pixels per side, a request may ask for
 OVERLAY_MAX_PX = 4096
+#: The widest or tallest frame a request may ask for: a frame costs about 17
+#: bytes a pixel while it is made, so an unbounded one is a way to exhaust
+#: memory with one request.
+FRAME_MAX_PX = 8192
+
+
+def _px(q: dict, key: str) -> int | None:
+    """A requested frame size, within 16 to FRAME_MAX_PX, or None for the default."""
+    return int(np.clip(int(q[key]), 16, FRAME_MAX_PX)) if q.get(key) else None
 
 
 def _projected_axes(fig, extent, crs):
@@ -1154,6 +1164,20 @@ class PageHandler(BaseHTTPRequestHandler):
     def log_message(self, *a):              # keep the console quiet
         pass
 
+    def parse_request(self):
+        """Refuse what another web site makes a browser send here. A page
+        elsewhere can point an <img> at /api/chat, which spends the chat key,
+        or rename itself to 127.0.0.1 (DNS rebinding) and read every answer:
+        so the Host must be this machine, and a request a browser marks as
+        coming from another site is refused, but for opening the page."""
+        if not super().parse_request():
+            return False
+        why = _foreign(self.headers, urlparse(self.path).path)
+        if why:
+            self.send_error(403, why)
+            return False
+        return True
+
     def _send(self, body: bytes, ctype: str, status: int = 200):
         compress = _gzip_wanted(self.headers.get("Accept-Encoding", ""), ctype, len(body))
         if compress:
@@ -1168,6 +1192,54 @@ class PageHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+
+def _host_name(value: str) -> str:
+    """The host in a Host or Origin header, without scheme, port or brackets."""
+    value = value.strip().lower()
+    if "://" in value:
+        value = value.split("://", 1)[1]
+    value = value.split("/", 1)[0]
+    if value.startswith("["):
+        return value[1:value.find("]")] if "]" in value else value[1:]
+    return value.rsplit(":", 1)[0] if value.count(":") == 1 else value
+
+
+@functools.lru_cache(maxsize=1)
+def _own_names() -> frozenset:
+    names = {"localhost"}
+    for name in (socket.gethostname(), socket.getfqdn()):
+        if name:
+            names |= {name.lower(), name.lower().split(".")[0]}
+    return frozenset(names)
+
+
+def _ours(host: str) -> bool:
+    """A name that is this machine, or an address: rebinding needs a name."""
+    if not host or host in _own_names() or host.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _foreign(headers, path: str) -> str:
+    """Why a request is refused as coming from another site, or ""."""
+    host = _host_name(headers.get("Host", ""))
+    if not _ours(host):
+        return "this server answers to its own host name only"
+    # the page's own requests carry its own host; an address is "ours" only
+    # as a Host, since a site can be served from an address too
+    origin = headers.get("Origin")
+    if origin is not None and _host_name(origin) != host:
+        return "requests from another site are refused"
+    site = headers.get("Sec-Fetch-Site", "")
+    if site in ("cross-site", "same-site") and not (
+            path == "/" and headers.get("Sec-Fetch-Mode") == "navigate"):
+        return "requests from another site are refused"
+    return ""
 
 
 #: Text responses smaller than this go out as they are: the gzip header and
@@ -1493,14 +1565,24 @@ def _handler(viewer: Viewer, html: str = ""):
                             "script": {"keys": _script.keys(),
                                        "startup": _script.startup()}}
                     # chat is an optional install; with it the right panel
-                    # is the chat box, once a model is named
+                    # is the chat box, answered by the built-in model unless
+                    # the configuration names another
                     if _chat.installed():
                         try:
-                            cfg = _chat.load_config()
+                            cfg = _chat.load_config() or _chat.builtin_config()
                             log = _chat.log_path(cfg)
                             meta["chat"] = {"model": cfg["model"],
-                                            "log": str(log) if log else ""} \
-                                if cfg else {"setup": str(_chat.config_path())}
+                                            "provider": cfg.get("provider", "ollama"),
+                                            "builtin": cfg.get("provider") == "builtin",
+                                            # its first answer downloads it
+                                            "ready": cfg.get("provider") != "builtin"
+                                            or _chat._builtin.ready(),
+                                            "conf": str(_chat.config_path()),
+                                            "log": str(log) if log else ""}
+                            if cfg.get("provider") == "builtin" and \
+                                    not _chat._builtin.available():
+                                meta["chat"] = {"error": f"{cfg['model']} needs "
+                                                'onnxruntime: pip install "gmpas[chat]"'}
                         except _chat.ChatError as exc:
                             meta["chat"] = {"error": str(exc)}
                     return self._send(json.dumps(meta).encode(), "application/json")
@@ -1532,8 +1614,8 @@ def _handler(viewer: Viewer, html: str = ""):
                         extent, q.get("cmap", "viridis"),
                         float(q["vmin"]) if q.get("vmin") else None,
                         float(q["vmax"]) if q.get("vmax") else None,
-                        int(q["nx"]) if q.get("nx") else None,
-                        int(q["ny"]) if q.get("ny") else None,
+                        _px(q, "nx"),
+                        _px(q, "ny"),
                         int(q.get("compress", 1)),
                         **colours,
                     )
@@ -1593,15 +1675,15 @@ def _handler(viewer: Viewer, html: str = ""):
                         body, ctype, name = (
                             viewer.gif(var, lvl, extent, q.get("cmap", "viridis"),
                                        vmin, vmax,
-                                       int(q["nx"]) if q.get("nx") else None,
-                                       int(q["ny"]) if q.get("ny") else None,
+                                       _px(q, "nx"),
+                                       _px(q, "ny"),
                                        int(q.get("fps", 8)), **_plot_extras(q)),
                             "image/gif", f"{var}_animation.gif")
                     elif kind == "netcdf":
                         body, ctype, name = (
                             viewer.netcdf(var, step, lvl, extent,
-                                          int(q["nx"]) if q.get("nx") else None,
-                                          int(q["ny"]) if q.get("ny") else None,
+                                          _px(q, "nx"),
+                                          _px(q, "ny"),
                                           **_plot_extras(q)),
                             "application/x-netcdf", f"{stem}.nc")
                     else:
@@ -1638,6 +1720,9 @@ def _handler(viewer: Viewer, html: str = ""):
                                           "application/json", 400)
                     return self._send(json.dumps(state).encode(), "application/json")
                 if url.path == "/api/chat":
+                    if not _chat.installed():
+                        return self._send(b'{"error": "chat is not installed"}',
+                                          "application/json", 404)
                     try:
                         try:
                             said = json.loads(q.get("history") or "[]")
@@ -2663,17 +2748,20 @@ function chatLine(cls, text){
 function chatBoot(){
   if(!M.chat || !M.script) return;
   $("#chatsec").style.display="";
-  if(M.chat.error || M.chat.setup){
+  if(M.chat.error){
     $("#chatGo").disabled=true; $("#chatAll").style.display="none";
-    chatSay(M.chat.error || `no model yet: write ${M.chat.setup} with\\n`+
-      `url = http://127.0.0.1:11434\\nmodel = <a model your Ollama has>`, !!M.chat.error);
+    chatSay(M.chat.error, true);
     $("#chathint").style.whiteSpace="pre-wrap";
     return;
   }
   document.body.classList.add("chat");
   $("#right h1").textContent="ask";
-  chatSay(`answered by ${M.chat.model}, a model you run`+
-          (M.chat.log ? ` \\u00b7 kept in ${M.chat.log}` : ""));
+  chatSay((M.chat.builtin
+      ? `answered by ${M.chat.model}, the small model built in to gmpas, on this machine`+
+        ` \\u00b7 for harder requests name an Ollama, OpenAI-compatible`+
+        ` or Anthropic model in ${M.chat.conf}`
+      : `answered by ${M.chat.model} (${M.chat.provider}), named in ${M.chat.conf}`)+
+    (M.chat.log ? ` \\u00b7 kept in ${M.chat.log}` : ""));
   relayout();
 }
 async function chatAsk(){
@@ -2681,11 +2769,13 @@ async function chatAsk(){
   if(!text || !cur || $("#chatGo").disabled) return;
   $("#chatGo").disabled=true; $("#chatText").value="";
   chatLine("q", text);
-  const a=chatLine("a", `asking ${M.chat.model}\\u2026`);
+  const a=chatLine("a", M.chat.ready ? `asking ${M.chat.model}\\u2026`
+    : `downloading ${M.chat.model} (about 160 MB, once)\\u2026`);
   try{
     const r=await fetch("api/chat?"+new URLSearchParams({text, script:scriptText(),
       history:JSON.stringify(CHAT.slice(-6))}));
     const d=await r.json();
+    M.chat.ready=true;
     // what was said is sent with the next request: "no, the other one" and
     // "still the same" mean nothing without it
     CHAT.push({request:text, reply:r.ok ? d.script : "# "+d.error});
@@ -2774,7 +2864,8 @@ function scriptText(){
 }
 async function scriptRun(text, first){
   const r=await fetch("api/script?"+new URLSearchParams(
-    {text, shown:cur ? cur.name : ""}));
+    // at startup nothing is on screen yet: the field it will open on is shown
+    {text, shown:cur ? cur.name : (first || "")}));
   const s=await r.json();
   if(!r.ok){ scriptSay(String(s.error).replace(/^[A-Za-z]*Error: /, ""), true); return false; }
   // the script as applied: it may now name the field its overlay lies over
