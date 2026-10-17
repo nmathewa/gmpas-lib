@@ -72,7 +72,6 @@ one time series across files, which is how MPAS writes output.
 
 environment:
   GMPAS_CACHE_DIR   where cached mesh geometry goes (default ~/.cache/gmpas/mesh)
-  GMPAS_DATA_DIR    tried first when resolving relative paths
   GMPAS_VALUES_CACHE_MB  field values held per series (default 512)
   GMPAS_VIEW_CACHE_MB    view indices and overlays held per viewer (default 256)
   GMPAS_TIMING      1 reports where startup time went, 2 adds per-frame stages

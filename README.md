@@ -73,7 +73,7 @@ gmpas prep generate hfun.py -o mesh/     # needs $JIGSAWDIR and $MKGRIDFILE
 | [Preprocessing](docs/preprocessing.md) | `prep view`, `prep hfun`, `prep generate` — mesh design and JIGSAW |
 | [Conservative remapping](docs/REMAPPING.md) | the whole terminal workflow, and two MPAS traps |
 | [On a cluster](docs/cluster.md) | port forwarding, and the two variables that matter |
-| [Configuration](docs/configuration.md) | `GMPAS_CACHE_DIR` and `GMPAS_DATA_DIR` |
+| [Configuration](docs/configuration.md) | `GMPAS_CACHE_DIR` and the memory budgets |
 | [Examples](examples/) | ready-to-edit `hfun.py` templates |
 | [Tests](docs/testing.md) | what the suite covers |
 | [Layout](docs/layout.md) | what lives in which module |
