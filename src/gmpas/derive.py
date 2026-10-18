@@ -53,6 +53,8 @@ _BARE = re.compile(rf"^\s*({_FIELD})\s*$")
 _DIFF = re.compile(rf"^\s*diff\(\s*({_NAME})\s*\)\s*$")
 _HYPOT = re.compile(rf"^\s*hypot\(\s*({_FIELD})\s*,\s*({_FIELD})\s*\)\s*$")
 _BINARY = re.compile(rf"^\s*({_OPERAND})\s*([+\-*/])\s*({_OPERAND})\s*$")
+#: The longest expression taken, in characters.
+MAX_EXPR = 500
 _OPS = {"+": np.add, "-": np.subtract, "*": np.multiply, "/": np.divide}
 
 FORMS = ("a + b, a - b, a * b, a / b (either side may be a number), "
@@ -79,6 +81,10 @@ def parse(expr: str, names: Iterable[str]) -> tuple:
 
     Raises KeyError, naming what was not understood.
     """
+    # the patterns backtrack on a long run of digits, and the expression
+    # comes from a request: past this it is refused before it is matched
+    if len(expr) > MAX_EXPR:
+        raise KeyError(f"an expression is at most {MAX_EXPR} characters")
     names = list(names)
 
     def field(token: str):
