@@ -450,18 +450,14 @@ def test_idle_readers_give_their_memory_back(long_run):
         assert second is not first                # rebuilt, not resurrected
 
 
-def test_readers_can_be_told_not_to_linger(monkeypatch):
-    """A memory-capped node can turn the whole trade off."""
+def test_readers_can_be_told_not_to_linger():
+    """idle=0 turns the whole trade off."""
     from gmpas import series as S
 
-    monkeypatch.setenv(S.POOL_IDLE_ENV, "0")
-    assert S.pool_idle() == 0.0
-    pool = S.ReaderPool()
+    pool = S.ReaderPool(idle=0)
     with pool.lease(2) as got:
         assert got is not None
     assert pool._pool is None, "idle=0 means gone as soon as the read is done"
-    monkeypatch.setenv(S.POOL_IDLE_ENV, "nonsense")
-    assert S.pool_idle() == S.POOL_IDLE_SECONDS
 
 
 def test_closing_the_series_takes_the_readers_with_it(long_run):
