@@ -6,7 +6,7 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22003177.svg)](https://doi.org/10.5281/zenodo.22003177)
 [![tests](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml/badge.svg)](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/gmpas)](https://pypi.org/project/gmpas/)
-[![python](https://img.shields.io/badge/python-3.10%2B-blue)](docs/installation.md)
+[![python](https://img.shields.io/badge/python-3.10%2B-blue)](docs/index.md#installation)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **[Try the viewer in your browser](https://nmathewa.github.io/gmpas-lib/)** —
@@ -47,7 +47,7 @@ gmpas --version
 From a source install, `pytest -q` runs the test suite.
 
 Full detail, including the extras and what each one pulls in:
-[docs/installation.md](docs/installation.md).
+[docs/index.md#installation](docs/index.md#installation).
 
 ## Usage
 
@@ -66,19 +66,19 @@ gmpas prep generate hfun.py -o mesh/     # needs $JIGSAWDIR and $MKGRIDFILE
 
 | | |
 |---|---|
-| [Why gmpas exists](docs/why.md) | the problem with lat-lon tooling, and why this is fast |
-| [Installation](docs/installation.md) | conda, pip, extras, and the external programs |
-| [Command line](docs/command-line.md) | every command and its flags |
-| [In a notebook](docs/notebook.md) | the accessor, and using the pieces directly |
+| [Why gmpas exists](docs/index.md#why-gmpas-exists) | the problem with lat-lon tooling, and why this is fast |
+| [Installation](docs/index.md#installation) | conda, pip, extras, and the external programs |
+| [Command line](docs/index.md#command-line) | every command and its flags |
+| [In a notebook](docs/index.md#in-a-notebook) | the accessor, and using the pieces directly |
 | [Preprocessing](docs/preprocessing.md) | `prep view`, `prep hfun`, `prep generate` — mesh design and JIGSAW |
 | [Conservative remapping](docs/REMAPPING.md) | the whole terminal workflow, and two MPAS traps |
-| [On a cluster](docs/cluster.md) | port forwarding, and the two variables that matter |
-| [Configuration](docs/configuration.md) | `GMPAS_CACHE_DIR` and the memory budgets |
+| [On a cluster](docs/index.md#on-a-cluster) | port forwarding, and the two variables that matter |
+| [Configuration](docs/index.md#configuration) | `GMPAS_CACHE_DIR` and the memory budgets |
 | [Examples](examples/) | ready-to-edit `hfun.py` templates |
 | [Tests](docs/testing.md) | what the suite covers |
 | [Layout](docs/layout.md) | what lives in which module |
 | [Differences from the MCP server](docs/mcp-server.md) | what changed on the way to a package |
-| [Status](docs/status.md) | what is implemented and what is not |
+| [Status](docs/index.md#status) | what is implemented and what is not |
 
 
 > This document is generated using LLM (Claude)
