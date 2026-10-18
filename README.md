@@ -18,7 +18,7 @@ gmpas view /path/to/run/
 | `pip install "gmpas[plot,chat]"` | chat with a model named in `chat.conf` (Ollama, OpenAI-compatible, Anthropic) |
 | in a conda environment, from source | `conda env create -f environment.yml && conda activate gmpas && pip install -e . --no-deps` |
 
-[▶ `gmpas view` on a 3.75 km global mesh (video)](https://gmpas.readthedocs.io)
+![gmpas view on a 3.75 km global mesh](https://raw.githubusercontent.com/nmathewa/gmpas-lib/main/docs/_static/gmpas-3.75km.gif)
 
 *`gmpas view` on a 3.75 km global MPAS mesh (DYAMOND2, 41.9 million cells).*
 
