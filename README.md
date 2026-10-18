@@ -1,5 +1,12 @@
 # gmpas
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22003177.svg)](https://doi.org/10.5281/zenodo.22003177)
+[![tests](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml/badge.svg)](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/gmpas)](https://pypi.org/project/gmpas/)
+[![docs](https://readthedocs.org/projects/gmpas/badge/?version=latest)](https://gmpas.readthedocs.io)
+[![python](https://img.shields.io/badge/python-3.10%2B-blue)](https://pypi.org/project/gmpas/)
+[![license](https://img.shields.io/badge/license-MIT-green)](https://github.com/nmathewa/gmpas-lib/blob/main/LICENSE)
+
 **Documentation: [gmpas.readthedocs.io](https://gmpas.readthedocs.io)**
 
 A graphical MPAS (Model for Prediction Across Scales) viewer supports Native Voronoi mesh grid (and UGRID). Additionally any netCDF with lat-lon grid. 
