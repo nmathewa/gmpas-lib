@@ -212,14 +212,13 @@ def test_the_built_in_model_can_be_named(tmp_path):
     assert cfg["agent"] is False
 
 
-def test_a_server_needs_nothing_installed(tmp_path, monkeypatch):
+def test_without_the_extra_there_is_no_chat(tmp_path, monkeypatch):
     monkeypatch.setattr(chatmodel, "available", lambda: False)
     monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "chat.conf"))
-    assert not chat.installed()
-    # a file naming the built-in model shows the panel, which says to install it
-    (tmp_path / "chat.conf").write_text("provider = builtin\n")
-    assert chat.installed()
-    (tmp_path / "chat.conf").write_text("url = http://127.0.0.1:11434\nmodel = m\n")
+    for text in ("", "provider = builtin\n", "url = http://127.0.0.1:11434\nmodel = m\n"):
+        (tmp_path / "chat.conf").write_text(text)
+        assert not chat.installed()
+    monkeypatch.setattr(chatmodel, "available", lambda: True)
     assert chat.installed()
 
 

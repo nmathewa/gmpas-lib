@@ -103,18 +103,10 @@ class ChatError(ValueError):
 
 
 def installed() -> bool:
-    """Whether chat can answer here: the built-in model's runtime is installed
-    (`pip install "gmpas[chat]"`), or a configuration names a server, which
-    needs nothing installed."""
-    if _builtin.available():
-        return True
-    try:
-        cfg = load_config()
-    except ChatError:
-        return True                  # shown, so that what is wrong is said
-    # a file naming the built-in model shows the panel too, to say it is not
-    # installed; with no file and no extra, the page is as it always was
-    return cfg is not None
+    """Whether chat is installed: `pip install "gmpas[chat]"`. Without it
+    there is no chat at all -- no panel, no configuration read, no server
+    asked -- and the page is as it always was."""
+    return _builtin.available()
 
 
 def builtin_config() -> dict:

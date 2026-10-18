@@ -1579,10 +1579,6 @@ def _handler(viewer: Viewer, html: str = ""):
                                             or _chat._builtin.ready(),
                                             "conf": str(_chat.config_path()),
                                             "log": str(log) if log else ""}
-                            if cfg.get("provider") == "builtin" and \
-                                    not _chat._builtin.available():
-                                meta["chat"] = {"error": f"{cfg['model']} needs "
-                                                'onnxruntime: pip install "gmpas[chat]"'}
                         except _chat.ChatError as exc:
                             meta["chat"] = {"error": str(exc)}
                     return self._send(json.dumps(meta).encode(), "application/json")
