@@ -14,7 +14,7 @@ gmpas view /path/to/run/
 | `pip install gmpas` | the core: mesh geometry, caching, remap weights; no viewer |
 | `pip install "gmpas[plot]"` | gmpas viewer  |
 | `pip install "gmpas[plot,chat]"` | chat with a model named in `chat.conf` (Ollama, OpenAI-compatible, Anthropic) |
-| in a conda environment, or from source | see [Installation](https://github.com/nmathewa/gmpas-lib#installation) in the README |
+| in a conda environment, from source | `conda env create -f environment.yml && conda activate gmpas && pip install -e . --no-deps` |
 
 <video width="100%" autoplay loop muted playsinline controls>
   <source src="_static/gmpas-3.75km-colours.webm" type="video/webm">
@@ -84,7 +84,7 @@ means:
    mesh is a Voronoi tessellation of its cell centres, so the cell
    containing a point is exactly the nearest cell centre  That makes rendering O(pixels)
 
-*Documentation written and reviewed by Nirmal Mathew Alex.*
+*Docs written by a human.*
 
 ```{toctree}
 :hidden:
