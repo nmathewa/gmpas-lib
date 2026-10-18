@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from gmpas import chat, chatmodel
+from gmpas import chat
 
 META = {
     "variables": [{"name": "t2m", "label": "2 m temperature [K]", "levels": 1},
@@ -167,59 +167,24 @@ def test_an_empty_or_overlong_request_never_reaches_the_model():
 
 # ------------------------------------------------------------------- config
 
-class _Tokens:
-    """A tokenizer that counts words, standing in for the model's own."""
-
-    def encode(self, text):
-        return type("Encoded", (), {"ids": text.split()})()
-
-
-def test_no_file_means_the_built_in_model(tmp_path, monkeypatch):
-    monkeypatch.setattr(chatmodel, "_model", lambda: (None, None, _Tokens()))
+def test_no_file_means_no_chat(tmp_path, monkeypatch):
     monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "absent.conf"))
-    monkeypatch.setenv("GMPAS_CHAT_LOG", "off")
     assert chat.load_config() is None
-    seen = []
-
-    def post(cfg, messages):
-        seen.append((cfg, messages))
-        return "var = t2m\n"
-
-    got = chat.ask("temperature over peru", META, post=post)
-    assert got["state"]["var"] == "t2m"
-    cfg, messages = seen[0]
-    assert cfg["provider"] == "builtin" and cfg["model"] == chatmodel.NAME
-    # one block in the layout it was taught, with the place it found
-    assert len(messages) == 1 and messages[0]["content"].startswith("fields: ")
-    assert "places: peru = " in messages[0]["content"]
-    assert messages[0]["content"].endswith("ask: temperature over peru")
-
-
-def test_the_built_in_model_is_not_asked_twice(monkeypatch):
-    monkeypatch.setattr(chatmodel, "_model", lambda: (None, None, _Tokens()))
-    post = _says("var = nothing\n", "var = t2m\n")
-    with pytest.raises(chat.ChatError, match="refused: ") as err:
-        chat.ask("temperature", META, cfg={**chat.builtin_config(), "log": "off"},
-                 post=post)
-    assert err.value.kind == "refused" and len(post.seen) == 1
-
-
-def test_the_built_in_model_can_be_named(tmp_path):
-    path = tmp_path / "chat.conf"
-    path.write_text("provider = builtin\nlog = off\n")
-    cfg = chat.load_config(path)
-    assert cfg["provider"] == "builtin" and cfg["model"] == chatmodel.NAME
-    assert cfg["agent"] is False
+    with pytest.raises(chat.ChatError, match="no model is configured"):
+        chat.ask("anything", META)
 
 
 def test_without_the_extra_there_is_no_chat(tmp_path, monkeypatch):
-    monkeypatch.setattr(chatmodel, "available", lambda: False)
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a: None if name == "ollama" else real(name, *a))
     monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "chat.conf"))
-    for text in ("", "provider = builtin\n", "url = http://127.0.0.1:11434\nmodel = m\n"):
-        (tmp_path / "chat.conf").write_text(text)
-        assert not chat.installed()
-    monkeypatch.setattr(chatmodel, "available", lambda: True)
-    assert chat.installed()
+    (tmp_path / "chat.conf").write_text("url = http://127.0.0.1:11434\nmodel = m\n")
+    assert not chat.installed()
+    monkeypatch.undo()
+    assert chat.installed() == (real("ollama") is not None)
 
 
 def test_the_file_names_the_server_and_the_model(tmp_path):
@@ -296,6 +261,7 @@ def test_the_log_goes_to_the_data_directory_by_default(monkeypatch, tmp_path):
 @pytest.fixture
 def model_server():
     """A server speaking Ollama's /api/chat."""
+    pytest.importorskip("ollama", reason='the wire tests need "gmpas[chat]"')
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -348,6 +314,7 @@ def test_a_server_error_is_reported_with_what_it_said(model_server):
 
 
 def test_no_server_is_reported_as_no_answer():
+    pytest.importorskip("ollama", reason='the wire tests need "gmpas[chat]"')
     cfg = {"url": "http://127.0.0.1:9", "model": "m", "timeout": 2.0, "log": "off"}
     with pytest.raises(chat.ChatError, match="no answer from the model server"):
         chat.ask("temperature", META, cfg=cfg)
@@ -577,6 +544,8 @@ def test_a_plain_reply_ends_an_agent_run(agent_server, provider):
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_an_agent_that_runs_out_of_steps_is_asked_the_one_shot_way(
         agent_server, provider, tmp_path):
+    if provider == "ollama":
+        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
     base, seen, replies = agent_server
     replies += [_reply(provider, "", ("describe_file", {}))] * 2 \
         + [_reply(provider, "var = t2m\n")]
@@ -607,6 +576,8 @@ def test_a_fault_in_a_tool_call_is_an_answer_the_model_reads(agent_server, provi
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_an_applied_script_is_checked_and_the_retry_is_one_shot(agent_server, provider):
+    if provider == "ollama":
+        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
     base, seen, replies = agent_server
     replies += [_reply(provider, "", ("apply", {"script": "var = sst"})),
                 _reply(provider, "var = t2m\n")]
@@ -635,6 +606,8 @@ def test_an_agent_that_says_it_cannot_is_passed_on(agent_server, provider):
 
 @pytest.mark.parametrize("provider", PROVIDERS)
 def test_agent_off_is_the_one_shot_path(agent_server, provider):
+    if provider == "ollama":
+        pytest.importorskip("ollama", reason='the one-shot path needs "gmpas[chat]"')
     base, seen, replies = agent_server
     replies.append(_reply(provider, "var = t2m\n"))
     cfg = _cfg(provider, base, agent=False)
@@ -736,16 +709,3 @@ def test_a_model_that_takes_no_tools_is_asked_the_one_shot_way(monkeypatch, tmp_
     got = chat.ask("temperature", META, cfg=cfg, post=one_shot)
     assert got["state"]["var"] == "t2m" and len(sent) == 1
     assert "does not support tools" in json.loads(log.read_text())["no_tools"]
-
-
-def test_a_file_with_many_fields_is_cut_to_what_the_model_reads(monkeypatch):
-    monkeypatch.setattr(chatmodel, "_model", lambda: (None, None, _Tokens()))
-    monkeypatch.setattr(chatmodel, "MAX_INPUT", 120)
-    meta = {"steps": 1, "variables": [
-        {"name": f"f{i}", "label": f"some field number {i}"} for i in range(60)]
-        + [{"name": "mslp", "label": "mean sea level pressure"}]}
-    src = chatmodel.prompt(meta, "var = f7\n", "show the sea level pressure")
-    assert len(src.split()) < 120 and src.endswith("ask: show the sea level pressure")
-    fields = src.split("\n")[0]
-    # the field on screen and the one the request names are kept
-    assert "f7 (" in fields and "mslp (" in fields and "f59 (" not in fields

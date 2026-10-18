@@ -47,10 +47,9 @@ plot = ["matplotlib>=3.7", "cartopy>=0.22", "pillow>=9.0",
 # ncremap. Both are executables, not Python packages, so pip cannot install
 # them, and neither is brought in by environment.yml either -- load your
 # system's builds instead; see docs/REMAPPING.md.
-# Asking for a view in words: what runs the built-in model, whose weights are
-# downloaded once (gmpas chat-model); a larger model on a server is named in
-# the chat configuration (docs/configuration.md) and needs nothing more.
-chat = ["onnxruntime>=1.17", "tokenizers>=0.15"]
+# Asking for a view in words. The client only: the model is one the user
+# runs on an Ollama server (docs/configuration.md); none is shipped.
+chat = ["ollama>=0.4"]
 test = ["pytest>=7.0"]
 dev = ["gmpas[plot,test,chat]", "ruff>=0.4"]
 

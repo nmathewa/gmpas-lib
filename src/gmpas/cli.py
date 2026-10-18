@@ -661,21 +661,6 @@ def _kind(args) -> str:
     return kind
 
 
-def _chat_model(args) -> int:
-    """Fetch the built-in chat model where there is a route out, so a compute
-    node without one can use it: the folder is printed for
-    GMPAS_CHAT_MODEL_DIR."""
-    from . import chatmodel
-
-    try:
-        where = chatmodel.fetch(say=lambda line: print(line, flush=True))
-    except chatmodel.ModelError as exc:
-        print(f"gmpas chat-model: {exc}", file=sys.stderr)
-        return 1
-    print(f"{chatmodel.NAME} is in {where}")
-    return 0
-
-
 def _view(args) -> int:
     if getattr(args, "script", None):
         from . import script
@@ -992,10 +977,6 @@ def build_parser() -> argparse.ArgumentParser:
                         "region, ...), as the page's script box writes them")
     browser_opts(v)
     v.set_defaults(func=_view)
-
-    m = sub.add_parser("chat-model", help="download the chat box's built-in "
-                                          "model, once (about 160 MB)")
-    m.set_defaults(func=_chat_model)
 
     # -- preprocessing ---------------------------------------------------
     # Everything above is postprocessing: it opens a run and renders, remaps or
