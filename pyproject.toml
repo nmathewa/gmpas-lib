@@ -52,6 +52,9 @@ plot = ["matplotlib>=3.7", "cartopy>=0.22", "pillow>=9.0",
 chat = ["ollama>=0.4"]
 test = ["pytest>=7.0"]
 dev = ["gmpas[plot,test,chat]", "ruff>=0.4"]
+# The Read the Docs site (.readthedocs.yaml, docs/conf.py).
+docs = ["sphinx>=7", "myst-parser>=2", "furo", "sphinx-copybutton",
+        "sphinxcontrib-mermaid"]
 
 [project.urls]
 Homepage = "https://github.com/nmathewa/gmpas-lib"
@@ -69,7 +72,8 @@ packages = ["src/gmpas"]
 # The trailing /** matters: a bare directory path here matches nothing, and
 # the exclude silently does not apply. Checked by tests/test_packaging.py,
 # because the failure is invisible until someone downloads the sdist.
-exclude = ["docs/demo/data/**", "docs/demo/site/**"]
+# The docs videos are for Read the Docs, and about 5 MB.
+exclude = ["docs/demo/data/**", "docs/demo/site/**", "docs/_static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
