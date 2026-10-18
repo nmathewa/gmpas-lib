@@ -28,37 +28,37 @@
 </style>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
 
-<g class="teal"><rect x="70" y="40" width="190" height="50" rx="4"/><text class="th" x="165" y="61" text-anchor="middle">MPAS mesh file</text><text class="ts" x="165" y="78" text-anchor="middle">or a self-describing history</text></g>
-<g class="purple"><rect x="420" y="40" width="190" height="50" rx="4"/><text class="th" x="515" y="61" text-anchor="middle">target grid</text><text class="ts" x="515" y="78" text-anchor="middle">lat-lon, or another mesh</text></g>
+<g class="teal"><rect x="70" y="40" width="190" height="50" rx="4"/><text class="th" x="165" y="70" text-anchor="middle">MPAS mesh file</text></g>
+<g class="purple"><rect x="420" y="40" width="190" height="50" rx="4"/><text class="th" x="515" y="70" text-anchor="middle">target grid</text></g>
 
 <line class="arr" x1="165" y1="90" x2="165" y2="116" marker-end="url(#arrow)"/>
 <line class="arr" x1="515" y1="90" x2="515" y2="116" marker-end="url(#arrow)"/>
 
-<g class="gray"><rect x="70" y="118" width="190" height="50" rx="4"/><text class="th" x="165" y="139" text-anchor="middle">gmpas scrip</text><text class="ts" x="165" y="156" text-anchor="middle">normalises, trims corners</text></g>
-<g class="gray"><rect x="420" y="118" width="190" height="50" rx="4"/><text class="th" x="515" y="139" text-anchor="middle">write dst SCRIP</text><text class="ts" x="515" y="156" text-anchor="middle">ncremap can generate one</text></g>
+<g class="gray"><rect x="70" y="118" width="190" height="50" rx="4"/><text class="th" x="165" y="148" text-anchor="middle">gmpas scrip</text></g>
+<g class="gray"><rect x="420" y="118" width="190" height="50" rx="4"/><text class="th" x="515" y="148" text-anchor="middle">write dst SCRIP</text></g>
 
 <line class="arr" x1="165" y1="168" x2="165" y2="194" marker-end="url(#arrow)"/>
 <line class="arr" x1="515" y1="168" x2="515" y2="194" marker-end="url(#arrow)"/>
 
-<g class="teal"><rect x="70" y="196" width="190" height="50" rx="4"/><text class="th" x="165" y="217" text-anchor="middle">src.scrip.nc</text><text class="ts" x="165" y="234" text-anchor="middle">cell corners and areas</text></g>
-<g class="purple"><rect x="420" y="196" width="190" height="50" rx="4"/><text class="th" x="515" y="217" text-anchor="middle">dst.scrip.nc</text><text class="ts" x="515" y="234" text-anchor="middle">same six arrays</text></g>
+<g class="teal"><rect x="70" y="196" width="190" height="50" rx="4"/><text class="th" x="165" y="226" text-anchor="middle">src.scrip.nc</text></g>
+<g class="purple"><rect x="420" y="196" width="190" height="50" rx="4"/><text class="th" x="515" y="226" text-anchor="middle">dst.scrip.nc</text></g>
 
 <line class="arr" x1="180" y1="246" x2="245" y2="272" marker-end="url(#arrow)"/>
 <line class="arr" x1="500" y1="246" x2="435" y2="272" marker-end="url(#arrow)"/>
 
-<g class="coral"><rect x="170" y="274" width="340" height="54" rx="4"/><text class="th" x="340" y="296" text-anchor="middle">ESMF_RegridWeightGen  -m conserve</text><text class="ts" x="340" y="314" text-anchor="middle">or ncremap -a aave, or TempestRemap</text></g>
+<g class="coral"><rect x="170" y="274" width="340" height="54" rx="4"/><text class="th" x="340" y="306" text-anchor="middle">ESMF_RegridWeightGen  -m conserve</text></g>
 
 <line class="arr" x1="340" y1="328" x2="340" y2="354" marker-end="url(#arrow)"/>
 
-<g class="coral"><rect x="250" y="356" width="180" height="50" rx="4"/><text class="th" x="340" y="377" text-anchor="middle">map.nc</text><text class="ts" x="340" y="394" text-anchor="middle">reuse for every field</text></g>
+<g class="coral"><rect x="250" y="356" width="180" height="50" rx="4"/><text class="th" x="340" y="386" text-anchor="middle">map.nc</text></g>
 
 <line class="arr" x1="340" y1="406" x2="340" y2="432" marker-end="url(#arrow)"/>
 
-<g class="purple"><rect x="40" y="434" width="150" height="50" rx="4"/><text class="th" x="115" y="455" text-anchor="middle">history.nc</text><text class="ts" x="115" y="472" text-anchor="middle">any field or step</text></g>
+<g class="purple"><rect x="40" y="434" width="150" height="50" rx="4"/><text class="th" x="115" y="464" text-anchor="middle">history.nc</text></g>
 <line class="arr" x1="190" y1="459" x2="246" y2="459" marker-end="url(#arrow)"/>
-<g class="gray"><rect x="250" y="434" width="240" height="50" rx="4"/><text class="th" x="370" y="455" text-anchor="middle">apply the weights</text><text class="ts" x="370" y="472" text-anchor="middle">dst = S x src, sparse</text></g>
+<g class="gray"><rect x="250" y="434" width="240" height="50" rx="4"/><text class="th" x="370" y="464" text-anchor="middle">apply the weights</text></g>
 
 <line class="arr" x1="360" y1="484" x2="345" y2="510" marker-end="url(#arrow)"/>
 
-<g class="gray"><rect x="210" y="512" width="260" height="50" rx="4"/><text class="th" x="340" y="533" text-anchor="middle">check the integral</text><text class="ts" x="340" y="550" text-anchor="middle">src and dst must agree</text></g>
+<g class="gray"><rect x="210" y="512" width="260" height="50" rx="4"/><text class="th" x="340" y="542" text-anchor="middle">check the integral</text></g>
 </svg>

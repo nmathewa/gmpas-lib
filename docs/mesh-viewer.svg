@@ -1,10 +1,11 @@
-<svg width="680" viewBox="0 0 680 500" role="img" xmlns="http://www.w3.org/2000/svg">
+<svg width="680" viewBox="0 0 680 510" role="img" xmlns="http://www.w3.org/2000/svg">
 <title>How gmpas prep view works</title>
 <desc>An MPAS mesh file is turned into cached geometry once: a directory of .npy arrays plus a meta.json holding the derived scalars. Later runs memory-map that cache instead of rebuilding it. A KD-tree over the cell centres turns each view box into a pixel-to-cell index, which is built once per extent and reused for every field and every frame; drawing a field is then just a gather.</desc>
 <style>
   text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
   .th { font-size: 14px; font-weight: 500; }
   .ts { font-size: 12px; font-weight: 400; }
+  .tc { font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #444441; }
   .tn { font-size: 11px; font-weight: 400; fill: #5F5E5A; font-style: italic; }
   .arr { stroke: #888780; stroke-width: 1.5; fill: none; }
   .dash { stroke: #888780; stroke-width: 1.3; fill: none; stroke-dasharray: 4 3; }
@@ -17,7 +18,7 @@
   .gray rect { fill: #F1EFE8; stroke: #5F5E5A; }
   .gray .th { fill: #444441; } .gray .ts { fill: #5F5E5A; }
   @media (prefers-color-scheme: dark) {
-    .arr { stroke: #B4B2A9; } .dash { stroke: #B4B2A9; } .tn { fill: #B4B2A9; }
+    .arr { stroke: #B4B2A9; } .dash { stroke: #B4B2A9; } .tn { fill: #B4B2A9; } .tc { fill: #D3D1C7; }
     .teal rect { fill: #085041; stroke: #9FE1CB; }
     .teal .th { fill: #9FE1CB; } .teal .ts { fill: #5DCAA5; }
     .purple rect { fill: #3C3489; stroke: #CECBF6; }
@@ -32,17 +33,16 @@
 
 <g class="teal"><rect x="245" y="30" width="190" height="52" rx="4"/><text class="th" x="340" y="51" text-anchor="middle">mesh.nc</text><text class="ts" x="340" y="68" text-anchor="middle">verticesOnCell, areaCell, &#8230;</text></g>
 <line class="arr" x1="340" y1="82" x2="340" y2="118" marker-end="url(#arrow)"/>
-<g class="gray"><rect x="190" y="120" width="300" height="52" rx="4"/><text class="th" x="340" y="141" text-anchor="middle">build geometry once</text><text class="ts" x="340" y="158" text-anchor="middle">vectorized, chunked, streamed to disk</text></g>
+<g class="gray"><rect x="190" y="120" width="300" height="52" rx="4"/><text class="th" x="340" y="141" text-anchor="middle">build geometry once</text><text class="ts" x="340" y="158" text-anchor="middle">vectorized, chunked, written to disk</text></g>
 <line class="arr" x1="340" y1="172" x2="340" y2="208" marker-end="url(#arrow)"/>
 <g class="purple"><rect x="130" y="210" width="420" height="52" rx="4"/><text class="th" x="340" y="231" text-anchor="middle">cache: a directory of .npy</text><text class="ts" x="340" y="248" text-anchor="middle">cell_verts, edge_segs, xyz_cell, area_cell &#8230;</text></g>
-<text class="tn" x="340" y="280" text-anchor="middle">memory-mapped on every later load &#8212; pages arrive only for what is touched</text>
+
 <line class="arr" x1="230" y1="288" x2="175" y2="308" marker-end="url(#arrow)"/>
 <line class="arr" x1="450" y1="288" x2="505" y2="308" marker-end="url(#arrow)"/>
-<g class="gray"><rect x="40" y="310" width="270" height="52" rx="4"/><text class="th" x="175" y="331" text-anchor="middle">meta.json</text><text class="ts" x="175" y="348" text-anchor="middle">extent, coverage, n_cells</text></g>
+<g class="gray"><rect x="40" y="310" width="270" height="52" rx="4"/><text class="th" x="175" y="341" text-anchor="middle">meta.json</text></g>
 <g class="coral"><rect x="370" y="310" width="270" height="52" rx="4"/><text class="th" x="505" y="331" text-anchor="middle">KD-tree</text><text class="ts" x="505" y="348" text-anchor="middle">over cell centres</text></g>
-<text class="tn" x="175" y="380" text-anchor="middle">derived scalars, so reading them</text>
-<text class="tn" x="175" y="395" text-anchor="middle">never touches the big arrays</text>
+<text class="tc" x="50" y="382" xml:space="preserve">{</text><text class="tc" x="50" y="397" xml:space="preserve">  "sphere_radius": 6371229.0,</text><text class="tc" x="50" y="412" xml:space="preserve">  "coverage": 0.034,</text><text class="tc" x="50" y="427" xml:space="preserve">  "extent": [125.7, 168.3, -24.3, 20.2],</text><text class="tc" x="50" y="442" xml:space="preserve">  "n_cells": 8228,</text><text class="tc" x="50" y="457" xml:space="preserve">  "n_edges": 24987,</text><text class="tc" x="50" y="472" xml:space="preserve">  "cache_version": "v5"</text><text class="tc" x="50" y="487" xml:space="preserve">}</text>
 <line class="arr" x1="505" y1="362" x2="505" y2="398" marker-end="url(#arrow)"/>
 <g class="coral"><rect x="370" y="400" width="270" height="52" rx="4"/><text class="th" x="505" y="421" text-anchor="middle">ViewIndex</text><text class="ts" x="505" y="438" text-anchor="middle">pixel &#8594; cell, per view box</text></g>
-<text class="tn" x="505" y="478" text-anchor="middle">built once per extent, reused for every field</text>
+<text class="tn" x="505" y="478" text-anchor="middle">reused</text>
 </svg>

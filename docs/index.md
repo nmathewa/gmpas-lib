@@ -13,7 +13,7 @@ gmpas view /path/to/run/
 | --- | --- |
 | `pip install gmpas` | the core: mesh geometry, caching, remap weights; no viewer |
 | `pip install "gmpas[plot]"` | gmpas viewer  |
-| `pip install "gmpas[plot,chat]"` | Built in chat model and LLM API support |
+| `pip install "gmpas[plot,chat]"` | chat with a model named in `chat.conf` (Ollama, OpenAI-compatible, Anthropic) |
 | in a conda environment, or from source | see [Installation](https://github.com/nmathewa/gmpas-lib#installation) in the README |
 
 <video width="100%" autoplay loop muted playsinline controls>
@@ -84,11 +84,14 @@ means:
    mesh is a Voronoi tessellation of its cell centres, so the cell
    containing a point is exactly the nearest cell centre  That makes rendering O(pixels)
 
+*Documentation written and reviewed by Nirmal Mathew Alex.*
+
 ```{toctree}
 :hidden:
 
 Overview <self>
 netCDF viewer <viewer>
+Scripting and chat <chat>
 ```
 
 ```{toctree}
@@ -101,15 +104,9 @@ REMAPPING
 ```
 
 ```{toctree}
-:hidden:
-
-Scripting and chat <chat>
-```
-
-```{toctree}
 :maxdepth: 1
 :hidden:
-:caption: Development
+:caption: Development and contributing
 
 api
 layout

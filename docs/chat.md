@@ -2,7 +2,14 @@
 
 ## Scripting
 
-A view written as text, in the viewer's script box or from a file:
+<video width="100%" autoplay loop muted playsinline controls>
+  <source src="_static/gmpas-scripting.webm" type="video/webm">
+  <source src="_static/gmpas-scripting.mp4" type="video/mp4">
+</video>
+
+*A script, an xarray-style layered figure and `cape.max()` on the MPAS file.*
+
+Or directly from the CLI:
 
 ```bash
 gmpas view /path/to/run/ --script view.txt
@@ -25,7 +32,7 @@ region = 90, 150, -15, 15
 | key | value |
 |---|---|
 | `var` | a variable, or an expression such as `a - b`, `hypot(u, v)` |
-| `time` | step number (0 first, -1 last) or its label |
+| `time` | step number (0 first, -1 last) or the label (e.g. `2012-02-05 12:00`) |
 | `level` | level number (0 first), or a pressure such as `850 hPa` |
 | `kind` | `map`, `contourf`, `contour`, `pcolormesh`, `hist`, `series`, ... |
 | `point` | `lon, lat` for a series or profile |
@@ -35,7 +42,6 @@ region = 90, 150, -15, 15
 
 ### xarray style
 
-The same view, the way it is written with xarray. The two forms mix.
 
 ```python
 spd = hypot(u, v)
@@ -51,7 +57,7 @@ rivers(color="blue")
 figure(title="925 hPa", look="ferret")
 ```
 
-| form | does |
+| command |  |
 |---|---|
 | `.isel(time=, level=)` | pick by number |
 | `.sel(time="...", level=850)` | pick by label or value |
@@ -64,25 +70,30 @@ figure(title="925 hPa", look="ferret")
 | `snow.max()`, `snow.min()` | largest / smallest value in view, and where |
 | `mark()`, `mark(lon=, lat=)` | mark a place on the map |
 
-- Parsed, never run as Python. Errors name the line.
+> Note that this is not a Python script; it is parsed directly by gmpas.
 
 ## Chat
 
+
+You can also use the optional LLM-based chat tool.
+
+To install:
 ```bash
 pip install "gmpas[chat]"
-gmpas chat-model        # optional: fetch the built-in model now (about 160 MB)
 ```
 
-- A request in words ("wind speed over Africa, in Mercator") becomes script lines.
-- Without `gmpas[chat]` there is no chat panel.
-- With it, requests are answered by gmpas-small, the built-in model, on this machine.
-- The reply is checked like a typed script; nothing is run as code.
-- `GMPAS_CHAT_MODEL_DIR` sets where the built-in model lives (copy it there on an offline node).
+<video width="100%" autoplay loop muted playsinline controls>
+  <source src="_static/gmpas-chat.webm" type="video/webm">
+  <source src="_static/gmpas-chat.mp4" type="video/mp4">
+</video>
 
-### A larger model
+*Requests answered by gpt-oss:120b, named in `chat.conf`, on the demo MPAS file.*
 
-Name it in `~/.config/gmpas/chat.conf` (or `$GMPAS_CHAT_CONFIG`):
+- A request in words (e.g. "wind speed over Africa, in Mercator").
+- The model is one you name in `~/.config/gmpas/chat.conf` (or `$GMPAS_CHAT_CONFIG`).
+- You can configure the API key, chat engine (e.g. ollama, anthropic or openai) and model selection in `chat.conf`.
 
+**Example**
 ```
 provider = ollama
 url      = http://127.0.0.1:11434
@@ -91,10 +102,12 @@ model    = qwen2.5-coder:7b
 
 | key | value |
 |---|---|
-| `provider` | `ollama` (default), `openai`, `anthropic`, `builtin` |
+| `provider` | `ollama` (default), `openai`, `anthropic` |
 | `url` | the server; for `openai` the API base, e.g. `http://127.0.0.1:8000/v1` |
 | `model` | a model the server has |
 | `key` | optional; else `$GMPAS_CHAT_KEY` |
 | `timeout` | seconds, 120 |
 | `agent` | `on` (default) or `off` |
 | `log` | a file, or `off`; default `~/.local/share/gmpas/chat.jsonl` |
+
+> The chat runs on the gmpas scripting tool (no Python calls are involved).

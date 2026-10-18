@@ -1,8 +1,6 @@
 # Python API
 
-The names exported by `import gmpas`. The notebook page shows them in use.
-
-## Opening data
+## Opening netCDF files
 
 ```{eval-rst}
 .. autofunction:: gmpas.open_mpas
@@ -13,7 +11,7 @@ The names exported by `import gmpas`. The notebook page shows them in use.
    :members:
 ```
 
-## Drawing
+## Viewer
 
 ```{eval-rst}
 .. autofunction:: gmpas.cell_field
@@ -32,7 +30,7 @@ The names exported by `import gmpas`. The notebook page shows them in use.
 .. autofunction:: gmpas.reconstruct_cell_winds
 ```
 
-## Data access
+## Data operations
 
 ```{eval-rst}
 .. autofunction:: gmpas.select

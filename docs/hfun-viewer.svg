@@ -1,4 +1,4 @@
-<svg width="680" viewBox="0 0 680 470" role="img" xmlns="http://www.w3.org/2000/svg">
+<svg width="680" viewBox="0 0 680 375" role="img" xmlns="http://www.w3.org/2000/svg">
 <title>How gmpas prep hfun works</title>
 <desc>A user's hfun.py is imported by path. Once at startup it is sampled over the whole sphere on the same lat-lon grid create_hfun.py would write, giving the colour limits and the maximum cell size gradient. For each view box the browser asks for, get_hfun is called exactly once over that view's pixel centres and the result is colour-mapped to a PNG. It is never called per pixel.</desc>
 <style>
@@ -32,7 +32,6 @@
 
 <g class="teal"><rect x="245" y="30" width="190" height="52" rx="4"/><text class="th" x="340" y="51" text-anchor="middle">hfun.py</text><text class="ts" x="340" y="68" text-anchor="middle">hfun_min &#183; get_hfun(lon, lat)</text></g>
 <line class="arr" x1="340" y1="82" x2="340" y2="118" marker-end="url(#arrow)"/>
-<text class="tn" x="356" y="105" text-anchor="start">imported by path, under a private module name</text>
 <g class="gray"><rect x="245" y="120" width="190" height="52" rx="4"/><text class="th" x="340" y="141" text-anchor="middle">Hfun</text><text class="ts" x="340" y="158" text-anchor="middle">validated on 4 probe points</text></g>
 <line class="arr" x1="280" y1="172" x2="175" y2="208" marker-end="url(#arrow)"/>
 <line class="arr" x1="400" y1="172" x2="505" y2="208" marker-end="url(#arrow)"/>
@@ -42,10 +41,6 @@
 <g class="coral"><rect x="370" y="210" width="270" height="52" rx="4"/><text class="th" x="505" y="231" text-anchor="middle">view pixel centres</text><text class="ts" x="505" y="248" text-anchor="middle">one get_hfun call, whole array</text></g>
 <line class="arr" x1="175" y1="262" x2="175" y2="298" marker-end="url(#arrow)"/>
 <line class="arr" x1="505" y1="262" x2="505" y2="298" marker-end="url(#arrow)"/>
-<g class="purple"><rect x="40" y="300" width="270" height="52" rx="4"/><text class="th" x="175" y="321" text-anchor="middle">diagnose</text><text class="ts" x="175" y="338" text-anchor="middle">max |grad h| vs 0.03</text></g>
+<g class="purple"><rect x="40" y="300" width="270" height="52" rx="4"/><text class="th" x="175" y="331" text-anchor="middle">quality check</text></g>
 <g class="coral"><rect x="370" y="300" width="270" height="52" rx="4"/><text class="th" x="505" y="321" text-anchor="middle">colour-map</text><text class="ts" x="505" y="338" text-anchor="middle">palette PNG to the browser</text></g>
-<path class="dash" d="M310 326 L340 326 L340 372 L505 372" marker-end="url(#arrow)"/>
-<text class="tn" x="340" y="392" text-anchor="middle">the colour scale is fixed from the whole-sphere pass,</text>
-<text class="tn" x="340" y="407" text-anchor="middle">so a refinement band keeps its colour while you pan</text>
-<text class="tn" x="340" y="440" text-anchor="middle">no mesh exists yet &#8212; nothing here reads a grid file</text>
 </svg>
