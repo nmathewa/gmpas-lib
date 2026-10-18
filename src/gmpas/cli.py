@@ -74,8 +74,6 @@ environment:
   GMPAS_CACHE_DIR   where cached mesh geometry goes (default ~/.cache/gmpas/mesh)
   GMPAS_VALUES_CACHE_MB  field values held per series (default 512)
   GMPAS_VIEW_CACHE_MB    view indices and overlays held per viewer (default 256)
-  GMPAS_TIMING      1 reports where startup time went, 2 adds per-frame stages
-  GMPAS_TIMING_FILE write those lines to a file instead of stderr
   JIGSAWDIR         the jigsaw executable, or the directory holding it
   MKGRIDFILE        the mkgrid executable, or the directory holding it
                     both required by `gmpas prep generate`
