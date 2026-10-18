@@ -158,7 +158,6 @@ def series_pool(workers: int):
 #: memory back. Long enough to cover a user clicking from point to point;
 #: short enough that a viewer left open overnight is not holding it.
 POOL_IDLE_SECONDS = 120.0
-POOL_IDLE_ENV = "GMPAS_SERIES_POOL_IDLE"
 
 #: Roughly what starting a pool of readers costs -- eight processes, each
 #: importing netCDF4. Measured at 0.49 s on this hardware. Only ever used to
@@ -170,23 +169,6 @@ POOL_START_SECONDS = 0.5
 #: rest should go to workers. Enough to average out one unlucky open; few
 #: enough to cost nothing when the answer turns out to be yes.
 SCAN_PROBE_FILES = 12
-
-
-def pool_idle() -> float:
-    """Seconds to keep idle readers. 0 tears them down after every read.
-
-    Eight warm workers are around 500 MB resident, which buys a point series
-    at 45 ms instead of 490 ms. That is the right trade at a desk and on a
-    login node with room; somewhere with a hard memory cap it is not, so it
-    can be turned off.
-    """
-    raw = os.environ.get(POOL_IDLE_ENV)
-    if raw:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:                  # unparseable: keep the default
-            pass
-    return POOL_IDLE_SECONDS
 
 
 def _warm_worker(_):
@@ -214,7 +196,7 @@ class ReaderPool:
     """
 
     def __init__(self, idle: float | None = None):
-        self._idle = pool_idle() if idle is None else idle
+        self._idle = POOL_IDLE_SECONDS if idle is None else idle
         self._pool = None
         self._size = 0
         self._users = 0
