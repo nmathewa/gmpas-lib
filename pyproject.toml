@@ -72,7 +72,8 @@ packages = ["src/gmpas"]
 # The trailing /** matters: a bare directory path here matches nothing, and
 # the exclude silently does not apply. Checked by tests/test_packaging.py,
 # because the failure is invisible until someone downloads the sdist.
-exclude = ["docs/demo/data/**", "docs/demo/site/**"]
+# The docs videos are for Read the Docs, and about 5 MB.
+exclude = ["docs/demo/data/**", "docs/demo/site/**", "docs/_static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
