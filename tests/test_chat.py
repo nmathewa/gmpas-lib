@@ -686,6 +686,7 @@ def test_a_history_that_is_not_a_list_is_none():
 
 
 def test_a_password_in_the_url_is_not_repeated():
+    pytest.importorskip("ollama", reason='the Ollama path needs "gmpas[chat]"')
     cfg = {**CFG, "url": "http://user:secret@127.0.0.1:9", "timeout": 2.0}
     with pytest.raises(chat.ChatError) as err:
         chat.ask("temperature", META, cfg=cfg)
