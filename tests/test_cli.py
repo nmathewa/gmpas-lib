@@ -73,7 +73,7 @@ def test_missing_plot_dependency_is_reported_not_traced(
 
     err = capsys.readouterr().err
     assert "gmpas:" in err
-    assert "pip install gmpas[plot]" in err
+    assert "pip install --upgrade gmpas" in err
 
 
 def test_all_steps_requires_a_step_placeholder(capsys, tmp_path, simple_mesh_file):

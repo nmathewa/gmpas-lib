@@ -19,6 +19,7 @@ they used before.
 
 from __future__ import annotations
 
+import html
 import json
 import sys
 import threading
@@ -82,7 +83,7 @@ class Source:
 def nav(sources: list[Source], current: str) -> str:
     links = "".join(
         f'<a href="/{s.slug}/" class="{"on" if s.slug == current else ""}">'
-        f'{s.label}</a>'
+        f'{html.escape(s.label)}</a>'
         for s in sources
     )
     return _NAV.replace("__LINKS__", links)
@@ -90,8 +91,9 @@ def nav(sources: list[Source], current: str) -> str:
 
 def index_page(sources: list[Source]) -> str:
     cards = "".join(
-        f'<a class="card" href="/{s.slug}/"><b>{s.label}</b>'
-        f'<span>{s.detail}</span></a>'
+        # file names reach the detail line: escaped, so a name cannot add markup
+        f'<a class="card" href="/{s.slug}/"><b>{html.escape(s.label)}</b>'
+        f'<span>{html.escape(s.detail)}</span></a>'
         for s in sources
     )
     n = len(sources)
@@ -159,6 +161,21 @@ def router(sources: list[Source]):
                                   "application/json")
             self.path = rest + (f"?{url.query}" if url.query else "")
             return source.handler.do_GET(self)
+
+        def do_POST(self):
+            # the run page's model form is the one thing posted
+            url = urlparse(self.path)
+            parts = url.path.lstrip("/").split("/", 1)
+            if only is not None and parts[0] != only.slug:
+                target = only
+            else:
+                target = by_slug.get(parts[0])
+                if target is None or len(parts) < 2:
+                    return self.send_error(404)
+                self.path = "/" + parts[1]
+            if not hasattr(target.handler, "do_POST"):
+                return self.send_error(404)
+            return target.handler.do_POST(self)
 
     return Router
 

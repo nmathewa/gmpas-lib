@@ -502,6 +502,39 @@ def _padded(coords: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return np.arange(first, last + 1)
 
 
+def _overlap_note(files, labels_of) -> str:
+    """Files whose times repeat or run backwards, said once on stderr.
+
+    The files are laid end to end in name order. Files that hold different
+    fields for the same times (ERA5 split by variable) or that overlap (a
+    re-download beside the original) then give every date twice and steps that
+    go back in time, which reads as a strange run rather than as two files.
+    Nothing is dropped: which file is the right one is the user's call.
+    """
+    same, back = {}, []
+    prev = None
+    for f in files:
+        got = labels_of.get(f)
+        if not got:
+            continue
+        same.setdefault(tuple(got), []).append(f.name)
+        if prev is not None and got[0] <= prev[1]:
+            back.append(f"  {f.name} starts at {got[0]}, before {prev[0]} ends at {prev[1]}")
+        prev = (f.name, got[-1])
+    lines = []
+    for names in same.values():
+        if len(names) > 1:
+            lines.append("  the same times in " + ", ".join(names))
+    shown = {n for v in same.values() if len(v) > 1 for n in v}
+    lines += [b for b in back if b.split()[0] not in shown]
+    if not lines:
+        return ""
+    return ("gmpas: these files repeat each other's times, so the time axis holds "
+            "every date more than once:\n" + "\n".join(lines) +
+            "\n  nothing is merged or dropped: open only the files of one series, "
+            "e.g. a glob of one variable's files")
+
+
 class GenericViewer:
     """Same public surface as `viewer.Viewer`, backed by plain netCDF files on
     one regular grid instead of an MPAS mesh + Series.
@@ -947,6 +980,9 @@ class GenericViewer:
             self.files = [f for f in self.files if f in keep]
         self._counts, self._labels_of = counts, labels
         self._steps, self.labels = self._axis()
+        note = _overlap_note(self.files, labels)
+        if note:
+            print(note, file=sys.stderr)
         self.scanning = False
 
     def __len__(self) -> int:

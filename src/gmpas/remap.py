@@ -152,7 +152,6 @@ def _esmf_supports_mpi(tool: str) -> bool | None:
     Returns `None`, not `False`, when `esmf.mk` cannot be found or parsed:
     "unknown" and "known not to work" get different messages upstream.
     """
-    import os
 
     comm = _esmf_comm(tool)
     return None if comm is None else comm != "mpiuni"

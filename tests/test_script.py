@@ -300,3 +300,93 @@ def test_a_globe_keeps_its_turn(page):
     got = page.evaluate("() => P")
     assert got["proj"] == "Orthographic"
     assert (got["plon"], got["plat"]) == pytest.approx((-60, 35))
+
+
+# ------------------------------------------------- comments, levels, mistakes
+
+def test_a_comment_may_follow_a_value():
+    from gmpas import script
+    assert script.parse("cmap = viridis # dark\ntime = 3 #") == {"cmap": "viridis", "time": 3}
+    assert script.parse("under_color = #ff0000 # red")["colour"] == {"under_color": "#ff0000"}
+
+
+def test_a_level_may_be_said_in_pascals():
+    from gmpas import script
+    meta = {"steps": 1, "labels": ["x"], "variables": [
+        {"name": "t", "levels": 3, "level_values": [100000, 85000, 70000], "level_units": "Pa"},
+        {"name": "z", "levels": 3, "level_values": [1000, 850, 700], "level_units": "hPa"}]}
+    for text in ("var = t\nlevel = 850 hPa", "var = t\nlevel = 85000 Pa",
+                 "var = z\nlevel = 85000 Pa", "shade(t.sel(level=85000))"):
+        assert script.resolve(script.parse(text), meta)["level"] == 1
+
+
+def test_one_level_number_for_fields_with_different_axes_is_refused():
+    from gmpas import script
+    meta = {"steps": 1, "labels": ["x"], "variables": [
+        {"name": "u", "levels": 3, "level_values": [1000, 850, 700], "level_units": "hPa"},
+        {"name": "v", "levels": 2, "level_values": [850, 700], "level_units": "hPa"},
+        {"name": "w", "levels": 3, "level_values": [1000, 850, 700], "level_units": "hPa"}]}
+    with pytest.raises(script.ScriptError, match="level 1 of u but level 0 of v"):
+        script.resolve(script.parse("shade(u.sel(level=850) + v.sel(level=850))"), meta)
+    assert script.resolve(script.parse("shade(u.sel(level=850) + w.sel(level=850))"),
+                          meta)["level"] == 1
+
+
+def test_contour_levels_may_be_a_list():
+    from gmpas import script
+    got = script.parse("contourf(t, levels=[270, 280.5])")
+    assert got["colour"]["levels"] == "(270)(280.5)"
+
+
+def test_the_land_and_the_sea_lie_under_the_field_whatever_the_order():
+    from gmpas import script
+    got = script.parse("var = t2m\ngridlines()\nborders()\nland()\nocean()")
+    assert [x["kind"] for x in got["layers"]["layers"]][:4] == \
+        ["land", "ocean", "pcolormesh", "gridlines"]
+
+
+@pytest.mark.parametrize("text, says", [
+    ("shade(" + "+".join(["t"] * 1500) + ")", "nested too deeply"),
+    ('contourf(t)\nfigure(look="nonexistent")', "look='nonexistent'"),
+    ("spd = hypot(u, v)", "spd is set and never used: show it with var = spd"),
+    ("cmapp = viridis", "unknown key 'cmapp'"),
+])
+def test_a_mistake_is_said_as_itself(text, says):
+    from gmpas import script
+    with pytest.raises(script.ScriptError, match=says):
+        script.parse(text)
+
+
+def test_an_empty_line_gives_way_to_a_pick_and_a_level_before_a_reduction_is_kept():
+    from gmpas import script
+    meta = {"steps": 2, "labels": ["2012-01-01 00:00", "2012-01-01 01:00"],
+            "time_statistics": True, "variables": [
+                {"name": "u", "levels": 3, "level_values": [1000, 850, 700],
+                 "level_units": "hPa"},
+                {"name": "v", "levels": 3, "level_values": [1000, 850, 700],
+                 "level_units": "hPa"}]}
+    # a view restated with its blanks, then a pick: the pick stands
+    got = script.resolve(script.parse("var = u.sel(level=850)\ntime =\nlevel ="), meta)
+    assert got["var"] == "u" and got["level"] == 1
+    # the level picked before the time mean is the level of the mean
+    for text in ('var = u.sel(level=850).mean("time")', 'shade(u.isel(level=1).max("time"))',
+                 'shade(u.mean("time").sel(level=850))'):
+        got = script.resolve(script.parse(text), meta)
+        assert got["level"] == 1 and got["var"] in ("u.mean('time')", "u.max('time')")
+    with pytest.raises(script.ScriptError, match="already set"):
+        script.parse("var = u.sel(level=850)\nlevel = 2")
+    one = {**meta, "variables": [{"name": "t2m", "levels": 1}]}
+    with pytest.raises(script.ScriptError, match="lists no level values"):
+        script.resolve(script.parse('shade(t2m.sel(level=3).mean("time"))'), one)
+
+
+def test_a_level_past_a_derived_fields_levels_is_refused():
+    from gmpas import script
+    meta = {"steps": 1, "labels": ["x"], "variables": [
+        {"name": "u", "levels": 3, "level_values": [1000, 850, 700], "level_units": "hPa"},
+        {"name": "v", "levels": 3, "level_values": [1000, 850, 700], "level_units": "hPa"}]}
+    with pytest.raises(script.ScriptError, match="write level = 850 hPa"):
+        script.resolve(script.parse("var = hypot(u, v)\nlevel = 850"), meta)
+    with pytest.raises(script.ScriptError, match="outside hypot"):
+        script.resolve(script.parse("level = 5"), meta, "hypot(u, v)")
+    assert script.resolve(script.parse("var = hypot(u, v)\nlevel = 2"), meta)["level"] == 2

@@ -497,6 +497,27 @@ def is_sidecar(path: Path) -> bool:
     return path.name.startswith("._")
 
 
+#: Names MPAS gives the files that hold the mesh rather than the output
+_MESH_NAME = re.compile(r"(\.grid|\.static|[._]init|^mesh)\.nc$|^static\.nc$|^init\.nc$",
+                        re.IGNORECASE)
+
+
+def _data_files(found) -> list[Path]:
+    """A run directory's output files, without the mesh file kept beside them.
+
+    `x1.41943042.grid.nc` next to `history.2020-01-28_00.00.00.nc` is where the
+    mesh comes from, not a second time step: counted as one, it added a step
+    labelled with its own name. A mesh-named file is left out only when files
+    whose names carry a time are there to be the run; a directory of nothing
+    but an init file is still that file.
+    """
+    found = list(found)
+    timed = [f for f in found if parse_time(f) is not None]
+    if not timed:
+        return found
+    return [f for f in found if not (_MESH_NAME.search(f.name) and parse_time(f) is None)]
+
+
 def expand(paths) -> list[Path]:
     """Turn a path, glob, directory or list into a sorted list of files."""
     if isinstance(paths, (str, Path)):
@@ -506,7 +527,7 @@ def expand(paths) -> list[Path]:
     for item in paths:
         p = resolve_path(item)
         if p.is_dir():
-            out.extend(f for f in p.glob("*.nc") if not is_sidecar(f))
+            out.extend(_data_files(f for f in p.glob("*.nc") if not is_sidecar(f)))
         elif any(ch in str(item) for ch in "*?["):
             base = p.parent
             out.extend(sorted(f for f in base.glob(Path(str(item)).name)

@@ -319,3 +319,9 @@ def test_the_build_progress_reaches_the_page():
     state = warm.state()
     assert (state["done"], state["total"]) == (4, 10)
     assert "mesh cache" in state["phase"] and "4/10 blocks" in state["detail"]
+
+
+def test_a_file_name_on_the_index_is_text_not_markup():
+    src = [Source("mesh", "mesh", "m<img src=x onerror=alert(1)>.nc · 12 cells", None)]
+    page = index_page(src)
+    assert "<img" not in page and "&lt;img src=x onerror=alert(1)&gt;" in page
