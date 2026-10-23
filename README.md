@@ -14,15 +14,14 @@ A graphical MPAS (Model for Prediction Across Scales) viewer supports Native Vor
 **[Try the viewer in your browser](https://nmathewa.github.io/gmpas-lib/)** 
 
 ```bash
-pip install "gmpas[plot]"
+pip install gmpas
 gmpas view /path/to/run/
 ```
 
 | install | what it brings |
 | --- | --- |
-| `pip install gmpas` | the core: mesh geometry, caching, remap weights; no viewer |
-| `pip install "gmpas[plot]"` | gmpas viewer  |
-| `pip install "gmpas[plot,chat]"` | chat with a model named in `chat.conf` (Ollama, OpenAI-compatible, Anthropic) |
+| `pip install gmpas` | gmpas viewer  |
+| `pip install "gmpas[chat]"` | chat with a model named in `chat.conf` (Ollama, OpenAI-compatible, Anthropic) |
 | in a conda environment, from source | `conda env create -f environment.yml && conda activate gmpas && pip install -e . --no-deps` |
 
 ![gmpas view on a 3.75 km global mesh](https://raw.githubusercontent.com/nmathewa/gmpas-lib/main/docs/_static/gmpas-3.75km.gif)
@@ -75,10 +74,6 @@ MPAS-A output with 55 vertical levels:
 | gmpas, forced `method="poly"` (not the default here) | 0.84s | 49.9s | -- |
 | mpasviewer (always polygons, no caching) | 0.60s | 7.39s | 6.85s |
 | uxarray (`polygons`, datashader) | 0.86s | 31.3s | 3.24s |
-
-This is the real story, and it's worth being precise about what each number
-means:
-
 
 ### Why it is fast
 

@@ -441,7 +441,7 @@ def test_a_level_may_be_said_as_a_pressure():
     # with no field named, it is a level of the field on screen
     assert _read("level = 850 hPa", shown="t")["level"] == 1
     # a level the file does not list is not matched to a nearby one
-    with pytest.raises(script.ScriptError, match="860 is not one of t's levels"):
+    with pytest.raises(script.ScriptError, match="860 hPa is not one of t's levels"):
         _read("var = t\nlevel = 860 hPa")
     with pytest.raises(script.ScriptError, match="lists no level values"):
         _read("level = 850 hPa")
@@ -655,7 +655,6 @@ def test_a_date_given_in_part_is_a_time_when_it_is_one_step():
     ('a = t2m - 1\nshade(a.mean("time"))', "a is not a field of the file as it stands"),
     ('shade(t2m.sel(month=13).mean("time"))', "takes 1 to 12"),
     ('shade(t2m.sel(season="winter").mean("time"))', "DJF, MAM, JJA or SON"),
-    ('shade(t2m.sel(level=3).mean("time"))', "not a way to pick time steps"),
     ('shade(t2m.mean("time").mean("time"))', "reduced over time once"),
     ('shade(t2m.sel(time="December").mean("time"))', "takes a date such as"),
 ])

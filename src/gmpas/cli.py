@@ -469,7 +469,7 @@ def _resolve_mesh(args, cfg, series):
 def _remap(args) -> int:
     """Read the config, build weights once, convert every file."""
     from .config import CONFIG_NAMES, discover
-    from .remap import (RemapError, Weights, detect_cores,
+    from .remap import (Weights, detect_cores,
                         ensure_weights, remap_many)
     from .series import Series
 
@@ -507,7 +507,7 @@ def _remap(args) -> int:
         detected, source = detect_cores()
         requested = args.jobs if args.jobs > 0 else detected
 
-        print(f"\n[2/3] weights")
+        print("\n[2/3] weights")
         weights_path, built = ensure_weights(
             mesh_path, domain, work, method=args.method,
             force=args.force_weights, ranks=requested,
@@ -536,7 +536,6 @@ def _remap(args) -> int:
     finally:
         series.close()
 
-    n = len(series.files)
     todo = [(src, work / f"{src.stem}.remap.nc") for src in series.files]
     if not args.overwrite:
         existing = [(a, b) for a, b in todo if b.exists()]
@@ -658,7 +657,19 @@ def _kind(args) -> str:
     return kind
 
 
+def _need_plot() -> None:
+    """The viewer draws every frame with matplotlib, cartopy and pillow, which
+    come with gmpas. In an environment that lacks them it would start, print
+    its URL and then fail on each picture: say so now instead."""
+    import importlib.util
+
+    for name in ("PIL", "matplotlib", "cartopy"):
+        if importlib.util.find_spec(name) is None:
+            raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+
+
 def _view(args) -> int:
+    _need_plot()
     if getattr(args, "script", None):
         from . import script
 
@@ -710,6 +721,7 @@ def _generic_view(args) -> int:
 
 
 def _prep_view(args) -> int:
+    _need_plot()
     return _dashboard(args, mesh_path=args.mesh_file,
                       hfun_path=args.hfun or "")
 
@@ -723,6 +735,7 @@ def _prep_hfun(args) -> int:
         print(report(HfunViewer(args.hfun_file)))
         return 0
 
+    _need_plot()
     return _dashboard(args, mesh_path=args.mesh or "",
                       hfun_path=args.hfun_file)
 
@@ -769,7 +782,7 @@ def _prep_scale(args) -> int:
             print(f"comparison plot: {png}")
         except ModuleNotFoundError as exc:
             print(f"gmpas: skipped the comparison plot -- {exc}. Rendering "
-                 f"needs the optional plot extra:  pip install gmpas[plot]  "
+                 f"needs matplotlib and cartopy:  pip install --upgrade gmpas  "
                  f"(or pass --no-plot)", file=sys.stderr)
     return 0
 
@@ -835,7 +848,7 @@ def _prep_create_region(args) -> int:
             print(f"region plot: {png}")
         except ModuleNotFoundError as exc:
             print(f"gmpas: skipped the region plot -- {exc}. Rendering "
-                 f"needs the optional plot extra:  pip install gmpas[plot]  "
+                 f"needs matplotlib and cartopy:  pip install --upgrade gmpas  "
                  f"(or pass --no-plot)", file=sys.stderr)
     return 0
 
@@ -849,7 +862,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"gmpas {__version__}")
     # not required: a bare `gmpas` prints help rather than an argparse error
-    sub = p.add_subparsers(dest="cmd", metavar="{info,plot,view}")
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND")
 
     # Setting $GMPAS_CACHE_DIR by hand only works if the assignment precedes
     # `gmpas` on the command line; placed after the command (a common mistake)
@@ -1193,7 +1206,7 @@ def numpy_abi_problem(exc: BaseException) -> str | None:
         "Two Python stacks are mixed: usually a `pip install --user` copy, or a",
         "conda environment, beside the system's own packages. To fix it, install",
         "gmpas into the environment that should run it, and keep ~/.local out:",
-        '  python -m pip install --upgrade "gmpas[plot]"',
+        '  python -m pip install --upgrade gmpas',
         "  export PYTHONNOUSERSITE=1       # in a conda env: conda env config vars set "
         "PYTHONNOUSERSITE=1",
         "  which -a gmpas                  # a ~/.local/bin/gmpas listed first is a stray "
@@ -1273,8 +1286,9 @@ def main(argv=None) -> int:
             print(problem, file=sys.stderr)
             return 1
         if isinstance(exc, ModuleNotFoundError):
-            print(f"gmpas: {exc}. Rendering needs matplotlib and cartopy, which are "
-                  f"an optional extra — install them with:  pip install gmpas[plot]",
+            print(f"gmpas: {exc}. Drawing needs matplotlib, cartopy and pillow, which "
+                  f"come with gmpas — this environment lacks them:  "
+                  f"pip install --upgrade gmpas",
                   file=sys.stderr)
             return 1
         raise

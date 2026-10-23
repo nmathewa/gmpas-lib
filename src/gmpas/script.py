@@ -139,6 +139,9 @@ _PRESSURE = re.compile(r"^(\d+(?:\.\d+)?)\s*(?:hpa|mb|mbar|millibars?|hectopasca
                        re.I)
 _PRESSURE_UNITS = ("hpa", "mb", "mbar", "millibar", "millibars", "hectopascal",
                    "hectopascals")
+#: ... or in pascals, as ERA5 on model levels and some CMIP files list them
+_PASCAL = re.compile(r"^(\d+(?:\.\d+)?)\s*(?:pa|pascals?)$", re.I)
+_PASCAL_UNITS = ("pa", "pascal", "pascals")
 
 
 def _value(key: str, text: str):
@@ -152,8 +155,11 @@ def _value(key: str, text: str):
         hit = _PRESSURE.match(text)
         if hit:                              # 500 hPa: the level's own value
             return {"value": float(hit[1]), "units": "hPa"}
+        hit = _PASCAL.match(text)
+        if hit:                              # 50000 Pa is 500 hPa
+            return {"value": float(hit[1]) / 100, "units": "hPa"}
         raise ValueError(f"level takes a whole number, or a pressure such as "
-                         f"500 hPa, not {text!r}")
+                         f"500 hPa or 50000 Pa, not {text!r}")
     if key == "time":
         try:
             return int(text)
@@ -178,6 +184,9 @@ def _value(key: str, text: str):
     return text
 
 
+_TAIL_COMMENT = re.compile(r"(^|\s)#(\s.*)?$")
+
+
 def parse(text: str, shown: str | None = None) -> dict:
     """The script as {key: value}, with None for a key that is cleared.
 
@@ -190,7 +199,14 @@ def parse(text: str, shown: str | None = None) -> dict:
     lines = text.splitlines()
     if len(lines) > MAX_LINES:
         raise ScriptError(f"a script has at most {MAX_LINES} lines")
-    if _CALL_LINE.search(text) or _PICK_LINE.search(text):
+    try:
+        return _parse(text, lines, shown)
+    except RecursionError:
+        raise ScriptError("an expression is nested too deeply to read") from None
+
+
+def _parse(text: str, lines: list[str], shown: str | None) -> dict:
+    if _CALL_LINE.search(text) or _PICK_LINE.search(text) or _LEVEL_LINE.search(text):
         return _parse_python(text, shown)
     try:
         return _parse_lines(lines)
@@ -201,8 +217,10 @@ def parse(text: str, shown: str | None = None) -> dict:
         if _defines(text):
             try:
                 return _parse_python(text, shown)
-            except _Unused:
-                pass
+            except _Unused as unused:
+                # `spd = hypot(u, v)` alone is a definition, not a misspelt key
+                if re.search(r"[-+*/()]", unused.formula or ""):
+                    raise ScriptError(unused.shown) from None
         raise
 
 
@@ -215,6 +233,9 @@ def _parse_lines(lines: list[str]) -> dict:
         if not line or line[0] in "#!":
             continue
         key, eq, value = line.partition("=")
+        # a comment after the value: "# " or a bare "#" at the end, after a
+        # space. A colour such as #ff0000 has no space after it and stays
+        value = _TAIL_COMMENT.sub("", value)
         key, value = key.strip().lower(), value.strip()
         if not eq:
             raise ScriptError(f"line {n}: expected key = value, got {line!r}")
@@ -266,6 +287,9 @@ _CALL_LINE = re.compile(r"^[ \t]*(?:[A-Za-z_][\w.]*[ \t]*)?\(", re.M)
 #: only the Python form reads. A field reduced over time is read as it always was.
 _PICK_LINE = re.compile(r"^[ \t]*var[ \t]*=(?![^\n]*\.(?:mean|max|min)\()"
                         r"[^\n]*\.i?sel\(", re.M | re.I)
+#: ... and `var = u.sel(level=850).mean("time")`: a level picked of a field
+#: reduced over time is read there too, where the level is taken out of the chain
+_LEVEL_LINE = re.compile(r"^[ \t]*var[ \t]*=[^\n]*\.i?sel\([^)\n]*\blevel[ \t]*=", re.M | re.I)
 #: What draws one field, and the plot kind it is.
 _FIELD = {"shade": "map", "contourf": "contourf", "contour": "contour",
           "pcolormesh": "pcolormesh", "imshow": "imshow", "hist": "hist",
@@ -384,6 +408,8 @@ def _setting_text(key: str, node) -> str | None:
         parts = [_number_of(e) for e in node.elts]
         if None in parts:
             _fail(node, f"{key} takes numbers")
+        if key == "levels":                          # levels=[270, 280]: those lines
+            return "".join(f"({v!r})" for v in parts)
         return ", ".join(repr(v) for v in parts)
     _fail(node, f"{key} takes a number, a name or a quoted string")
 
@@ -404,7 +430,8 @@ class _Fields:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             how = node.func.attr
             if how in _derive.REDUCTIONS:
-                return self._over_time(node), {}
+                node, picked = self._level_out(node)
+                return self._over_time(node), picked
             if how not in ("isel", "sel"):
                 _fail(node, f".{how}() is not understood; .isel(), .sel() and, over "
                             f"time, .mean(\"time\"), .max(\"time\"), .min(\"time\") are")
@@ -444,6 +471,30 @@ class _Fields:
         finally:
             self._mix = saved
         return text, picked
+
+    def _level_out(self, node):
+        """`u.sel(level=850).mean("time")`: the level picked before the
+        reduction is the same field as `u.mean("time").sel(level=850)`, the
+        level being picked of each step alike. It is taken out of the chain
+        and returned as the level, so only time picks reach gmpas.derive."""
+        node = copy.deepcopy(node)
+        picked: dict = {}
+        call = node
+        while isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
+            inner = call.func.value
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute) \
+                    and inner.func.attr in ("sel", "isel"):
+                level = [kw for kw in inner.keywords if kw.arg == "level"]
+                if level:
+                    if "level" in picked:
+                        _fail(node, "level is picked twice")
+                    picked["level"] = self._pick(inner.func.attr, level[0])
+                    inner.keywords = [kw for kw in inner.keywords if kw.arg != "level"]
+                    if not inner.keywords:              # .sel(level=850) alone: gone
+                        call.func.value = inner.func.value
+                        continue
+            call = inner
+        return node, picked
 
     def _over_time(self, node) -> str:
         """A field reduced over time -- `sst.sel(month=12).mean("time")` -- in
@@ -570,6 +621,10 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
             options = {kw.arg: _option_of(verb, kw.arg, kw.value)
                        for kw in call.keywords}
             if verb == "figure":
+                try:                      # said here, not as "names no field"
+                    _layers._clean_options(options, _layers.FIGURE_OPTIONS, "figure: ")
+                except ValueError as exc:
+                    _fail(call, str(exc))
                 figure.update(options)
             else:
                 layers.append({"kind": verb, "visible": True, "opacity": 1,
@@ -637,20 +692,31 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
     draws: list = []
 
     lines: set[str] = set()          # keys set by a plain `key = value` line
+    cleared: set[str] = set()        # ... and those of them left empty: `key =`
 
     def put(key: str, node, line: int, written=None, call=True, clear=False,
             ready=None):
         # A call that draws says what it draws; a plain line saying the same
         # thing another way gives way to it, in whichever order they come.
-        # Two lines, or two calls, that disagree are still a mistake.
+        # An empty `key =` gives way to anything that sets the key -- a view
+        # restated with its blanks, then `var = t.sel(level=850)` -- and is
+        # itself dropped after one. Two lines, or two calls, that set it
+        # otherwise are still a mistake.
         if key in where:
-            if call and key in lines:
+            if key in cleared:
+                cleared.discard(key)
+                lines.discard(key)
+            elif clear:
+                return
+            elif call and key in lines:
                 lines.discard(key)
             elif not call and key not in lines:
                 return
             else:
                 raise ScriptError(f"line {line}: {key} is already set on line "
                                   f"{where[key]}")
+        elif clear:
+            cleared.add(key)
         if not call:
             lines.add(key)
         where[key] = line
@@ -800,11 +866,13 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
         stack, extra = _stack(draws, fields)
         shaded = ("pcolormesh", "contourf", "imshow")
         if under and not any(x["kind"] in shaded for x in stack["layers"]):
-            at = next(i for i, x in enumerate(stack["layers"])
-                      if x["kind"] not in ("land", "ocean"))
-            stack["layers"].insert(at, {"kind": "pcolormesh", "var": under,
-                                        "visible": True, "opacity": 1,
-                                        "level": "follow", "options": {}})
+            # over the land and the sea, under everything else: written in any
+            # order, a fill listed after a line feature would cover the field
+            fills = [x for x in stack["layers"] if x["kind"] in ("land", "ocean")]
+            rest = [x for x in stack["layers"] if x["kind"] not in ("land", "ocean")]
+            stack["layers"][:] = fills + [{"kind": "pcolormesh", "var": under,
+                                           "visible": True, "opacity": 1,
+                                           "level": "follow", "options": {}}] + rest
             extra["var"] = next(w for w in re.findall(r"[A-Za-z_]\w*", under)
                                 if w not in _FUNCS)
         line = draws[0][1].lineno
@@ -814,8 +882,12 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
         out["layers"] = stack
     for name, line in defined.items():
         if name not in fields.used:
-            raise _Unused(f"line {line}: {name} is set and never used"
-                          f"{_near(name, keys())}")
+            unused = _Unused(f"line {line}: {name} is set and never used"
+                             f"{_near(name, keys())}")
+            unused.shown = (f"line {line}: {name} is set and never used: show it "
+                            f"with var = {name}, or shade({name})")
+            unused.formula = fields.defs[name][0]
+            raise unused
     return _finish(out, colour, where)
 
 
@@ -917,6 +989,35 @@ def _step(t, meta: dict) -> int:
     return t % steps
 
 
+def _levels_of(expr: str, variables: dict) -> int | None:
+    """How many levels a field or an expression has, as the page counts them:
+    the field's own, or its operands' when they all have the same number; one
+    when they differ, where the page shows level 0 alone."""
+    if expr in variables:
+        return variables[expr].get("levels", 1)
+    counts = {variables[w].get("levels", 1)
+              for w in re.findall(r"[A-Za-z_]\w*", expr) if w in variables}
+    return counts.pop() if len(counts) == 1 else (1 if counts else None)
+
+
+def _owner_levels(expr, variables: dict):
+    """(level values, units) of the first field in `expr` that lists them."""
+    words = [expr] if expr in variables else re.findall(r"[A-Za-z_]\w*", expr or "")
+    for w in words:
+        v = variables.get(w) or {}
+        if v.get("level_values"):
+            return v["level_values"], v.get("level_units") or ""
+    return None
+
+
+def _listed(values, want):
+    """Where `want` is in a level axis, or None."""
+    for i, value in enumerate(values):
+        if abs(value - want) <= 1e-6 * max(1.0, abs(want)):
+            return i
+    return None
+
+
 def _level_index(lev, expr, variables: dict, shown: str | None = None):
     """A level given by its value as its number, where the file lists them.
     Only a level the file lists is found: there is no nearest one."""
@@ -931,17 +1032,45 @@ def _level_index(lev, expr, variables: dict, shown: str | None = None):
     values, want = variables[owner]["level_values"], lev["value"]
     if not math.isfinite(want):
         raise ScriptError(f"level: {want} is not a level")
-    units = (variables[owner].get("level_units") or "").strip()
-    if lev.get("units") and units.lower() not in _PRESSURE_UNITS:
-        raise ScriptError(f"level: {want:g} {lev['units']} was asked for, but "
-                          f"{owner}'s levels are " +
+    asked = f"{want:g} {lev['units']}" if lev.get("units") else f"{want:g}"
+    here = _in_axis(want, lev, variables[owner])
+    if here is None:
+        units = (variables[owner].get("level_units") or "").strip()
+        raise ScriptError(f"level: {asked} was asked for, but {owner}'s levels are " +
                           (f"in {units}" if units else "given with no units"))
-    for i, value in enumerate(values):
-        if abs(value - want) <= 1e-6 * max(1.0, abs(want)):
-            return i
+    found = _listed(values, here)
+    if found is not None:
+        # an expression is read at one level number for every field in it:
+        # fields whose axes list that level at another number would mix levels
+        for w in dict.fromkeys(words):
+            other = (variables.get(w) or {}).get("level_values")
+            if w == owner or not other:
+                continue
+            there = _in_axis(want, lev, variables[w])
+            at = _listed(other, there) if there is not None else None
+            if at != found:
+                where = f"level {at}" if at is not None else "not a level"
+                raise ScriptError(
+                    f"level: {asked} is level {found} of {owner} but {where} of "
+                    f"{w}, and an expression is read at one level number; "
+                    f"show the fields one at a time")
+        return found
     units = variables[owner].get("level_units") or ""
-    raise ScriptError(f"level: {want:g} is not one of {owner}'s levels: "
+    raise ScriptError(f"level: {asked} is not one of {owner}'s levels: "
                       f"{', '.join(f'{v:g}' for v in values)} {units}".rstrip())
+
+
+def _in_axis(want: float, lev: dict, var: dict):
+    """A pressure asked for in hPa as the axis's own number, or None when the
+    axis is not in pressure units. A bare number is the axis's own."""
+    if not lev.get("units"):
+        return want
+    units = (var.get("level_units") or "").strip().lower()
+    if units in _PRESSURE_UNITS:
+        return want
+    if units in _PASCAL_UNITS:
+        return want * 100
+    return None
 
 
 def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
@@ -974,9 +1103,19 @@ def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
     if state.get("level") is not None:
         lev = out["level"] = _level_index(state["level"], out.get("var"), variables,
                                           shown)
+        expr = out.get("var") or shown
+        if levels is None and expr:
+            levels = _levels_of(expr, variables)
         if lev < 0 or (levels is not None and lev >= levels):
-            raise ScriptError(f"level: {lev} is outside {out['var']}'s "
-                              f"{levels} level(s)" if levels is not None
+            listed = _owner_levels(expr, variables)
+            if listed and _listed(listed[0], lev) is not None:
+                hint = (f"; {lev} is one of its level values -- "
+                        f"write level = {lev} {listed[1] or ''}".rstrip())
+            else:
+                whole = expr if str(expr).isidentifier() else f"({expr})"
+                hint = f"; a level by its value is {whole}.sel(level={lev})"
+            raise ScriptError(f"level: {lev} is outside {expr}'s {levels} level(s), "
+                              f"numbered from 0{hint}" if levels is not None
                               else f"level: {lev} is below 0")
     if state.get("ask") is not None:
         ask = dict(state["ask"])

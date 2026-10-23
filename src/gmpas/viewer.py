@@ -1545,6 +1545,39 @@ def _handler(viewer: Viewer, html: str = ""):
     html = html or PAGE
 
     class Handler(PageHandler):
+        def do_POST(self):
+            # the one write: the model form saves chat.conf, key and all. A
+            # browser sends Origin on every POST, and JSON from another site
+            # would need a preflight this server never answers
+            url = urlparse(self.path)
+            if url.path != "/api/chat/config":
+                return self.send_error(404)
+            # exactly this page's origin, port and all: another page on this
+            # machine could otherwise point the saved key at its own server
+            origin = urlparse(self.headers.get("Origin") or "")
+            if origin.scheme not in ("http", "https") or \
+                    origin.netloc.lower() != (self.headers.get("Host") or "").lower() or \
+                    self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                return self.send_error(403, "the page's own form only")
+            try:
+                size = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                size = -1
+            if not 0 < size <= 4096:
+                return self.send_error(413, "a form is under 4 KB")
+            try:
+                given = json.loads(self.rfile.read(size))
+                if not isinstance(given, dict):
+                    raise ValueError
+            except ValueError:
+                return self._send(b'{"error": "not a form"}', "application/json", 400)
+            try:
+                got = _chat.save_settings(given)
+            except _chat.ChatError as exc:
+                return self._send(json.dumps({"error": str(exc)}).encode(),
+                                  "application/json", 400)
+            return self._send(json.dumps(got).encode(), "application/json")
+
         def do_GET(self):
             url = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
@@ -1564,17 +1597,9 @@ def _handler(viewer: Viewer, html: str = ""):
                     meta = {**viewer.describe(),
                             "script": {"keys": _script.keys(),
                                        "startup": _script.startup()}}
-                    # chat is an optional install; with it the right panel
-                    # is the chat box, once a model is named
-                    if _chat.installed():
-                        try:
-                            cfg = _chat.load_config()
-                            log = _chat.log_path(cfg)
-                            meta["chat"] = {"model": cfg["model"],
-                                            "log": str(log) if log else ""} \
-                                if cfg else {"setup": str(_chat.config_path())}
-                        except _chat.ChatError as exc:
-                            meta["chat"] = {"error": str(exc)}
+                    # the chat panel: the model named in chat.conf, or the
+                    # form that names one. gmpas ships no model
+                    meta["chat"] = _chat.settings()
                     return self._send(json.dumps(meta).encode(), "application/json")
                 if url.path == "/api/dims":
                     return _serve_dims(self, viewer, q)
@@ -1710,9 +1735,6 @@ def _handler(viewer: Viewer, html: str = ""):
                                           "application/json", 400)
                     return self._send(json.dumps(state).encode(), "application/json")
                 if url.path == "/api/chat":
-                    if not _chat.installed():
-                        return self._send(b'{"error": "chat is not installed"}',
-                                          "application/json", 404)
                     try:
                         try:
                             said = json.loads(q.get("history") or "[]")
@@ -1894,31 +1916,31 @@ def reach_lines(host: str, port: int) -> list[str]:
                 f"nothing outside {node} can reach that",
                 f"  you are inside a batch job, so a tunnel from your machine "
                 f"lands on {submit_host()} and stops there.",
-                f"  restart with --host 0.0.0.0 to be reachable, and gmpas "
-                f"will print the tunnel command for it.",
+                "  restart with --host 0.0.0.0 to be reachable, and gmpas "
+                "will print the tunnel command for it.",
             ]
         return [
             f"listening on 127.0.0.1:{port} — this machine only",
             f"  on this machine:  http://127.0.0.1:{port}",
-            f"  from another machine, forward the port first — run this THERE:",
+            "  from another machine, forward the port first — run this THERE:",
             f"      ssh -N -L {port}:localhost:{port} {user}@{target}",
             f"    then open       http://localhost:{port}",
-            f"  (an HPC compute node is different: a tunnel lands on the login"
-            f" node and will not reach here, so restart with --host 0.0.0.0)",
+            "  (an HPC compute node is different: a tunnel lands on the login"
+            " node and will not reach here, so restart with --host 0.0.0.0)",
         ]
 
     if in_batch_job():
         # a compute node: reachable only through whoever queued the job
         return [
             f"listening on {host}:{port} — reachable as {node}:{port}",
-            f"  from your own machine, run this THERE:",
+            "  from your own machine, run this THERE:",
             f"      ssh -N -L {port}:{node}:{port} {user}@{submit_host()}",
             f"    then open       http://localhost:{port}",
         ]
 
     return [
         f"listening on {host}:{port} — reachable as {target}:{port}",
-        f"  from your own machine, run this THERE:",
+        "  from your own machine, run this THERE:",
         f"      ssh -N -L {port}:localhost:{port} {user}@{target}",
         f"    then open       http://localhost:{port}",
     ]
@@ -2193,12 +2215,15 @@ body.layering #cmapsec,body.layering #rangesec,body.layering #coloursec{display:
 #right .sec.min>label.fold::before{content:"\u25b8"}
 #right .sec.min>label.fold{margin-bottom:0}
 #right .sec.min>:not(label.fold){display:none!important}
+#chatcfg summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
+#chatcfg input,#chatcfg select{width:100%;box-sizing:border-box}
+#chatcfg label{display:block;margin-top:6px}
 #scriptsec summary{cursor:pointer;color:var(--dim);font-size:11px;
                    text-transform:uppercase;letter-spacing:.06em}
 #scriptBox{width:100%;box-sizing:border-box;height:150px;font:11px monospace;
            margin-top:6px;resize:vertical;white-space:pre}
 #scriptsec .row{display:flex;gap:6px}
-#scripthint.bad,#chathint.bad{color:#e88}
+#scripthint.bad,#chathint.bad,#cfghint.bad{color:#e88}
 /* With a model to ask, the right panel is the chat box and what cannot be
    asked for: animation, export, the probe. The rest is one button away. */
 body.chat #right{width:300px}
@@ -2412,6 +2437,22 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
     <div class="row" style="margin-top:6px"><button id="chatGo" style="flex:1">ask</button>
       <button id="chatAll" title="show or hide the other controls">controls</button></div>
     <div class="hint" id="chathint"></div>
+    <details id="chatcfg"><summary>model</summary>
+      <div class="hint">gmpas ships no model: name a server you can reach. Saved in
+        <span id="cfgpath"></span>, readable by you only.</div>
+      <label for="cfgProvider">provider</label>
+      <select id="cfgProvider"></select>
+      <label for="cfgUrl">url</label>
+      <input id="cfgUrl" spellcheck="false" autocomplete="off"
+        placeholder="http://127.0.0.1:11434">
+      <label for="cfgModel">model</label>
+      <input id="cfgModel" spellcheck="false" autocomplete="off" placeholder="qwen3:8b">
+      <label for="cfgKey">API key</label>
+      <input id="cfgKey" type="password" autocomplete="off" placeholder="none">
+      <div class="row" style="margin-top:6px"><button id="cfgSave" style="flex:1">save</button>
+        <button id="cfgClear" title="remove the saved key">forget key</button></div>
+      <div class="hint" id="cfghint"></div>
+    </details>
   </div>
 
   <div class="sec" id="dimssec" style="display:none"><label>dimensions</label>
@@ -2661,6 +2702,7 @@ async function boot(){
       dl.append(o); });
     document.body.append(dl);
   }
+  CMAP0=$("#cmap").value;              // what `cmap =` goes back to
   home = fit(M.home); view = {...home}; rendered = null;
   if(M.projections){
     M.projections.forEach(n=>{ const o=document.createElement("option");
@@ -2735,22 +2777,58 @@ function chatLine(cls, text){
   $("#chatlog").append(d); $("#chatlog").scrollTop=1e9;
   return d;
 }
+// The right panel is the chat box. With a model named in chat.conf it asks
+// that model; with none, its model form is open and asking waits for it.
+const PLACEHOLDER={ollama:"http://127.0.0.1:11434", openai:"http://127.0.0.1:8000/v1",
+                   anthropic:"https://api.anthropic.com"};
 function chatBoot(){
   if(!M.chat || !M.script) return;
   $("#chatsec").style.display="";
-  if(M.chat.error || M.chat.setup){
+  const c=M.chat;
+  if(!$("#cfgProvider").options.length)
+    (c.providers||["ollama"]).forEach(n=>{ const o=document.createElement("option");
+      o.value=o.textContent=n; $("#cfgProvider").append(o); });
+  $("#cfgProvider").value=c.provider||"ollama";
+  $("#cfgUrl").value=c.url||""; $("#cfgModel").value=c.model||"";
+  $("#cfgUrl").placeholder=PLACEHOLDER[$("#cfgProvider").value]||"";
+  $("#cfgKey").value="";
+  $("#cfgKey").placeholder=c.has_key ? "saved \u2014 leave empty to keep" : "none";
+  $("#cfgClear").style.display=c.has_key ? "" : "none";
+  $("#cfgpath").textContent=c.path||"chat.conf";
+  $("#chathint").style.whiteSpace="pre-wrap";
+  if(c.error || !c.configured){
     $("#chatGo").disabled=true; $("#chatAll").style.display="none";
-    chatSay(M.chat.error || `no model yet: write ${M.chat.setup} with\\n`+
-      `url = http://127.0.0.1:11434\\nmodel = <a model your Ollama has>`, !!M.chat.error);
-    $("#chathint").style.whiteSpace="pre-wrap";
+    $("#chatcfg").open=true;
+    chatSay(c.error || "name a model below to ask in words", !!c.error);
     return;
   }
+  $("#chatGo").disabled=false; $("#chatAll").style.display="";
   document.body.classList.add("chat");
   $("#right h1").textContent="ask";
-  chatSay(`answered by ${M.chat.model}, a model you run`+
-          (M.chat.log ? ` \\u00b7 kept in ${M.chat.log}` : ""));
+  chatSay(`answered by ${c.model}`);
   relayout();
 }
+async function chatSave(clear){
+  const body={provider:$("#cfgProvider").value, url:$("#cfgUrl").value.trim(),
+              model:$("#cfgModel").value.trim()};
+  const key=$("#cfgKey").value.trim();
+  if(key) body.key=key;
+  if(clear) body.clear_key=true;
+  $("#cfgSave").disabled=true;
+  try{
+    const r=await fetch("api/chat/config", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const d=await r.json().catch(()=>({error:`the server answered ${r.status}`}));
+    if(!r.ok){ $("#cfghint").textContent=d.error; $("#cfghint").classList.add("bad"); return; }
+    M.chat=d; $("#cfghint").classList.remove("bad");
+    $("#cfghint").textContent=clear ? "the key is forgotten" : "saved";
+    if(d.configured && !clear) $("#chatcfg").open=false;
+    chatBoot();
+  }finally{ $("#cfgSave").disabled=false; }
+}
+$("#cfgSave").onclick=()=>chatSave(false);
+$("#cfgClear").onclick=()=>chatSave(true);
+$("#cfgProvider").onchange=()=>{ $("#cfgUrl").placeholder=PLACEHOLDER[$("#cfgProvider").value]||""; };
 async function chatAsk(){
   const text=$("#chatText").value.trim();
   if(!text || !cur || $("#chatGo").disabled) return;
@@ -2859,6 +2937,7 @@ async function scriptRun(text, first){
   try{ return await scriptSet(s, first); }
   finally{ HOLD=false; rendered=null; overlay(); draw(); panel(); }
 }
+let CMAP0="";
 async function scriptSet(s, first){
   stopPlayback();
   if(!cur) pick(s.var!=null && varNamed(s.var) ? s.var : first);
@@ -2869,8 +2948,12 @@ async function scriptSet(s, first){
     if(!("level" in s)){ $("#level").value=Math.min(keep, cur.levels-1);
       $("#llab").textContent=$("#level").value; }
   }
-  if(s.time!=null){ $("#time").value=s.time; $("#tlab").textContent=M.labels[s.time]; }
+  // `key =` puts a setting back as the page opens: the first step, the map
+  if("time" in s){ const t=s.time==null ? 0 : s.time;
+    $("#time").value=t; $("#tlab").textContent=M.labels[t]; }
   if(s.point) probePt={lon:s.point[0], lat:s.point[1]};
+  if("kind" in s && s.kind==null && cur.kinds){ $("#kind").value=cur.kinds[0]; setMode();
+    if(!plotMode()) layout(); }
   if(s.kind!=null && cur.kinds){
     if(!cur.kinds.includes(s.kind)){
       scriptSay(`kind: ${cur.name} has no ${s.kind} plot`, true); return false; }
@@ -2890,7 +2973,7 @@ async function scriptSet(s, first){
       `${cur.levels} level(s)`, true); return false; }
     $("#level").value=lev; $("#llab").textContent=lev;
   }
-  if(s.cmap!=null) $("#cmap").value=s.cmap;
+  if("cmap" in s) $("#cmap").value = s.cmap==null ? CMAP0 : s.cmap;
   ["vmin","vmax"].forEach(k=>{ if(k in s) $("#"+k).value = s[k]==null ? "" : s[k]; });
   if(s.colour){
     Object.entries(s.colour).forEach(([k,v])=>{ if(v==null) delete COL[k]; else COL[k]=v; });
@@ -2928,7 +3011,7 @@ async function scriptSet(s, first){
     const q=new URLSearchParams({var:s.ask.var, what:s.ask.what, extent:b.join(","),
       time:s.ask.time!=null ? s.ask.time : $("#time").value,
       level:s.ask.level!=null ? s.ask.level : Math.min(+$("#level").value,
-        ((varNamed(s.ask.var)||{}).levels||1)-1)});
+        levelsOf(s.ask.var)-1)});
     const res=await fetch("api/extreme?"+q), d=await res.json();
     if(!res.ok){ scriptSay(String(d.error).replace(/^[A-Za-z]*Error: /, ""), true);
       return false; }
@@ -2936,7 +3019,7 @@ async function scriptSet(s, first){
       `${P ? "in the data" : "in view"}: ${+d.value.toPrecision(6)} at `+
       `${fmtLat(d.lat)}, ${fmtLon(d.lon)}`;
     // mark(x.max()): the place is marked too, where the map can be marked
-    if(s.ask.mark) setTimeout(()=>ptAt(d.lon, d.lat, "mark"), 0);
+    if(s.ask.mark) setTimeout(()=>ptAnswer(d, s.ask.var, +q.get("time"), +q.get("level")), 0);
     scriptSay(ANSWER);
     return true;
   }
@@ -3125,6 +3208,16 @@ function exportModes(){
 let probePt=null;       // last clicked map point: where series and profiles are taken
 // A field by name as the server resolves it (gmpas/derive.py): the exact
 // spelling, else its one case-insensitive match -- ERA5 writes `q`, people type Q.
+// How many levels a name or an expression has, as the map would show it: the
+// field's own, or the operands' when they share one level axis (pickDerived)
+function levelsOf(n){
+  if(cur && cur.name===n) return cur.levels||1;
+  const v=varNamed(n);
+  if(v) return v.levels||1;
+  const ops=(n.match(/\\w+/g)||[]).map(varNamed).filter(Boolean);
+  return ops.length && ops.every(o=>o.levels===ops[0].levels && o.dim===ops[0].dim)
+    ? (ops[0].levels||1) : 1;
+}
 function varNamed(n){
   const exact=M.variables.find(v=>v.name===n);
   if(exact) return exact;
@@ -4856,6 +4949,21 @@ async function ptAt(lon, lat, what){
     scriptSay(String((d && d.error) || "no value there"), true); return; }
   ptOpen(lon, lat, d);
   if(what==="profile") ptProfile(); else if(what==="series") ptSeries();
+}
+// mark(x.max()): the answer's own field, step and level, which need not be
+// the map's. When they are, the place is probed as a click would be; when not,
+// the panel shows the answer's value rather than the map's field there
+function ptAnswer(d, name, step, level){
+  if(name===cur.name && step===+$("#time").value && level===+$("#level").value)
+    return ptAt(d.lon, d.lat, "mark");
+  if(plotMode()) return ptAt(d.lon, d.lat, "mark");
+  ptOpen(d.lon, d.lat, {lon:(+d.lon).toFixed(2), lat:(+d.lat).toFixed(2),
+                        value:d.value, cell:-1});
+  const lv=levelsOf(name)>1 ? ` \u00b7 level ${level}` : "";
+  $("#ptnow").innerHTML=`${esc(name)}${lv}<br><b>${(+d.value).toPrecision(6)}</b>`+
+    `<span class="at"> at ${esc(M.labels[step]||"")}</span>`;
+  $("#ptgo").disabled=true; $("#ptprof").disabled=true;
+  $("#pthint").textContent="the answer\u2019s field, not the one on the map";
 }
 $("#ptgo").onclick=ptSeries;
 $("#ptprof").onclick=ptProfile;

@@ -126,7 +126,9 @@ def _log(cfg: dict, record: dict) -> None:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as out:
+        # requests and replies are this user's to read, not the group's
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as out:
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
         pass
@@ -190,6 +192,99 @@ def load_config(path=None) -> dict | None:
         if not 1 <= out["steps"] <= MAX_STEPS:
             raise ChatError(f"{path}: steps is a whole number from 1 to {MAX_STEPS}")
     return out
+
+
+def settings() -> dict:
+    """What the page's model form shows: the configuration without its key.
+
+    `configured` is whether a request can be sent; `error` is a file that is
+    there and cannot be used, said as load_config says it."""
+    path = config_path()
+    out = {"configured": False, "path": str(path), "providers": list(PROVIDERS),
+           "provider": "ollama", "url": "", "model": "", "has_key": False}
+    try:
+        cfg = load_config(path)
+    except ChatError as exc:
+        return {**out, "error": str(exc)}
+    if cfg is None:
+        return out
+    log = log_path(cfg)
+    return {**out, "configured": True, "provider": cfg.get("provider", "ollama"),
+            "url": _shown_url(cfg["url"]), "model": cfg["model"],
+            "has_key": bool(cfg.get("key")), "agent": cfg["agent"],
+            "log": str(log) if log else ""}
+
+
+#: what the page may set; the rest of the file is kept as it is
+_FORM = ("provider", "url", "model", "key")
+
+
+def save_settings(given: dict) -> dict:
+    """Write the page's model form into the configuration file, and return
+    `settings()` for it. Raises ChatError, writing nothing, when it is wrong.
+
+    Only provider, url, model and key are written; every other line of the
+    file (timeout, log, agent, comments) stays. An empty key keeps the one
+    the file has, and `clear_key` removes it. The file is this user's alone:
+    it may hold a key."""
+    clean: dict = {}
+    for name in ("provider", "url", "model", "key"):
+        value = given.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, str) or len(value) > 500 or \
+                any(ord(c) < 32 or c in "\"'" for c in value):
+            raise ChatError(f"{name}: one line of plain text, please")
+        clean[name] = value.strip()
+    provider = clean.get("provider") or "ollama"
+    if provider not in PROVIDERS:
+        raise ChatError(f"provider is one of {', '.join(PROVIDERS)}")
+    url = clean.get("url", "")
+    if not url and provider == "anthropic":
+        url = _ANTHROPIC_URL
+    if not re.match(r"^https?://[^\s/]", url):
+        raise ChatError("url: the server's address, starting http:// or https://")
+    if not clean.get("model"):
+        raise ChatError("model: the name of a model that server has")
+
+    path = config_path()
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        lines = []
+    except OSError as exc:
+        raise ChatError(f"{path}: {exc.strerror}") from None
+    old: dict = {}
+    kept = []
+    for raw in lines:
+        name = raw.partition("=")[0].strip().lower()
+        if "=" in raw and name in _FORM:
+            old[name] = raw.partition("=")[2].strip().strip("\"'")
+            continue
+        kept.append(raw)
+    # a saved key goes only to the server it was saved for: a new address
+    # needs its key given again, so the form cannot send it somewhere else
+    same = (old.get("url", "").rstrip("/") == url.rstrip("/")
+            and (old.get("provider") or "ollama").lower() == provider)
+    key = "" if given.get("clear_key") else \
+        (clean.get("key") or (old.get("key", "") if same else ""))
+    written = [f"provider = {provider}", f"url      = {url}",
+               f"model    = {clean['model']}"] + ([f"key      = {key}"] if key else [])
+    text = "\n".join(written + kept).rstrip() + "\n"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".new")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as out:
+        out.write(text)
+    try:
+        load_config(tmp)                  # a file that would not load is not kept
+    except ChatError as exc:
+        tmp.unlink(missing_ok=True)
+        raise ChatError(str(exc).replace(str(tmp), str(path))) from None
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+    return settings()
 
 
 _LANGUAGE = """\

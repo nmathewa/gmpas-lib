@@ -19,39 +19,47 @@ keywords = ["mpas", "unstructured", "voronoi", "atmosphere", "visualization"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Atmospheric Science",
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 
-# Core: geometry, caching and data access. Deliberately NOT uxarray (it rebuilds
-# topology on every call) and NOT geopandas (the .npz cache replaces a .gpkg and
-# also carries edge geometry).
+# Core: geometry, caching, data access and drawing. Deliberately NOT uxarray
+# (it rebuilds topology on every call) and NOT geopandas (the .npz cache
+# replaces a .gpkg and also carries edge geometry). Drawing is in the base
+# install, since viewing is what gmpas is for; it is imported only when
+# something is drawn, so a headless remap pipeline pays no import time for it.
 dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",        # cKDTree: exact Voronoi cell lookup
     "xarray>=2023.1",
     "netCDF4>=1.6",
     "cftime>=1.6",         # calendar-aware Time encoding in `gmpas remap` output
+    "matplotlib>=3.7",
+    "cartopy>=0.22",
+    "pillow>=9.0",
+    "cmocean>=4.0",        # cmo.* palettes (MIT)
 ]
 
 [project.scripts]
 gmpas = "gmpas.cli:main"
 
 [project.optional-dependencies]
-# Rendering is optional so geometry, rasterizing and remap weights stay usable
-# in a headless pipeline that never draws anything.
-plot = ["matplotlib>=3.7", "cartopy>=0.22", "pillow>=9.0",
-        "cmocean>=4.0"]      # cmo.* palettes in --generic (MIT)
 # Conservative remapping needs ESMF_RegridWeightGen on PATH and optionally
 # ncremap. Both are executables, not Python packages, so pip cannot install
 # them, and neither is brought in by environment.yml either -- load your
 # system's builds instead; see docs/REMAPPING.md.
 # Asking for a view in words. The client only: the model is one the user
-# runs on an Ollama server (docs/configuration.md); none is shipped.
+# runs on a server named in chat.conf (docs/chat.md); none is shipped.
 chat = ["ollama>=0.4"]
 test = ["pytest>=7.0"]
-dev = ["gmpas[plot,test,chat]", "ruff>=0.4"]
+dev = ["gmpas[test,chat]", "ruff>=0.4"]
 # The Read the Docs site (.readthedocs.yaml, docs/conf.py).
 docs = ["sphinx>=7", "myst-parser>=2", "furo", "sphinx-copybutton",
         "sphinxcontrib-mermaid"]
