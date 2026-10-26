@@ -423,21 +423,33 @@ def test_the_bake_refuses_to_publish_a_page_it_could_not_hook(tmp_path):
     sys.path.insert(0, str(DEMO))
     import bake
 
-    hooked = bake.patch_page(bake.OVERLAY_SRC + "\n")
+    page = "".join([bake.OVERLAY_SRC + "\n", *(old for old, _ in bake.PAGE_EDITS)])
+    hooked = bake.patch_page(page)
     assert "if(window.GMPAS_OVERLAY)" in hooked
     assert hooked.count("api/overlay") == 1        # the original call survives
-    with pytest.raises(SystemExit, match="could not find the overlay line"):
+    with pytest.raises(SystemExit, match="could not find, exactly once"):
         bake.patch_page("<body>a page that moved on</body>")
 
 
 def test_the_baked_page_is_the_real_one(tmp_path):
-    """Not a copy that can rot: the demo's HTML is viewer.PAGE plus two
-    lines."""
+    """Not a copy that can rot: the demo's HTML is viewer.PAGE plus a few
+    lines -- the shim, the coastline hook, links back to the project -- and
+    minus the chat model's API key field, which needs a server."""
     sys.path.insert(0, str(DEMO))
     import bake
 
     from gmpas.viewer import PAGE
 
     out = bake.patch_page(PAGE)
-    assert len(out) - len(PAGE) < 200
+    assert abs(len(out) - len(PAGE)) < 800
     assert "GMPAS_OVERLAY" in out and 'src="shim.js"' in out
+    assert "<title>gmpas demo</title>" in out
+    for url in (bake.DOCS_URL, bake.SOURCE_URL, bake.PYPI_URL):
+        assert f'href="{url}"' in out
+    assert 'id="cfgKey"' not in out
+    # the local viewer keeps all of it
+    assert "<title>gmpas view</title>" in PAGE and bake.DOCS_URL not in PAGE
+    assert 'id="cfgKey"' in PAGE
+    # inside a form, or every browser logs a warning about a stray password field
+    form = PAGE[PAGE.index('<form id="cfgForm"'):]
+    assert form.index('id="cfgKey"') < form.index("</form>")

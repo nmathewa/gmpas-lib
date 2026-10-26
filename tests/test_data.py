@@ -786,3 +786,24 @@ def test_both_viewers_agree_on_which_dimension_is_time(tmp_path, dim, coord, is_
     with netCDF4.Dataset(tmp_path / "f.nc") as nc:
         scan = generic._nc_is_time(nc, dim)
     assert (mpas, gen, scan) == (is_time,) * 3
+
+
+@pytest.mark.parametrize("units, shown", [
+    ("J kg^{-1}", "J kg⁻¹"),            # MPAS writes TeX exponents
+    ("m^2 s^{-2}", "m² s⁻²"),
+    ("m**-1", "m⁻¹"),
+    ("kg m-2 s-1", "kg m⁻² s⁻¹"),       # CF run-on exponents
+    ("K", "K"),
+    ("percent", "percent"),
+    ("days since 1900-01-01", "days since 1900-01-01"),
+    ("YYYY-MM-DD_hh:mm:ss", "YYYY-MM-DD_hh:mm:ss"),
+    ("1e-3", "1e-3"),
+])
+def test_units_read_as_units_on_a_label(units, shown):
+    from gmpas.data import pretty_units
+
+    assert pretty_units(units) == shown
+    da = xr.DataArray(np.zeros(2), dims=("nCells",), name="x",
+                      attrs={"units": units, "long_name": "x"})
+    assert field_label(da) == f"x [{shown}]"
+    assert da.attrs["units"] == units           # the attribute is left alone

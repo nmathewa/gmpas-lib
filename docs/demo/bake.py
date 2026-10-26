@@ -175,14 +175,40 @@ OVERLAY_HOOK = ('  if(window.GMPAS_OVERLAY) return window.GMPAS_OVERLAY(b, P);\n
                 + OVERLAY_SRC)
 
 
+#: The demo is the only page a visitor may reach without having installed
+#: gmpas, so it is the one that says where gmpas lives. The local viewer is
+#: left as it is.
+DOCS_URL = "https://gmpas.readthedocs.io/en/latest/"
+SOURCE_URL = "https://github.com/nmathewa/gmpas-lib"
+PYPI_URL = "https://pypi.org/project/gmpas/"
+_LINK = 'style="color:var(--accent)" target="_blank" rel="noopener"'
+LINKS_AFTER = '<small id="sub"></small></h1>'
+LINKS = (LINKS_AFTER + '\n  <div class="sec hint" id="demolinks" style="margin-top:0">'
+         f'a demo of <b>gmpas</b> &middot; <a href="{DOCS_URL}" {_LINK}>documentation</a>'
+         f' &middot; <a href="{SOURCE_URL}" {_LINK}>source</a>'
+         f' &middot; <a href="{PYPI_URL}" {_LINK}>PyPI</a></div>')
+
+#: The page's tab title, and the chat model's API key field: the demo has no
+#: chat server, so a key field there is only a browser warning about a
+#: password input (the local viewer keeps it).
+PAGE_EDITS = (
+    ("<title>gmpas view</title>", "<title>gmpas demo</title>"),
+    ('      <label for="cfgKey">API key</label>\n'
+     '      <input id="cfgKey" type="password" autocomplete="off" placeholder="none">\n', ""),
+    (LINKS_AFTER, LINKS),
+)
+
+
 def patch_page(page: str) -> str:
-    """The viewer's own page, with the shim loaded and coastlines hooked."""
-    if OVERLAY_SRC not in page:
-        raise SystemExit(
-            "bake: could not find the overlay line in viewer.PAGE to hook.\n"
-            "  The page changed upstream; update OVERLAY_SRC in bake.py.\n"
-            f"  Looked for: {OVERLAY_SRC!r}")
-    page = page.replace(OVERLAY_SRC, OVERLAY_HOOK, 1)
+    """The viewer's own page, with the shim loaded, coastlines hooked, links
+    back to the project and no API key field."""
+    for old, new in ((OVERLAY_SRC, OVERLAY_HOOK), *PAGE_EDITS):
+        if page.count(old) != 1:
+            raise SystemExit(
+                "bake: could not find, exactly once, a line in viewer.PAGE to patch.\n"
+                "  The page changed upstream; update bake.py to match.\n"
+                f"  Looked for: {old!r}")
+        page = page.replace(old, new, 1)
     tag = '<script src="shim.js"></script>'
     if "</head>" in page:
         return page.replace("</head>", tag + "</head>", 1)
@@ -202,6 +228,7 @@ def bake(source: Path, out: Path) -> None:
         meta["file"] = TITLE
         meta["scanning"] = False          # or the page polls api/status for ever
         meta.pop("setup", None)           # no dimension chooser without a server
+        meta.pop("chat", None)            # nor a model to ask
         # only the projections shim.js can draw; their home views are baked
         homes = projected_homes(viewer)
         meta["projections"] = [n for n in meta.get("projections", [])

@@ -1,6 +1,6 @@
 # gmpas
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22003177.svg)](https://doi.org/10.5281/zenodo.22003177)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21987067.svg)](https://doi.org/10.5281/zenodo.21987067)
 [![tests](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml/badge.svg)](https://github.com/nmathewa/gmpas-lib/actions/workflows/tests.yml)
 [![PyPI](https://img.shields.io/pypi/v/gmpas)](https://pypi.org/project/gmpas/)
 [![docs](https://readthedocs.org/projects/gmpas/badge/?version=latest)](https://gmpas.readthedocs.io)
