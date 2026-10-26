@@ -15,6 +15,13 @@
 // - the colour options: gmpas/colour.py and gmpas/palettes, levels included.
 //
 // The test suite renders the same frames both ways and compares the pixels.
+//
+// With `tiles` in meta.json the values come from somewhere else: a mesh far
+// too big to ship (41.9M cells for the 3.75 km global run) is sampled once,
+// offline, onto lon/lat value tiles -- each byte a value in 254 steps of the
+// field's range, the nearest cell at every pixel centre -- and the page asks
+// for those instead. Colours, ranges, levels, projections and clicks then
+// work exactly as with cells; the values are the tiles' quantized ones.
 
 (() => {
   "use strict";
@@ -23,7 +30,7 @@
   const state = {meta: null, fields: null, ramps: null, coast: null,
                  xyz: null, radius: null, lon: null, lat: null, cells: 0,
                  buckets: null, cache: new Map(), proj: {}, cmapN: {},
-                 world: null, lastOverlay: null};
+                 world: null, lastOverlay: null, tiles: null};
 
   const getJSON = p => fetch(D + p).then(r => r.json());
 
@@ -39,6 +46,7 @@
       if (state.lastOverlay) window.GMPAS_OVERLAY(...state.lastOverlay);
     }).catch(() => {});
 
+    if (meta.tiles) return loadTiles(meta.tiles);
     const buf = await (await fetch(D + "mesh.bin")).arrayBuffer();
     const n = info.cells;
     state.lon = new Float32Array(buf, 0, n);
@@ -155,6 +163,129 @@
       }
     }
     return [best, Math.sqrt(bestD)];
+  }
+
+  // -- value tiles -----------------------------------------------------------
+  // The run's own description (fields, steps, extent, projected home views)
+  // comes with the tiles, and is laid over the page's meta.json, which bake.py
+  // still writes from the small demo file for everything about the page.
+  async function loadTiles(base) {
+    const man = await (await real(base + "manifest.json")).json();
+    const m = state.meta;
+    Object.assign(m, {file: `gmpas demo - ${man.run.title}`, mesh: man.run.mesh,
+                      cells: man.cells, regional: false, coverage: man.coverage,
+                      files: 1, steps: man.times.length, labels: man.labels,
+                      home: man.home});
+    m.variables = man.fields.map(f => ({name: f.name, label: f.label, static: false,
+                                        levels: 1, dim: "", pinned: [], spatial: true}));
+    m.projections = (m.projections || []).filter(p => man.proj[p]);
+    state.proj = man.proj;
+    state.cells = man.cells;
+    state.fields = Object.fromEntries(man.fields.map(f =>
+      [f.name, {levels: 1, lo: f.show[0], hi: f.show[1]}]));
+    state.tiles = {base, man, cache: new Map(),
+                   byName: new Map(man.fields.map(f => [f.name, f]))};
+  }
+
+  // One tile's bytes, fetched once. Decoded without colour management, so
+  // the bytes are the ones written; a missing tile is no values at all.
+  function tileOf(f, t, z, x, y) {
+    const T = state.tiles, key = `${f.name}/${t}/${z}/${x}/${y}`;
+    let hit = T.cache.get(key);
+    if (hit) { T.cache.delete(key); T.cache.set(key, hit); return hit; }
+    const S = T.man.tile.size;
+    hit = (async () => {
+      const r = await real(`${T.base}tiles/${key}.${T.man.tile.format}`);
+      if (!r.ok) return null;
+      const bmp = await createImageBitmap(await r.blob(),
+        {colorSpaceConversion: "none", premultiplyAlpha: "none"});
+      const g = new OffscreenCanvas(S, S).getContext("2d", {willReadFrequently: true});
+      g.drawImage(bmp, 0, 0);
+      const px = g.getImageData(0, 0, S, S).data, out = new Uint8Array(S * S);
+      for (let i = 0; i < S * S; i++) out[i] = px[i * 4];
+      return out;
+    })().catch(() => null);
+    T.cache.set(key, hit);
+    if (T.cache.size > 800) T.cache.delete(T.cache.keys().next().value);
+    return hit;
+  }
+
+  function tileField(q) {
+    const f = state.tiles.byName.get(q.get("var"));
+    if (!f) throw new Error(`no field ${q.get("var")} in the tiles`);
+    const ts = state.tiles.man.times;
+    return [f, ts[Math.min(ts.length - 1, Math.max(0, +(q.get("time") || 0)))]];
+  }
+
+  // Values at lon/lat points, from the zoom whose pixels are no larger than
+  // `deg`; NaN where a tile has no value or the point is off the map.
+  async function tileValues(f, t, lon, lat, skip, deg) {
+    const T = state.tiles, S = T.man.tile.size, n = lon.length;
+    let z = Math.ceil(Math.log2(360 / (2 * S * Math.max(deg, 1e-9))));
+    z = Math.min(f.maxzoom, Math.max(0, z));
+    const W = 2 * S * 2 ** z, H = S * 2 ** z;
+    const at = new Int32Array(n), want = new Map();
+    for (let p = 0; p < n; p++) {
+      if (skip && skip[p]) { at[p] = -1; continue; }
+      const L = ((lon[p] + 180) % 360 + 360) % 360;
+      const gx = Math.min(W - 1, Math.floor(L / 360 * W));
+      const gy = Math.min(H - 1, Math.max(0, Math.floor((90 - lat[p]) / 180 * H)));
+      at[p] = gy * W + gx;
+      const k = Math.floor(gx / S) * 65536 + Math.floor(gy / S);
+      if (!want.has(k)) want.set(k, null);
+    }
+    await Promise.all([...want.keys()].map(async k =>
+      want.set(k, await tileOf(f, t, z, Math.floor(k / 65536), k % 65536))));
+    const step = (f.hi - f.lo) / T.man.tile.levels, vals = new Float32Array(n);
+    for (let p = 0; p < n; p++) {
+      if (at[p] < 0) { vals[p] = NaN; continue; }
+      const gx = at[p] % W, gy = Math.floor(at[p] / W);
+      const tile = want.get(Math.floor(gx / S) * 65536 + Math.floor(gy / S));
+      const b = tile ? tile[(gy % S) * S + (gx % S)] : 0;
+      vals[p] = b ? f.lo + (b - 1) * step : NaN;
+    }
+    return {vals, at, W, H, z};
+  }
+
+  // A frame's values, one per pixel, with the same pixel centres (and the
+  // same inverse projections) as the cell path below.
+  const identities = new Map();
+  async function tileFrame(q, extent, nx, ny, pj) {
+    const [f, t] = tileField(q);
+    const [x0, x1, y0, y1] = extent, n = nx * ny;
+    const lon = new Float64Array(n), lat = new Float64Array(n), blank = new Uint8Array(n);
+    for (let y = 0; y < ny; y++) {
+      const Y = y1 - (y + 0.5) * (y1 - y0) / ny;
+      for (let x = 0; x < nx; x++) {
+        const p = y * nx + x, X = x0 + (x + 0.5) * (x1 - x0) / nx;
+        if (!pj) { lon[p] = X; lat[p] = Y; continue; }
+        const ll = pj.inv(X, Y);
+        if (!ll) { blank[p] = 1; continue; }
+        lon[p] = ll[0]; lat[p] = ll[1];
+      }
+    }
+    // degrees a screen pixel spans, at the middle of the view
+    let deg = (x1 - x0) / nx;
+    if (pj) {
+      const c = Math.floor(ny / 2) * nx + Math.floor(nx / 2);
+      deg = blank[c] || blank[c + 1] ? 360 / nx
+          : Math.max(Math.abs(lon[c + 1] - lon[c]), Math.abs(lat[c + 1] - lat[c]), 1e-6);
+    }
+    const {vals} = await tileValues(f, t, lon, lat, blank, deg);
+    if (!identities.has(n)) {
+      if (identities.size > 4) identities.clear();
+      identities.set(n, Int32Array.from({length: n}, (_, i) => i));
+    }
+    return {vals, view: {idx: identities.get(n), blank, nx, ny}};
+  }
+
+  async function tileProbe(q, f, t) {
+    const lon = +q.get("lon"), lat = +q.get("lat");
+    const {vals, at, W, H} = await tileValues(f, t, [lon], [lat], null, 0);
+    const gx = at[0] % W, gy = Math.floor(at[0] / W);
+    return {cell: at[0], value: Number.isFinite(vals[0]) ? vals[0] : null,
+            lon: +(-180 + (gx + 0.5) * 360 / W).toFixed(4),
+            lat: +(90 - (gy + 0.5) * 180 / H).toFixed(4)};
   }
 
   // -- the view index, as ViewIndex builds it -----------------------------
@@ -587,8 +718,12 @@
     const extent = q.get("extent").split(",").map(Number);
     const nx = +q.get("nx") || 1200, ny = +q.get("ny") || 700;
     const name = q.get("var"), level = +(q.get("level") || 0);
-    const vals = await field(name, level);
-    const view = viewIndex(extent, nx, ny, projOf(q));
+    let vals, view;
+    if (state.tiles) ({vals, view} = await tileFrame(q, extent, nx, ny, projOf(q)));
+    else {
+      vals = await field(name, level);
+      view = viewIndex(extent, nx, ny, projOf(q));
+    }
 
     let lo = q.get("vmin") ? +q.get("vmin") : state.fields[name].lo;
     let hi = q.get("vmax") ? +q.get("vmax") : state.fields[name].hi;
@@ -700,9 +835,21 @@
         return json(ll ? {lon: ll[0], lat: ll[1], on: true}
                        : {lon: 0, lat: 0, on: false});
       }
-      if (path === "api/probe") return probe(q);
+      if (path === "api/probe") {
+        if (!state.tiles) return probe(q);
+        const [f, t] = tileField(q);
+        return json(await tileProbe(q, f, t));
+      }
       if (path === "api/series") {
         if (q.get("warm") || q.get("stop")) return json({state: "ok"});
+        if (state.tiles) {
+          // the click's value at every step: one tile each, at full detail
+          const [f] = tileField(q), ts = state.tiles.man.times;
+          const all = await Promise.all(ts.map(t => tileProbe(q, f, t)));
+          return json({state: "done", cell: all[0].cell, lon: all[0].lon, lat: all[0].lat,
+                       label: f.label, labels: state.tiles.man.labels,
+                       values: all.map(d => d.value)});
+        }
         const p = probe(q), d = await p.json();
         return json({state: "done", cell: d.cell, lon: d.lon, lat: d.lat,
                      label: state.meta.variables.find(v => v.name === q.get("var"))
