@@ -23,10 +23,10 @@ authors:
     affiliation: Florida Institute of Technology
     orcid: "https://orcid.org/0000-0001-8924-1852"
 version: 0.9.0
-date-released: "2026-10-18"
+date-released: "2026-10-23"
 repository-code: "https://github.com/nmathewa/gmpas-lib"
 url: "https://github.com/nmathewa/gmpas-lib"
-doi: 10.5281/zenodo.21987068
+doi: 10.5281/zenodo.21987067
 license: MIT
 keywords:
   - mpas

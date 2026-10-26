@@ -34,3 +34,20 @@ def test_the_two_version_strings_agree():
 
 def test_the_version_is_a_release_number():
     assert re.fullmatch(r"\d+\.\d+\.\d+", gmpas.__version__), gmpas.__version__
+
+
+CITATION = PYPROJECT.parent / "CITATION.cff"
+#: Zenodo's concept DOI: it always resolves to the newest release. A version
+#: DOI goes stale with the next release, and one of those (21987068) was
+#: deleted outright and answers 410.
+CONCEPT_DOI = "10.5281/zenodo.21987067"
+
+
+@pytest.mark.skipif(not CITATION.exists(), reason="installed without the source tree")
+def test_the_citation_names_this_version_and_the_concept_doi():
+    text = CITATION.read_text()
+    assert re.search(rf"^version: {re.escape(gmpas.__version__)}$", text, re.M), \
+        "CITATION.cff names a different version"
+    assert re.search(rf"^doi: {re.escape(CONCEPT_DOI)}$", text, re.M)
+    readme = (PYPROJECT.parent / "README.md").read_text()
+    assert f"doi.org/{CONCEPT_DOI}" in readme

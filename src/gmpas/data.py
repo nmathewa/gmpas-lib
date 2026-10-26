@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -315,11 +316,42 @@ def select(da: xr.DataArray, time: int = 0, level: int = 0,
     return np.asarray(da.squeeze().values, dtype=np.float64)
 
 
+_SUPER = str.maketrans("0123456789-+", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺")
+#: an exponent as MPAS writes it (TeX: `^{-1}`, `^2`) or Python does (`**-1`)
+_EXPONENT = re.compile(r"\^\{([-+]?\d+)\}|\^([-+]?\d+)|\*\*([-+]?\d+)")
+#: a CF unit term with its exponent run on, as in `m s-1` or `kg m-2`
+_CF_TERM = re.compile(r"^([A-Za-z]+)([-+]?\d+)$")
+
+
+def pretty_units(units: str) -> str:
+    """Units as they should read on a label: `J kg^{-1}` -> `J kg⁻¹`.
+
+    Display only; the file's attribute is never changed. Handles TeX and `**`
+    exponents, and CF's run-on form (`m s-1`) when every term in the string
+    is a unit term, so a date (`days since 1900-01-01`) or a bare number is
+    left alone. Unicode superscripts, so the same text works in the page and
+    in a matplotlib label.
+    """
+    units = str(units)
+    if " since " in units:
+        return units
+    text = _EXPONENT.sub(lambda m: next(g for g in m.groups() if g).translate(_SUPER),
+                         units)
+    if text != units:
+        return text
+    terms = units.split()
+    if any(_CF_TERM.match(t) for t in terms) \
+            and all(_CF_TERM.match(t) or t.isalpha() for t in terms):
+        return " ".join(_CF_TERM.sub(lambda m: m[1] + m[2].translate(_SUPER), t)
+                        for t in terms)
+    return units
+
+
 def field_label(da: xr.DataArray) -> str:
     """Colorbar label: long_name and units when the file provides them."""
     units = da.attrs.get("units", "")
     name = da.attrs.get("long_name", da.name)
-    return f"{name} [{units}]" if units else str(name)
+    return f"{name} [{pretty_units(units)}]" if units else str(name)
 
 
 def plottable(ds: xr.Dataset) -> dict[str, list[str]]:

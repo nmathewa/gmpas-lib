@@ -40,8 +40,13 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
+      # The front page is the 3.75 km global demo: a static page whose tiles
+      # are published from nmathewa/gmpas-demo-data. The interactive viewer,
+      # drawing the small regional mesh in the browser, sits under regional/.
       - name: bake
-        run: python docs/demo/bake.py
+        run: |
+          python docs/demo/bake.py docs/demo/data/demo.nc docs/demo/site/regional
+          cp docs/demo/global.html docs/demo/site/index.html
 
       # The JavaScript rasterizer is a second implementation of the render
       # path; this is what stops it drifting from the Python one unnoticed.

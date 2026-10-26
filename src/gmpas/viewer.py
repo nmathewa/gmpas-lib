@@ -2440,6 +2440,8 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
     <details id="chatcfg"><summary>model</summary>
       <div class="hint">gmpas ships no model: name a server you can reach. Saved in
         <span id="cfgpath"></span>, readable by you only.</div>
+      <!-- a form, because browsers warn about a password field outside one -->
+      <form id="cfgForm" style="margin:0">
       <label for="cfgProvider">provider</label>
       <select id="cfgProvider"></select>
       <label for="cfgUrl">url</label>
@@ -2449,8 +2451,9 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
       <input id="cfgModel" spellcheck="false" autocomplete="off" placeholder="qwen3:8b">
       <label for="cfgKey">API key</label>
       <input id="cfgKey" type="password" autocomplete="off" placeholder="none">
-      <div class="row" style="margin-top:6px"><button id="cfgSave" style="flex:1">save</button>
-        <button id="cfgClear" title="remove the saved key">forget key</button></div>
+      <div class="row" style="margin-top:6px"><button id="cfgSave" type="submit" style="flex:1">save</button>
+        <button id="cfgClear" type="button" title="remove the saved key">forget key</button></div>
+      </form>
       <div class="hint" id="cfghint"></div>
     </details>
   </div>
@@ -2826,7 +2829,7 @@ async function chatSave(clear){
     chatBoot();
   }finally{ $("#cfgSave").disabled=false; }
 }
-$("#cfgSave").onclick=()=>chatSave(false);
+$("#cfgForm").onsubmit=e=>{ e.preventDefault(); chatSave(false); };
 $("#cfgClear").onclick=()=>chatSave(true);
 $("#cfgProvider").onchange=()=>{ $("#cfgUrl").placeholder=PLACEHOLDER[$("#cfgProvider").value]||""; };
 async function chatAsk(){
