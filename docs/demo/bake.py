@@ -15,6 +15,15 @@ working client-side instead of freezing them at bake time.
 Run it directly to rebuild into `docs/demo/site/`:
 
     python docs/demo/bake.py
+
+With `--tiles URL` it bakes the same page for a run too big to ship as cells
+(the 3.75 km global one, 41.9M cells): the page's own files come from the
+small demo file as usual, and the values come from the value tiles and
+manifest.json published at URL (see `tiles` in shim.js). No mesh or field
+files are written then.
+
+    python docs/demo/bake.py docs/demo/data/demo.nc docs/demo/site \
+        --tiles https://nmathewa.github.io/gmpas-demo-data/
 """
 
 from __future__ import annotations
@@ -215,7 +224,7 @@ def patch_page(page: str) -> str:
     return page.replace("<body>", "<body>" + tag, 1)
 
 
-def bake(source: Path, out: Path) -> None:
+def bake(source: Path, out: Path, tiles: str | None = None) -> None:
     from gmpas.viewer import PAGE, Viewer
 
     if out.exists():
@@ -229,6 +238,8 @@ def bake(source: Path, out: Path) -> None:
         meta["scanning"] = False          # or the page polls api/status for ever
         meta.pop("setup", None)           # no dimension chooser without a server
         meta.pop("chat", None)            # nor a model to ask
+        if tiles:
+            meta["tiles"] = tiles.rstrip("/") + "/"
         # only the projections shim.js can draw; their home views are baked
         homes = projected_homes(viewer)
         meta["projections"] = [n for n in meta.get("projections", [])
@@ -239,13 +250,14 @@ def bake(source: Path, out: Path) -> None:
             # Hovmoller, contour and layer routes are never called.
             row.pop("kinds", None)
 
-        arrays = mesh_arrays(viewer.mesh)
         n = viewer.mesh.n_cells
-        blob = b"".join(arrays[k].tobytes() for k in ("lon", "lat", "radius"))
-        (out / "data" / "mesh.bin").write_bytes(blob)
+        if not tiles:
+            arrays = mesh_arrays(viewer.mesh)
+            blob = b"".join(arrays[k].tobytes() for k in ("lon", "lat", "radius"))
+            (out / "data" / "mesh.bin").write_bytes(blob)
 
         fields = {}
-        for row in meta["variables"]:
+        for row in ([] if tiles else meta["variables"]):
             name, levels = row["name"], max(1, int(row["levels"]))
             stack = np.concatenate([
                 np.asarray(viewer.values(name, 0, k), dtype=np.float32)
@@ -263,8 +275,9 @@ def bake(source: Path, out: Path) -> None:
 
         (out / "data" / "meta.json").write_text(json.dumps(meta))
         (out / "data" / "fields.json").write_text(json.dumps(fields))
-        (out / "data" / "coast.json").write_text(
-            json.dumps(coastlines(meta["home"])))
+        # a global run needs the whole world's coastline from the start
+        (out / "data" / "coast.json").write_text(json.dumps(
+            world_coastlines() if tiles else coastlines(meta["home"])))
         (out / "data" / "mesh.json").write_text(json.dumps(
             {"cells": n, "proj": homes, "cmap_n": cmap_sizes(meta["cmaps"])}))
         (out / "data" / "coast_world.json").write_text(
@@ -290,7 +303,7 @@ def bake(source: Path, out: Path) -> None:
     first = sum((out / p).stat().st_size for p in
                 ("index.html", "shim.js", "data/meta.json", "data/mesh.bin",
                  "data/fields.json", "data/coast.json",
-                 "data/ramps/viridis.json"))
+                 "data/ramps/viridis.json") if (out / p).exists())
     print(f"baked {out}")
     print(f"  {len(meta['variables'])} variables, {n:,} cells")
     print(f"  first paint {first/1024:7.1f} KiB   (page, mesh, meta, one field)")
@@ -298,8 +311,14 @@ def bake(source: Path, out: Path) -> None:
 
 
 if __name__ == "__main__":
-    src = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_DATA
-    dest = Path(sys.argv[2]) if len(sys.argv) > 2 else HERE / "site"
+    args = sys.argv[1:]
+    tiles = None
+    if "--tiles" in args:
+        i = args.index("--tiles")
+        tiles = args[i + 1]
+        del args[i:i + 2]
+    src = Path(args[0]) if args else DEFAULT_DATA
+    dest = Path(args[1]) if len(args) > 1 else HERE / "site"
     if not src.exists():
         raise SystemExit(f"no dataset at {src}")
-    bake(src, dest)
+    bake(src, dest, tiles)
