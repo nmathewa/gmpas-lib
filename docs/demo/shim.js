@@ -46,7 +46,16 @@
       if (state.lastOverlay) window.GMPAS_OVERLAY(...state.lastOverlay);
     }).catch(() => {});
 
-    if (meta.tiles) return loadTiles(meta.tiles);
+    if (meta.tiles) {
+      try { return await loadTiles(meta.tiles); }
+      catch (e) {
+        // Say so in the page's title rather than leave it at "loading"
+        meta.file = `gmpas demo: the global run's data could not be read (${e.message}); ` +
+                    "reload the page to try again";
+        meta.variables = []; meta.steps = 1; meta.labels = [""];
+        return;
+      }
+    }
     const buf = await (await fetch(D + "mesh.bin")).arrayBuffer();
     const n = info.cells;
     state.lon = new Float32Array(buf, 0, n);
@@ -170,7 +179,14 @@
   // comes with the tiles, and is laid over the page's meta.json, which bake.py
   // still writes from the small demo file for everything about the page.
   async function loadTiles(base) {
-    const man = await (await real(base + "manifest.json")).json();
+    // Revalidated on every visit: the tiles are published from another
+    // repository on their own schedule, and a manifest cached from before a
+    // re-render describes tiles that are no longer there.
+    let man = await (await real(base + "manifest.json", {cache: "no-cache"})).json();
+    const usable = m => m && m.tile && Array.isArray(m.fields) &&
+                        m.fields.every(f => Array.isArray(f.show));
+    if (!usable(man)) man = await (await real(base + "manifest.json", {cache: "reload"})).json();
+    if (!usable(man)) throw new Error("manifest.json is not in the format this page reads");
     const m = state.meta;
     Object.assign(m, {file: `gmpas demo - ${man.run.title}`, mesh: man.run.mesh,
                       cells: man.cells, regional: false, coverage: man.coverage,
@@ -185,6 +201,44 @@
       [f.name, {levels: 1, lo: f.show[0], hi: f.show[1]}]));
     state.tiles = {base, man, cache: new Map(),
                    byName: new Map(man.fields.map(f => [f.name, f]))};
+    whenReady(() => cite(man));
+  }
+
+  const whenReady = fn => document.readyState === "loading"
+    ? document.addEventListener("DOMContentLoaded", fn) : fn();
+
+  // The run's citation, in the side panel under its few fields: the space
+  // the variable list fills on a real file is free here. Built as text, not
+  // HTML, since the manifest comes from another repository.
+  function cite(man) {
+    const vars = document.querySelector("#vars");
+    if (!vars || document.querySelector("#demodata") || !man.run.source) return;
+    vars.style.flex = "none";
+    const box = document.createElement("div");
+    box.id = "demodata";
+    box.className = "hint";
+    box.style.cssText = "flex:1;overflow-y:auto;padding:10px 14px;margin:0;" +
+                        "border-top:1px solid var(--line)";
+    const head = document.createElement("div");
+    head.textContent = "data";
+    head.style.cssText = "text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px";
+    const text = document.createElement("div");
+    text.textContent = man.run.source + " ";
+    if (man.run.doi) {
+      const a = document.createElement("a");
+      a.href = "https://doi.org/" + man.run.doi;
+      a.target = "_blank"; a.rel = "noopener";
+      a.style.color = "var(--accent)";
+      a.textContent = "doi:" + man.run.doi;
+      text.append(a);
+    }
+    const note = document.createElement("div");
+    note.style.marginTop = "8px";
+    note.textContent = `${man.labels.length} steps, ${man.labels[0]} to ` +
+      `${man.labels.at(-1)} UTC, sampled from the native mesh onto lon/lat tiles ` +
+      "by gmpas; values are rounded to 1/254 of each field's range.";
+    box.append(head, text, note);
+    vars.after(box);
   }
 
   // One tile's bytes, fetched once. Decoded without colour management, so

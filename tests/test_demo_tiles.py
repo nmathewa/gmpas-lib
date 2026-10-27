@@ -67,7 +67,8 @@ def _tiles(viewer, out: Path) -> dict:
         homes[n] = {"proj": proj, "extent": list(extent),
                     "plon": params.get("central_longitude"),
                     "plat": params.get("central_latitude"), "psp": None}
-    manifest = {"run": {"title": "tile test", "mesh": "demo.nc"},
+    manifest = {"run": {"title": "tile test", "mesh": "demo.nc",
+                        "source": "Tester, A. (2026). Tile test data.", "doi": "10.0000/tiles"},
                 "cells": viewer.mesh.n_cells, "home": list(home), "coverage": 100.0,
                 "times": list(TIMES), "labels": ["00 UTC", "01 UTC"], "proj": homes,
                 "tile": {"size": TILE, "format": "png", "levels": LEVELS},
@@ -201,3 +202,26 @@ def test_frames_draw_on_the_lon_lat_map_and_projected(page):
                              f"&cmap=viridis{extra}")
         assert n > 1000, f"almost nothing drawn ({n} px) for {extra or 'lon/lat'}"
     assert not page.problems, f"console errors: {page.problems}"
+
+
+def test_unreadable_tile_data_is_said_not_left_loading(page, site):
+    """A manifest in the wrong shape -- an old copy, a broken deploy -- puts
+    the reason in the page's title instead of leaving it at "loading"."""
+    ctx = page.context.browser.new_context()   # the module's browser: one sync API at a time
+    pg = ctx.new_page()
+    try:
+        pg.route("**/manifest.json", lambda r: r.fulfill(
+            status=200, content_type="application/json", body='{"run": {}, "fields": []}'))
+        pg.goto(site["url"])
+        pg.wait_for_function(
+            "() => document.querySelector('#title').textContent.includes('could not be read')",
+            timeout=20000)
+    finally:
+        ctx.close()
+
+
+def test_the_data_is_cited_under_the_fields(page):
+    box = page.locator("#demodata")
+    assert box.count() == 1
+    assert "Tester, A. (2026). Tile test data." in box.inner_text()
+    assert box.locator("a").get_attribute("href") == "https://doi.org/10.0000/tiles"
