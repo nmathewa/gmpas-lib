@@ -379,7 +379,7 @@ def build(data_path=None, mesh_path: str = "", hfun_path: str = "",
     def dressed(html: str, slug: str) -> str:
         return html if len(sources) == 1 else with_nav(html, sources, slug)
 
-    for source, (slug, _label, _detail, viewer) in zip(sources, built):
+    for source, (slug, _label, _detail, viewer) in zip(sources, built, strict=False):
         if slug == "run":
             source.handler = run_handler(viewer, dressed(PAGE, slug))
         elif slug == "mesh":

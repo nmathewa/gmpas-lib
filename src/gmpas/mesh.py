@@ -249,7 +249,7 @@ class MpasMesh:
     # -- construction ----------------------------------------------------
 
     @classmethod
-    def load(cls, mesh_path: str | Path, use_cache: bool = True) -> "MpasMesh":
+    def load(cls, mesh_path: str | Path, use_cache: bool = True) -> MpasMesh:
         path = resolve_path(mesh_path)
         if not path.exists():
             raise FileNotFoundError(f"No such mesh file: {path}")
@@ -275,7 +275,7 @@ class MpasMesh:
                 return cls._mapped(path, cache)
 
     @classmethod
-    def _mapped(cls, path: Path, cache: Path) -> "MpasMesh":
+    def _mapped(cls, path: Path, cache: Path) -> MpasMesh:
         """Open a cached mesh without reading it.
 
         Every array is memory-mapped, so this costs one open per file and the
@@ -290,7 +290,7 @@ class MpasMesh:
                    _meta=meta, **arrays)
 
     @classmethod
-    def _build(cls, path: Path) -> "MpasMesh":
+    def _build(cls, path: Path) -> MpasMesh:
         ds = xr.open_dataset(path, decode_timedelta=False, engine="netcdf4")
         if not has_mesh(ds):
             missing = [v for v in MESH_VARS if v not in ds.variables]
@@ -646,7 +646,8 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             cw.append(wrapped)
             bounds.update(block)
             tick()
-        verts.close(); cw.close()
+        verts.close()
+        cw.close()
 
         segs = _NpyWriter(tmp / "edge_segs.npy", dt, (n_edges, 2, 2))
         ew = _NpyWriter(tmp / "edge_wrapped.npy", bool, (n_edges,))
@@ -661,7 +662,8 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             segs.append(block)
             ew.append(wrapped)
             tick()
-        segs.close(); ew.close()
+        segs.close()
+        ew.close()
 
         # nothing past this point indexes by vertex, so the full nVertices
         # arrays no longer need to stay resident alongside whatever comes next
@@ -708,7 +710,8 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             lonc_w.append(_wrap180(lonc_var[i:j] * R2D))
             latc_w.append(latc_var[i:j] * R2D)
             tick()
-        xyz_w.close(); area_w.close(); lonc_w.close(); latc_w.close()
+        for w in (xyz_w, area_w, lonc_w, latc_w):
+            w.close()
 
         # pure elementwise scale/wrap, no reduction at all -- the simplest
         # case of the three chunked loops in this function
@@ -723,7 +726,8 @@ def _build_to_dir(path: Path, cache: Path, chunk: int = BUILD_CHUNK) -> None:
             late_w.append(late_var[i:j] * R2D)
             ang_w.append(ang_var[i:j])
             tick()
-        lone_w.close(); late_w.close(); ang_w.close()
+        for w in (lone_w, late_w, ang_w):
+            w.close()
 
         if bar is not None:
             bar.close()

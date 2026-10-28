@@ -59,7 +59,7 @@ class Weights:
     _matrix: object = field(default=None, repr=False, compare=False)
 
     @classmethod
-    def load(cls, path: str | Path) -> "Weights":
+    def load(cls, path: str | Path) -> Weights:
         p = Path(path)
         with xr.open_dataset(p, engine="netcdf4") as w:
             return cls(
@@ -552,7 +552,7 @@ def detect_cores() -> tuple[int, str]:
     return os.cpu_count() or 1, "machine cores"
 
 #: loaded once per worker process; under fork it is inherited, not re-read
-_WEIGHTS: "Weights | None" = None
+_WEIGHTS: Weights | None = None
 _WEIGHTS_PATH: Path | None = None
 
 
@@ -590,7 +590,7 @@ def _remap_one(job):
                 "skipped": [], "conservation": 0.0}
 
 
-def remap_many(jobs, weights: "Weights", weights_path, workers: int = 1,
+def remap_many(jobs, weights: Weights, weights_path, workers: int = 1,
                on_done=None):
     """Remap many files, yielding each result as it lands.
 

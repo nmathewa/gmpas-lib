@@ -16,8 +16,8 @@ an SSH tunnel -- the case where ncview's X11 forwarding hurts most.
 from __future__ import annotations
 
 import errno
-import getpass
 import functools
+import getpass
 import gzip
 import io
 import ipaddress
@@ -39,10 +39,10 @@ import numpy as np
 
 from . import chat as _chat
 from . import colour as _colour
-from . import jobs as _jobs
-from . import layers as _layers
 from . import data as _data
 from . import derive as _derive
+from . import jobs as _jobs
+from . import layers as _layers
 from . import script as _script
 from . import timing
 from .cache import BuildCache
@@ -210,7 +210,8 @@ def ramp(name: str, n: int = 32) -> list[str]:
     from matplotlib import colormaps
 
     cm = colormaps[name]
-    return ["#%02x%02x%02x" % tuple(int(round(255 * c)) for c in cm(i / (n - 1))[:3])
+    return ["#{:02x}{:02x}{:02x}".format(*(int(round(255 * c))
+                                           for c in cm(i / (n - 1))[:3]))
             for i in range(n)]
 
 
@@ -396,8 +397,8 @@ def coast_scale(lon_span: float) -> str:
     """The coastline scale for a view `lon_span` degrees wide.
 
     50m down to 10 degrees wide, the whole globe included, and 10m below;
-    a finer scale that is not on disk falls back to the next coarser one. 110m is always used as
-    the floor (cartopy fetches it on first use, as it always has). Pre-fetch
+    a finer scale that is not on disk falls back to the next coarser one. 110m is always
+    used as the floor (cartopy fetches it on first use, as it always has). Pre-fetch
     the finer ones on a machine with internet:
     `python -c "from cartopy.io import shapereader as s;
     [s.natural_earth(r, 'physical', 'coastline') for r in ('50m', '10m')]"`.
@@ -1557,7 +1558,8 @@ def _handler(viewer: Viewer, html: str = ""):
             origin = urlparse(self.headers.get("Origin") or "")
             if origin.scheme not in ("http", "https") or \
                     origin.netloc.lower() != (self.headers.get("Host") or "").lower() or \
-                    self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                    self.headers.get("Content-Type", "").split(";")[0] \
+                    != "application/json":
                 return self.send_error(403, "the page's own form only")
             try:
                 size = int(self.headers.get("Content-Length") or 0)
@@ -1720,8 +1722,8 @@ def _handler(viewer: Viewer, html: str = ""):
                     name = q.get("proj", "auto")
                     params = {} if name == "auto" else \
                         _proj_params({**q, "proj": name}, viewer)[1]
-                    return self._send(json.dumps(viewer.projected_home(name, params)).encode(),
-                                      "application/json")
+                    home = viewer.projected_home(name, params)
+                    return self._send(json.dumps(home).encode(), "application/json")
                 if url.path == "/api/script":
                     try:
                         # `shown` is the field on screen: what an overlay
@@ -1999,7 +2001,7 @@ DELEGATING_BROWSERS = frozenset({"xdg-open", "gio", "gvfs-open",
                                  "x-www-browser", "sensible-browser"})
 
 
-def open_in_browser(url: str, delay: float = 0.5) -> "threading.Timer | None":
+def open_in_browser(url: str, delay: float = 0.5) -> threading.Timer | None:
     """Open `url`, or say plainly why it could not -- but never in silence.
 
     Only ever called when asked for (`gmpas view --browser`). It used to be

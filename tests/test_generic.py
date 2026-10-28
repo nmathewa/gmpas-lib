@@ -359,14 +359,17 @@ def _write_changeover(tmp_path, later="valid_time"):
         truth += [base, base + 10]
         t = pd.date_range(day, periods=2, freq="12h")
         if tname == "record":
-            t = ("record", [0.0, 0.5], {"units": f"days since {day}", "calendar": "noleap"})
+            t = ("record", [0.0, 0.5],
+                 {"units": f"days since {day}", "calendar": "noleap"})
         xr.Dataset({"t2m": ((tname, "lat", "lon"), vals)},
-                   coords={tname: t, "lat": LAT, "lon": LON}).to_netcdf(tmp_path / f"era_{k}.nc")
+                   coords={tname: t, "lat": LAT, "lon": LON}
+                   ).to_netcdf(tmp_path / f"era_{k}.nc")
     return truth
 
 
 @pytest.mark.parametrize("later", ["valid_time", "record"])
-def test_files_that_name_their_time_axis_differently_keep_every_step(tmp_path, capsys, later):
+def test_files_that_name_their_time_axis_differently_keep_every_step(tmp_path, capsys,
+                                                                      later):
     truth = _write_changeover(tmp_path, later)
     gv = GenericViewer(str(tmp_path / "era_*.nc"), strict=True)
 
@@ -622,8 +625,9 @@ def test_choosing_the_dimensions_makes_the_hidden_axis_reachable(tmp_path):
     assert gv.steps == 6 and not after["static"]
     assert after["dim"] == "LAY" and after["levels"] == 3 and after["pinned"] == []
     # and the numbers move on both axes now, which is the actual fix
-    at = lambda t, k: float(np.asarray(
-        gv._read("O3", t).isel(LAY=k).values).ravel()[0])
+    def at(t, k):
+        return float(np.asarray(gv._read("O3", t).isel(LAY=k).values).ravel()[0])
+
     assert (at(0, 0), at(3, 0), at(0, 2)) == (0.0, 300.0, 2.0)
 
 

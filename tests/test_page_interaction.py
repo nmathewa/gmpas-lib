@@ -35,7 +35,7 @@ def served(tmp_path_factory):
     lat = np.degrees(np.arcsin(rng.uniform(-1, 1, 600)))
     # cells wide enough to meet: a click anywhere on the map is on a cell
     areas = np.full(lon.size, 0.85 * 4 * np.pi * 6371229.0 ** 2 / lon.size)
-    write_mesh(path, list(zip(lon, lat)), areas=areas)
+    write_mesh(path, list(zip(lon, lat, strict=True)), areas=areas)
     with xr.open_dataset(path) as ds:
         full = ds.load()
     full["theta"] = (("Time", "nCells"), (280 + np.sin(np.radians(lat)) * 20)[None, :])
@@ -195,7 +195,8 @@ def test_no_form_control_is_left_browser_white(page):
     page.evaluate("document.querySelectorAll('details').forEach(d => d.open = true)")
     light = page.evaluate("""() => [...document.querySelectorAll('input,select,textarea')]
       .filter(e => e.offsetParent !== null && !['range', 'checkbox'].includes(e.type))
-      .map(e => [e.id || e.type, getComputedStyle(e).backgroundColor.match(/[\\d.]+/g).map(Number)])
+      .map(e => [e.id || e.type,
+                 getComputedStyle(e).backgroundColor.match(/[\\d.]+/g).map(Number)])
       .filter(([, c]) => (0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]) / 255 > 0.5)
       .map(([name]) => name)""")
     assert light == []

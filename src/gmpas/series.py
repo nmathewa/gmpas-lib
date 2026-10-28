@@ -173,7 +173,7 @@ SCAN_PROBE_FILES = 12
 
 def _warm_worker(_):
     """Make a worker do its imports before a real read needs them."""
-    import netCDF4                                       # noqa: F401
+    import netCDF4  # noqa: F401
 
     _time.sleep(0.05)      # stay busy, so the next warm task starts a new worker
     return True

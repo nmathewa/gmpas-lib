@@ -48,13 +48,13 @@ class Config:
     """Whatever configuration was found, and where it came from."""
 
     directory: Path
-    domain: "TargetDomain | None" = None
+    domain: TargetDomain | None = None
     include: list[str] | None = None
     exclude: list[str] | None = None
     mesh: Path | None = None
     found: dict[str, Path] = None            # role -> path, for reporting
 
-    def require_domain(self) -> "TargetDomain":
+    def require_domain(self) -> TargetDomain:
         if self.domain is None:
             raise ConfigError(
                 f"no {CONFIG_NAMES['domain']!r} in {self.directory}. A target "

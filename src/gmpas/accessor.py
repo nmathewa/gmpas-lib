@@ -75,7 +75,7 @@ class MpasAccessor:
             self._mesh = MpasMesh.load(path)
         return self._mesh
 
-    def use_mesh(self, mesh_path: str) -> "MpasAccessor":
+    def use_mesh(self, mesh_path: str) -> MpasAccessor:
         """Attach (or replace) the mesh for this dataset."""
         self._ds.attrs[MESH_ATTR] = str(resolve_path(mesh_path))
         self._mesh = None

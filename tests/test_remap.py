@@ -8,9 +8,17 @@ import xarray as xr
 
 from conftest import write_mesh
 from gmpas.config import TargetDomain
-from gmpas.remap import (RemapError, Weights, _esmf_supports_mpi,
-                         _mpi_launch_prefix, ensure_weights, level_dim,
-                         remappable, remap_file, valid_times)
+from gmpas.remap import (
+    RemapError,
+    Weights,
+    _esmf_supports_mpi,
+    _mpi_launch_prefix,
+    ensure_weights,
+    level_dim,
+    remap_file,
+    remappable,
+    valid_times,
+)
 
 
 def _weight_file(path, row, col, S, area_a, area_b, frac_a, frac_b):
@@ -324,7 +332,8 @@ def test_mpiexec_is_used_when_mpirun_is_absent(monkeypatch):
     monkeypatch.setattr(remap_mod.shutil, "which",
                         lambda name: "/opt/cray/mpiexec" if name == "mpiexec" else None)
 
-    assert _mpi_launch_prefix(64, "/fake/esmf") == (["/opt/cray/mpiexec", "-np", "64"], None)
+    assert _mpi_launch_prefix(64, "/fake/esmf") == \
+        (["/opt/cray/mpiexec", "-np", "64"], None)
 
 
 def test_srun_is_preferred_inside_an_active_slurm_allocation(monkeypatch):
