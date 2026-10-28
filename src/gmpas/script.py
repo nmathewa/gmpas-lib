@@ -289,7 +289,8 @@ _PICK_LINE = re.compile(r"^[ \t]*var[ \t]*=(?![^\n]*\.(?:mean|max|min)\()"
                         r"[^\n]*\.i?sel\(", re.M | re.I)
 #: ... and `var = u.sel(level=850).mean("time")`: a level picked of a field
 #: reduced over time is read there too, where the level is taken out of the chain
-_LEVEL_LINE = re.compile(r"^[ \t]*var[ \t]*=[^\n]*\.i?sel\([^)\n]*\blevel[ \t]*=", re.M | re.I)
+_LEVEL_LINE = re.compile(r"^[ \t]*var[ \t]*=[^\n]*\.i?sel\([^)\n]*\blevel[ \t]*=",
+                         re.M | re.I)
 #: What draws one field, and the plot kind it is.
 _FIELD = {"shade": "map", "contourf": "contourf", "contour": "contour",
           "pcolormesh": "pcolormesh", "imshow": "imshow", "hist": "hist",

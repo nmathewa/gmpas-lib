@@ -8,7 +8,6 @@ import pytest
 from conftest import write_mesh
 from gmpas import RASTER_THRESHOLD, rasterize, should_raster, target_grid
 
-
 # ------------------------------------------------------------------ the grid
 
 

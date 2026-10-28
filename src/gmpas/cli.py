@@ -477,8 +477,7 @@ def _resolve_mesh(args, cfg, series):
 def _remap(args) -> int:
     """Read the config, build weights once, convert every file."""
     from .config import CONFIG_NAMES, discover
-    from .remap import (Weights, detect_cores,
-                        ensure_weights, remap_many)
+    from .remap import Weights, detect_cores, ensure_weights, remap_many
     from .series import Series
 
     print(banner())
