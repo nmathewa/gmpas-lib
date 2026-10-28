@@ -217,7 +217,8 @@ def _render_one(job):
         label = field_label(da)
         title = opts["title"] or f"{var} — {series.labels[step]}"
         common = dict(label=label, title=title, style=style, cmap=opts["cmap"],
-                      extent=opts["extent"] or None)
+                      extent=opts["extent"] or None,
+                      vmin=opts["vmin"], vmax=opts["vmax"])
 
         if "nCells" in da.dims:
             fig, _ = cell_field(series.mesh, values, method=opts["method"],
@@ -266,6 +267,7 @@ def _plot_series(args) -> int:
         "style": args.style, "cmap": args.cmap,
         "extent": args.extent, "symmetric": args.symmetric,
         "method": args.method, "title": args.title, "pattern": args.out,
+        "vmin": args.vmin, "vmax": args.vmax,
     }
     work = [(args.path, mesh_path, args.var, s, opts) for s in range(n)]
 
@@ -307,7 +309,8 @@ def _generic_plot(args) -> int:
                   f"{list(gv.ds.data_vars)[:20]}", file=sys.stderr)
             return 1
         png = gv.figure(args.var, args.time, args.level, gv.home,
-                        args.cmap or "viridis", None, None, style=args.style)
+                        args.cmap or "viridis", args.vmin, args.vmax,
+                        style=args.style)
     finally:
         gv.close()
     out = Path(args.out)
@@ -317,6 +320,10 @@ def _generic_plot(args) -> int:
 
 
 def _plot(args) -> int:
+    if args.vmin is not None and args.vmax is not None and args.vmin >= args.vmax:
+        print(f"gmpas: --vmin ({args.vmin:g}) must be below --vmax ({args.vmax:g})",
+              file=sys.stderr)
+        return 1
     if _kind(args) != "mpas":
         return _generic_plot(args)
     if args.all_steps:
@@ -350,7 +357,8 @@ def _plot_single(args) -> int:
     dim = spatial_dim(da)
     kwargs = dict(label=field_label(da), title=args.title or args.var,
                   style=Style.preset(args.style), cmap=args.cmap,
-                  extent=args.extent or None, symmetric=args.symmetric)
+                  extent=args.extent or None, symmetric=args.symmetric,
+                  vmin=args.vmin, vmax=args.vmax)
     series.close()
 
     if dim == "nCells":
@@ -923,6 +931,11 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["paper", "poster", "notebook", "mesh"])
     o.add_argument("--symmetric", action="store_true",
                    help="diverging colormap centred on zero, for anomalies")
+    o.add_argument("--vmin", type=float, default=None,
+                   help="colour scale minimum (default: 2nd percentile of the step)")
+    o.add_argument("--vmax", type=float, default=None,
+                   help="colour scale maximum (default: 98th percentile of the step); "
+                        "give both to keep --all-steps frames comparable")
     o.add_argument("--title", default="")
     o.add_argument("--all-steps", action="store_true",
                    help="render every step in the series; --out needs {step}")

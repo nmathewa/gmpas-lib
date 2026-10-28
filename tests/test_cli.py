@@ -89,6 +89,79 @@ def test_all_steps_requires_a_step_placeholder(capsys, tmp_path, simple_mesh_fil
     assert "{step" in args.out
 
 
+def _seen_limits(monkeypatch):
+    """Record the vmin/vmax each cell_field call is given, and draw nothing."""
+    import matplotlib.pyplot as plt
+
+    import gmpas.plot
+
+    seen = []
+
+    def fake(mesh, values, **kw):
+        seen.append((kw.get("vmin"), kw.get("vmax")))
+        return plt.figure(), None
+
+    monkeypatch.setattr(gmpas.plot, "cell_field", fake)
+    return seen
+
+
+def test_plot_passes_a_fixed_colour_range(tmp_path, simple_mesh_file, monkeypatch):
+    diag = write_diag(tmp_path / "diag.nc", n_cells=4, n_edges=24)
+    seen = _seen_limits(monkeypatch)
+
+    assert main(["plot", str(diag), "mslp", "--mesh", str(simple_mesh_file),
+                 "--vmin", "990", "--vmax", "1030",
+                 "-o", str(tmp_path / "out.png")]) == 0
+    assert main(["plot", str(diag), "mslp", "--mesh", str(simple_mesh_file),
+                 "-o", str(tmp_path / "auto.png")]) == 0
+
+    assert seen == [(990.0, 1030.0), (None, None)]
+
+
+def test_all_steps_share_the_fixed_colour_range(tmp_path, simple_mesh_file,
+                                                monkeypatch):
+    """The point of the flags: every frame of a sequence on one scale."""
+    diag = write_diag(tmp_path / "diag.nc", n_cells=4, n_edges=24, n_times=3)
+    seen = _seen_limits(monkeypatch)
+
+    assert main(["plot", str(diag), "mslp", "--mesh", str(simple_mesh_file),
+                 "--all-steps", "-j", "1", "--vmin", "-1", "--vmax", "1",
+                 "-o", str(tmp_path / "f_{step:02d}.png")]) == 0
+
+    assert seen == [(-1.0, 1.0)] * 3
+
+
+def test_an_inverted_colour_range_is_refused(tmp_path, simple_mesh_file, capsys):
+    diag = write_diag(tmp_path / "diag.nc", n_cells=4, n_edges=24)
+
+    assert main(["plot", str(diag), "mslp", "--mesh", str(simple_mesh_file),
+                 "--vmin", "5", "--vmax", "5", "-o", str(tmp_path / "x.png")]) == 1
+    assert "--vmin" in capsys.readouterr().err
+    assert not (tmp_path / "x.png").exists()
+
+
+def test_a_lat_lon_plot_takes_the_colour_range(tmp_path, monkeypatch):
+    import numpy as np
+    import xarray as xr
+
+    import gmpas.generic
+
+    path = tmp_path / "grid.nc"
+    xr.Dataset({"t2m": (("lat", "lon"), np.arange(12.0).reshape(3, 4))},
+               coords={"lat": [-10.0, 0.0, 10.0], "lon": [0.0, 10.0, 20.0, 30.0]}
+               ).to_netcdf(path)
+    seen = []
+
+    def fake(self, var, time, level, extent, cmap, vmin, vmax, **kw):
+        seen.append((vmin, vmax))
+        return b"png"
+
+    monkeypatch.setattr(gmpas.generic.GenericViewer, "figure", fake)
+    assert main(["plot", str(path), "t2m", "--vmin", "2", "--vmax", "8",
+                 "-o", str(tmp_path / "g.png")]) == 0
+    assert seen == [(2.0, 8.0)]
+
+
 # ---------------------------------------------------------------- path forms
 
 
