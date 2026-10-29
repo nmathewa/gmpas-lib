@@ -9,19 +9,9 @@ import numpy as np
 import xarray as xr
 
 from . import netcdf, timing
+from ._reader import SPATIAL_DIMS, TIME_NAMES  # noqa: F401  (defined beside the workers)
 from .mesh import MpasMesh, has_mesh
 from .paths import resolve_path
-
-#: MPAS spatial dimensions, in the order tools care about
-SPATIAL_DIMS = ("nCells", "nEdges", "nVertices")
-
-#: names a time dimension has carried in files seen in practice, used only
-#: when the dimension carries no coordinate whose attributes say what it is.
-#: `Time` is MPAS's own; `time`, `valid_time` and `xtime` are what ncrcat,
-#: CDO and an xarray round-trip produce. `t` is deliberately NOT here: it is
-#: a plausible variable-specific axis, and the name fallback exists for bare
-#: record dimensions where there is nothing else to go on.
-TIME_NAMES = {"time", "times", "valid_time", "xtime"}
 
 
 def open_data(data_path: str | Path,
