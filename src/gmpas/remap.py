@@ -517,7 +517,8 @@ def remappable(ds: xr.Dataset, names) -> tuple[list[str], list[tuple[str, str]]]
 CORE_VARS = (
     "SLURM_CPUS_PER_TASK",      # SLURM, --cpus-per-task
     "SLURM_CPUS_ON_NODE",       # SLURM, whole-node allocation
-    "PBS_NCPUS", "NCPUS",       # PBS / Torque
+    "PBS_NCPUS",                # PBS / Torque. Not bare NCPUS: sites set it to 1
+                                # in login profiles whatever the allocation (#8)
     "LSB_DJOB_NUMPROC",         # LSF
     "NSLOTS",                   # Grid Engine
 )
