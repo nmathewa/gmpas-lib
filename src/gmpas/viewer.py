@@ -469,6 +469,22 @@ def _overlay(extent, nx: int, ny: int, crs=None) -> bytes:
 # ------------------------------------------------------------------- state
 
 
+#: `gif()` keeps every frame, one byte a pixel, until the file is written:
+#: 3000 steps at the browser's 1680x980 are 4.6 GB. Above this many bytes the
+#: page asks first and the terminal says what is being built (#78).
+GIF_WARN_BYTES = 1 << 30
+
+
+def _say_big_gif(frames: int, nx: int, ny: int) -> None:
+    """One line before a GIF that will hold a lot of memory, so a server
+    killed on a memory-capped node shows what it was doing."""
+    held = frames * nx * ny
+    if held > GIF_WARN_BYTES:
+        print(f"gmpas: building an animation of {frames:,} frames at {nx}x{ny}, "
+              f"which holds about {held / 2**30:.1f} GB in memory until it is "
+              f"written", file=sys.stderr)
+
+
 class Viewer:
     """Everything the request handlers need, built once at startup."""
 
@@ -752,6 +768,7 @@ class Viewer:
         # and measured: byte-identical output, and SLOWER (1.74 s against
         # 1.52 s over 120 frames at 1200x700), because PIL's GIF writer is
         # happier with what its own PNG decoder hands it. Left alone.
+        _say_big_gif(len(self.series), nx or self.nx, ny or self.ny)
         frames = []
         for step in range(len(self.series)):
             png, _, _ = self.frame(var, step, level, extent, cmap,
@@ -4269,7 +4286,24 @@ $("#clearanim").onclick = ()=>{
   say("all animations cleared");
 };
 
+// The server keeps every frame of a GIF, one byte a pixel, until the file is
+// written. Ask before a large one: viewer.GIF_WARN_BYTES, kept in step by
+// test_viewer.py. A contour or profile GIF is a figure a step and has its
+// own limit on the server.
+const GIF_WARN_BYTES=1073741824;
+function gifAllowed(){
+  if(cur.kinds && $("#kind").value!=="map") return true;
+  const held=M.steps*Math.round(M.nx*OUTSET)*Math.round(M.ny*OUTSET);
+  return held<=GIF_WARN_BYTES || confirm(
+    `This animation has ${M.steps.toLocaleString("en")} frames. Building it holds `+
+    `about ${(held/2**30).toFixed(1)} GB in memory on the machine running gmpas, `+
+    `and a memory-limited node may kill it.\\n\\nBuild it anyway?`);
+}
+
 async function exportAs(kind, label){
+  if(kind==="gif" && !gifAllowed()){
+    $("#exphint").textContent="animation not built"; return;
+  }
   const btns=[...document.querySelectorAll("#expfig,#expnc,#expgif")];
   btns.forEach(b=>b.disabled=true);
   $("#exphint").textContent=`building ${label}\u2026`;

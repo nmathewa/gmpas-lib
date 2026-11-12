@@ -41,7 +41,7 @@ from . import projection as _projection
 from .mesh import EARTH_RADIUS
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
-from .viewer import _overlay, _png, _proj_key, data_range
+from .viewer import _overlay, _png, _proj_key, _say_big_gif, data_range
 
 # How each axis is recognised, strongest evidence first. These are the CF
 # conventions' own markers, the same ones cf_xarray keys on -- `standard_name`,
@@ -2384,6 +2384,7 @@ class GenericViewer:
                 vmin, vmax = _colour.centred(
                     *self._range(self._raster(var, 0, level, extent, nx, ny), vmin, vmax),
                     colour, vmin, vmax)
+            _say_big_gif(n, nx, ny)
             for step in range(n):
                 png, _, _ = self.frame(var, step, level, extent, cmap, vmin, vmax,
                                        nx, ny, compress=1, colour=colour)

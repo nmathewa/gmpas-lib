@@ -542,6 +542,17 @@ def test_a_gif_has_a_frame_per_step(months, kind):
     assert Image.open(io.BytesIO(gif)).n_frames == 6
 
 
+def test_a_large_map_gif_says_what_it_holds(months, monkeypatch, capsys):
+    """As the MPAS viewer does (#78); a figure a step has its own limit."""
+    from gmpas import viewer
+
+    monkeypatch.setattr(viewer, "GIF_WARN_BYTES", 0)
+    months.gif("t", 1, months.home, "viridis", 0.0, 220.0, 72, 38)
+    assert "6 frames at 72x38" in capsys.readouterr().err
+    months.gif("t", 1, months.home, "viridis", 0.0, 220.0, kind="contourf")
+    assert "frames" not in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("var, kind", [("t", "series"), ("t", "hist"), ("gmean", "auto")])
 def test_a_gif_of_something_not_drawn_per_step_is_refused(months, var, kind):
     with pytest.raises(ValueError, match="GIF steps through time"):
