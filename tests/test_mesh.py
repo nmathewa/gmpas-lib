@@ -9,7 +9,6 @@ from conftest import EDGE_ANGLES, write_mesh
 from gmpas import MpasMesh, reconstruct_cell_winds
 from gmpas.mesh import EARTH_RADIUS, _wrap180, cache_path
 
-
 # ------------------------------------------------------------------ conventions
 
 

@@ -306,14 +306,17 @@ def test_a_globe_keeps_its_turn(page):
 
 def test_a_comment_may_follow_a_value():
     from gmpas import script
-    assert script.parse("cmap = viridis # dark\ntime = 3 #") == {"cmap": "viridis", "time": 3}
-    assert script.parse("under_color = #ff0000 # red")["colour"] == {"under_color": "#ff0000"}
+    assert script.parse("cmap = viridis # dark\ntime = 3 #") == \
+        {"cmap": "viridis", "time": 3}
+    assert script.parse("under_color = #ff0000 # red")["colour"] == \
+        {"under_color": "#ff0000"}
 
 
 def test_a_level_may_be_said_in_pascals():
     from gmpas import script
     meta = {"steps": 1, "labels": ["x"], "variables": [
-        {"name": "t", "levels": 3, "level_values": [100000, 85000, 70000], "level_units": "Pa"},
+        {"name": "t", "levels": 3, "level_values": [100000, 85000, 70000],
+         "level_units": "Pa"},
         {"name": "z", "levels": 3, "level_values": [1000, 850, 700], "level_units": "hPa"}]}
     for text in ("var = t\nlevel = 850 hPa", "var = t\nlevel = 85000 Pa",
                  "var = z\nlevel = 85000 Pa", "shade(t.sel(level=85000))"):
@@ -369,7 +372,8 @@ def test_an_empty_line_gives_way_to_a_pick_and_a_level_before_a_reduction_is_kep
     got = script.resolve(script.parse("var = u.sel(level=850)\ntime =\nlevel ="), meta)
     assert got["var"] == "u" and got["level"] == 1
     # the level picked before the time mean is the level of the mean
-    for text in ('var = u.sel(level=850).mean("time")', 'shade(u.isel(level=1).max("time"))',
+    for text in ('var = u.sel(level=850).mean("time")',
+                 'shade(u.isel(level=1).max("time"))',
                  'shade(u.mean("time").sel(level=850))'):
         got = script.resolve(script.parse(text), meta)
         assert got["level"] == 1 and got["var"] in ("u.mean('time')", "u.max('time')")

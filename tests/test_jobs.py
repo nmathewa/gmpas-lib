@@ -109,7 +109,8 @@ def test_a_waiting_export_keeps_its_job_from_being_cancelled():
     thread = threading.Thread(target=export)
     thread.start()
     assert started.wait(5)
-    jobs.progress("second", 1, lambda progress, cancel, publish=None: np.zeros(1))  # would cancel
+    # would cancel
+    jobs.progress("second", 1, lambda progress, cancel, publish=None: np.zeros(1))
     release.set()
     thread.join(10)
     assert np.array_equal(out["value"], np.arange(4.0))

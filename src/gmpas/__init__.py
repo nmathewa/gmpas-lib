@@ -15,8 +15,8 @@ exactly as the model carries it.
 Depends on numpy, scipy, xarray and netCDF4; matplotlib and cartopy are only
 needed to actually draw, and are imported lazily. It does not use uxarray
 (which rebuilds grid topology every fresh process -- see
-docs/benchmarks/ for the comparison) or geopandas (the on-disk geometry cache replaces a .gpkg and also
-carries edge geometry).
+docs/benchmarks/ for the comparison) or geopandas (the on-disk geometry cache
+replaces a .gpkg and also carries edge geometry).
 """
 
 from __future__ import annotations

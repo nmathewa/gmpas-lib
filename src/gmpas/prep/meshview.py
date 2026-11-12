@@ -30,8 +30,7 @@ import numpy as np
 
 from ..cache import BuildCache
 from ..mesh import MpasMesh
-from ..viewer import (PageHandler, _px, ViewIndex, _overlay, _png, bind,
-                      ramp, reach_lines)
+from ..viewer import PageHandler, ViewIndex, _overlay, _png, _px, bind, ramp, reach_lines
 from .layout import page
 
 #: the one colormap this section uses. Sequential and perceptually uniform,

@@ -282,7 +282,8 @@ PROJECTIONS = ["PlateCarree", "Robinson", "Mollweide", "EqualEarth", "Orthograph
 FIGURE_OPTIONS = {
     "projection": {"type": "choice", "default": "PlateCarree",
                    "choices": [*PROJECTIONS, "auto"],
-                   "help": "auto picks one from the view (gmpas.projection.auto_projection)"},
+                   "help": "auto picks one from the view "
+                           "(gmpas.projection.auto_projection)"},
     "central_longitude": {"type": "float", "default": None,
                           "help": "empty centres on the view"},
     "central_latitude": {"type": "float", "default": None,

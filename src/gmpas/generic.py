@@ -519,7 +519,8 @@ def _overlap_note(files, labels_of) -> str:
             continue
         same.setdefault(tuple(got), []).append(f.name)
         if prev is not None and got[0] <= prev[1]:
-            back.append(f"  {f.name} starts at {got[0]}, before {prev[0]} ends at {prev[1]}")
+            back.append(f"  {f.name} starts at {got[0]}, "
+                        f"before {prev[0]} ends at {prev[1]}")
         prev = (f.name, got[-1])
     lines = []
     for names in same.values():

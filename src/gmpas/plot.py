@@ -17,7 +17,6 @@ from .mesh import MpasMesh
 from .raster import rasterize, should_raster
 from .style import CMAPS, Style, resolve_extent
 
-
 # ------------------------------------------------------------------ base map
 
 
@@ -46,10 +45,9 @@ def _frame(box, central_lon: float = 0.0):
 
 def _basemap(mesh: MpasMesh, style: Style, extent, central_lon: float = 0.0,
              coastlines: bool = True):
+    import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     import matplotlib.pyplot as plt
-
-    import cartopy.crs as ccrs
 
     box = resolve_extent(mesh, extent)
     central_lon, src, framed = _frame(box, central_lon)
@@ -83,8 +81,10 @@ def _limits(values: np.ndarray, vmin, vmax, symmetric: bool, robust: bool):
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         return 0.0, 1.0
-    lo = vmin if vmin is not None else (np.percentile(finite, 2) if robust else finite.min())
-    hi = vmax if vmax is not None else (np.percentile(finite, 98) if robust else finite.max())
+    lo = vmin if vmin is not None else \
+        (np.percentile(finite, 2) if robust else finite.min())
+    hi = vmax if vmax is not None else \
+        (np.percentile(finite, 98) if robust else finite.max())
     if symmetric:
         m = max(abs(lo), abs(hi))
         return -m, m

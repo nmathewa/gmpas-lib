@@ -60,7 +60,7 @@ class Hfun:
     _get_hfun: object
 
     @classmethod
-    def load(cls, path: str | Path) -> "Hfun":
+    def load(cls, path: str | Path) -> Hfun:
         p = resolve_path(path)
         if p.is_dir():                       # `gmpas prep hfun somedir/`
             p = p / "hfun.py"

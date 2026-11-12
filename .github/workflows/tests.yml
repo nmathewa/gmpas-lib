@@ -70,15 +70,16 @@ jobs:
           print(len(spk), "Ferret palettes and NOTICE.txt in the wheel")
           EOF
 
-      # No ruff step yet, deliberately. `ruff check src tests` currently reports
-      # 42 pre-existing violations (mostly E501 in the embedded viewer page), so
-      # gating on it would mean this workflow is red from its first run for
-      # reasons unrelated to whether the code works. Tracked separately; turn it
-      # on once the tree is clean.
-
       - name: Run the test suite
         # Agg: the runner is headless, and a rendering test that tries for a
         # display fails in a way that looks nothing like the real problem
         env:
           MPLBACKEND: Agg
         run: pytest -q --durations=10
+
+      # After the tests, so a lint failure never hides a test result. Pinned:
+      # a new ruff release adds rules, which should not turn main red overnight.
+      - name: Lint
+        run: |
+          pip install ruff==0.16.10
+          ruff check src tests

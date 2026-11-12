@@ -37,7 +37,7 @@ class Style:
     label_size: float = 10.0
 
     @classmethod
-    def preset(cls, name: str = "paper") -> "Style":
+    def preset(cls, name: str = "paper") -> Style:
         if name == "poster":
             return cls(figsize=(16.0, 9.0), dpi=200, coastline_lw=1.0,
                        title_size=18.0, label_size=14.0)

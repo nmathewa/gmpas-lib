@@ -46,18 +46,18 @@ def _tiles(viewer, out: Path) -> dict:
         steps = [base, base + 1]
         lo = float(min(np.nanmin(s) for s in steps))
         hi = float(max(np.nanmax(s) for s in steps))
-        for t, values in zip(TIMES, steps):
+        for t, values in zip(TIMES, steps, strict=True):
             for z, vi in index.items():
                 img = vi.frame(values)
-                code = np.where(np.isfinite(img), 1 + np.clip(
-                    np.rint((img - lo) * LEVELS / (hi - lo)), 0, LEVELS), 0).astype(np.uint8)
+                byte = 1 + np.clip(np.rint((img - lo) * LEVELS / (hi - lo)), 0, LEVELS)
+                code = np.where(np.isfinite(img), byte, 0).astype(np.uint8)
                 from PIL import Image
                 for x in range(code.shape[1] // TILE):
                     for y in range(code.shape[0] // TILE):
                         d = out / "tiles" / name / t / str(z) / str(x)
                         d.mkdir(parents=True, exist_ok=True)
-                        Image.fromarray(code[y * TILE:(y + 1) * TILE,
-                                             x * TILE:(x + 1) * TILE], "L").save(d / f"{y}.png")
+                        tile = code[y * TILE:(y + 1) * TILE, x * TILE:(x + 1) * TILE]
+                        Image.fromarray(tile, "L").save(d / f"{y}.png")
         fields.append({"name": name, "label": f"{name} [test]", "lo": lo, "hi": hi,
                        "show": [lo, hi], "maxzoom": MAXZOOM, "times": list(TIMES)})
     homes = {}
@@ -68,7 +68,8 @@ def _tiles(viewer, out: Path) -> dict:
                     "plon": params.get("central_longitude"),
                     "plat": params.get("central_latitude"), "psp": None}
     manifest = {"run": {"title": "tile test", "mesh": "demo.nc",
-                        "source": "Tester, A. (2026). Tile test data.", "doi": "10.0000/tiles"},
+                        "source": "Tester, A. (2026). Tile test data.",
+                        "doi": "10.0000/tiles"},
                 "cells": viewer.mesh.n_cells, "home": list(home), "coverage": 100.0,
                 "times": list(TIMES), "labels": ["00 UTC", "01 UTC"], "proj": homes,
                 "tile": {"size": TILE, "format": "png", "levels": LEVELS},
@@ -164,7 +165,8 @@ def test_a_click_answers_the_byte_the_tile_holds(page, site):
                 continue
             lon = -180 + (gx + 0.5) * 360 / W
             lat = 90 - (gy + 0.5) * 180 / H
-            got = _get(page, f"api/probe?lon={lon}&lat={lat}&var=cape&time=0&level=0")["body"]
+            q = f"lon={lon}&lat={lat}&var=cape&time=0&level=0"
+            got = _get(page, f"api/probe?{q}")["body"]
             want = cape[vi.idx.ravel()[p]]
             byte = 1 + int(np.clip(np.rint((want - m["lo"]) / step), 0, LEVELS))
             assert got["value"] == pytest.approx(m["lo"] + (byte - 1) * step, abs=1e-3)
@@ -207,14 +209,17 @@ def test_frames_draw_on_the_lon_lat_map_and_projected(page):
 def test_unreadable_tile_data_is_said_not_left_loading(page, site):
     """A manifest in the wrong shape -- an old copy, a broken deploy -- puts
     the reason in the page's title instead of leaving it at "loading"."""
-    ctx = page.context.browser.new_context()   # the module's browser: one sync API at a time
+    # the module's browser: one sync API at a time
+    ctx = page.context.browser.new_context()
     pg = ctx.new_page()
     try:
         pg.route("**/manifest.json", lambda r: r.fulfill(
-            status=200, content_type="application/json", body='{"run": {}, "fields": []}'))
+            status=200, content_type="application/json",
+            body='{"run": {}, "fields": []}'))
         pg.goto(site["url"])
         pg.wait_for_function(
-            "() => document.querySelector('#title').textContent.includes('could not be read')",
+            "() => document.querySelector('#title').textContent"
+            "        .includes('could not be read')",
             timeout=20000)
     finally:
         ctx.close()
