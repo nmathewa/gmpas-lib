@@ -474,3 +474,43 @@ def test_auto_on_a_global_mesh_is_the_lon_lat_map(page):
     if first:
         assert reqs[-1]["extent"] == first[-1]["extent"]
     _lonlat(page)
+
+
+def test_a_large_gif_is_asked_about_before_it_is_built(page):
+    """The server holds every frame until the GIF is written (#78), so the
+    page asks first; saying no sends nothing."""
+    asked, sent = [], []
+
+    def answer(yes):
+        def on_dialog(d):
+            asked.append(d.message)
+            d.accept() if yes else d.dismiss()
+        return on_dialog
+
+    def on_request(r):
+        if "api/export/gif" in r.url:
+            sent.append(r.url)
+
+    page.on("request", on_request)
+    steps = page.evaluate("() => { const n = M.steps; M.steps = 5000; return n; }")
+    try:
+        page.once("dialog", answer(False))
+        page.evaluate("() => document.querySelector('#expgif').click()")
+        page.wait_for_timeout(300)
+        assert len(asked) == 1 and "5,000 frames" in asked[0] and "GB" in asked[0]
+        assert not sent
+        assert page.inner_text("#exphint") == "animation not built"
+
+        page.once("dialog", answer(True))
+        with page.expect_response(lambda r: "api/export/gif" in r.url):
+            page.evaluate("() => document.querySelector('#expgif').click()")
+        assert len(asked) == 2 and len(sent) == 1
+
+        # an ordinary run is not asked about
+        page.evaluate("n => { M.steps = n; }", steps)
+        with page.expect_response(lambda r: "api/export/gif" in r.url):
+            page.evaluate("() => document.querySelector('#expgif').click()")
+        assert len(asked) == 2 and len(sent) == 2
+    finally:
+        page.evaluate("n => { M.steps = n; }", steps)
+        page.remove_listener("request", on_request)
