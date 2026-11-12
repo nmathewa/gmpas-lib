@@ -452,6 +452,38 @@ def test_gif_export_holds_every_step(tmp_path):
         v.series.close()
 
 
+def test_a_large_gif_says_what_it_holds(capsys):
+    """Every frame stays in memory until the file is written (#78): 3000 steps
+    at the browser's size are 4.6 GB, and the terminal says so first."""
+    from gmpas.viewer import GIF_WARN_BYTES, PAGE, _say_big_gif
+
+    _say_big_gif(600, 1680, 980)
+    assert capsys.readouterr().err == ""
+    _say_big_gif(3000, 1680, 980)
+    err = capsys.readouterr().err
+    assert "3,000 frames at 1680x980" in err and "4.6 GB" in err
+    # the page asks at the same size
+    assert f"const GIF_WARN_BYTES={GIF_WARN_BYTES};" in PAGE
+
+
+def test_gif_export_announces_a_large_one(tmp_path, monkeypatch, capsys):
+    from conftest import write_diag, write_mesh
+    from gmpas import viewer
+
+    mesh = write_mesh(tmp_path / "mesh.nc", [(0.0, 0.0), (5.0, 0.0), (0.0, 5.0)])
+    diag = write_diag(tmp_path / "diag.nc", n_cells=3, n_edges=18, n_times=2)
+    monkeypatch.setattr(viewer, "GIF_WARN_BYTES", 2 * 60 * 40 - 1)
+    v = viewer.Viewer(diag, mesh, nx=60, ny=40)
+    try:
+        v.gif("mslp", 0, v.home, "viridis", 0.0, 1.0, None, None)
+        assert "2 frames at 60x40" in capsys.readouterr().err
+        monkeypatch.setattr(viewer, "GIF_WARN_BYTES", 2 * 60 * 40)
+        v.gif("mslp", 0, v.home, "viridis", 0.0, 1.0, 60, 40)
+        assert "frames" not in capsys.readouterr().err
+    finally:
+        v.close()
+
+
 def test_concurrent_reads_do_not_corrupt_each_other(tmp_path, monkeypatch):
     """The bug this guards against: an animation's frame-by-frame loop and
     ordinary navigation (scrubbing, panning, a probe click) are never
