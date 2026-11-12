@@ -677,6 +677,18 @@ def test_other_schedulers_are_recognised(monkeypatch):
         assert detect_cores() == (12, var)
 
 
+def test_a_bare_ncpus_is_not_taken_for_the_allocation(monkeypatch):
+    """Several sites set NCPUS=1 in a login profile, which ran `gmpas remap`
+    on one worker of a many-core job. The affinity mask is the allocation."""
+    from gmpas.remap import CORE_VARS, detect_cores
+
+    for var in CORE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("NCPUS", "1")
+    _, source = detect_cores()
+    assert source in {"affinity mask", "machine cores"}
+
+
 def test_nothing_is_hardcoded_when_no_scheduler(monkeypatch):
     """Falls through to what the OS will actually allow."""
     from gmpas.remap import CORE_VARS, detect_cores
