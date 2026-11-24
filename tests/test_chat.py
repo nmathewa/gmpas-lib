@@ -52,15 +52,16 @@ def test_the_model_is_told_the_file_and_the_view():
     chat.ask("the last step", META, current="var = t2m\ntime = 0\n", cfg=CFG, post=post)
     system, user = post.seen[0]
     assert "t2m: 2 m temperature [K]" in system["content"]
-    assert "u: zonal wind [m s-1] (5 levels, 0 to 4)" in system["content"]
+    assert "u: zonal wind [m s-1]; 5 levels on level, numbered 0 to 4" in system["content"]
     listed = {**META, "variables": [{"name": "t", "label": "T", "levels": 3,
                                      "level_values": [1000.0, 850.0, 500.0],
                                      "level_units": "hPa"}]}
-    assert "t: T (3 levels, 0 to 2: 1000, 850, 500 hPa)" in chat.system_prompt(listed)
+    assert "t: T; 3 levels on level, numbered 0 to 2 = 1000, 850, 500 hPa" \
+        in chat.system_prompt(listed)
     # every option the prompt offers for the fast map is one the page has
     from gmpas import colour
     assert {"levels", "reverse", "norm", "center", "extend"} <= set(colour.OPTIONS)
-    assert "4 time step(s), 0 to 3" in system["content"]
+    assert "4 time step(s) on time, 0 to 3" in system["content"]
     assert "Mercator" in system["content"] and "vectors(u" in system["content"]
     assert "var = t2m" in user["content"] and "the last step" in user["content"]
 
@@ -662,13 +663,13 @@ def test_the_tools_describe_and_check_without_drawing():
                                    "level_values": [1000.0, 850.0, 500.0],
                                    "level_units": "hPa"}]}
     said = chat._describe_file(meta)
-    assert "t: T; 3 levels, numbered 0 to 2 = 1000, 850, 500 hPa" in said
-    assert "4 time step(s), numbered 0 to 3: 2012-03-01 00:00" in said
+    assert "t: T; 3 levels on level, numbered 0 to 2 = 1000, 850, 500 hPa" in said
+    assert "4 time step(s) on time, numbered 0 to 3: 2012-03-01 00:00" in said
     assert "longitude 0 to 359" in said and "Mercator" in said and "RdBu_r" in said
     checked = chat._check_script("var = t.sel(level=850)", meta, None)
     assert checked.startswith("accepted") and "level = 1 (850 hPa)" in checked
-    assert chat._check_script("```\nvar = t.sel(level=800)\n```", meta, None) \
-        .startswith("refused: level: 800 is not one of t's levels")
+    assert chat._check_script("```\nvar = t.sel(level=1100)\n```", meta, None) \
+        .startswith("refused: level: 1100 is outside t's levels")
     assert chat._check_script("", meta, None).startswith("refused:")
     # the view on screen counts, as in a real request
     assert "outside t's 3 level" in chat._check_script("level = 7", meta, "t")
@@ -767,3 +768,27 @@ def test_a_server_that_refuses_tools_is_asked_without_them(flaky_server):
     cfg = {"url": url, "model": "m", "timeout": 5.0, "log": "off", "agent": True}
     assert chat.ask("temperature", META, cfg=cfg)["state"]["var"] == "t2m"
     assert "tools" in seen[0] and "tools" not in seen[1]
+
+
+def test_the_model_is_told_each_fields_own_axis_names():
+    meta = {**META, "time_dim": "valid_time", "variables": [
+        {"name": "ua", "label": "Eastward Wind [m s-1]", "levels": 3, "dim": "plev",
+         "level_values": [100000.0, 85000.0, 50000.0], "level_units": "Pa"}]}
+    told = chat.system_prompt(meta)
+    assert "ua: Eastward Wind [m s-1]; 3 levels on plev, numbered 0 to 2 = " \
+           "100000, 85000, 50000 Pa" in told
+    assert "ua.sel(plev=85000)" in told and "ua.isel(valid_time=0, plev=3)" in told
+    assert "on valid_time" in told and "`level =`" in told
+
+
+def test_a_nearest_level_is_said_beside_the_script():
+    meta = {**META, "variables": [{"name": "t", "label": "T", "levels": 3, "dim": "plev",
+                                   "level_values": [100000.0, 85000.0, 50000.0],
+                                   "level_units": "Pa"}]}
+    got = chat.ask("temperature at 800 hPa", meta, cfg=CFG,
+                   post=_says("var = t.sel(plev=80000)\n"))
+    assert got["state"]["level"] == 1
+    assert got["script"].splitlines()[-1] == \
+        "# t has no level at 80000; the nearest, 85000 Pa, is shown"
+    checked = chat._check_script("var = t.sel(plev=80000)", meta, None)
+    assert "note: t has no level at 80000; the nearest, 85000 Pa, is shown" in checked

@@ -437,6 +437,7 @@ class _Fields:
                 _fail(node, f".{how}() is not understood; .isel(), .sel() and, over "
                             f"time, .mean(\"time\"), .max(\"time\"), .min(\"time\") are")
             text, picked = self.read(node.func.value)
+            at: dict = {}
             if node.args:
                 _fail(node, f".{how}() takes names: .{how}(time=0)")
             for kw in node.keywords:
@@ -446,11 +447,28 @@ class _Fields:
                     _fail(node, f".{how}({kw.arg}=...) picks several time steps, and "
                                 f"a map shows one field: reduce them with "
                                 f".mean(\"time\"), .max(\"time\") or .min(\"time\")")
+                if kw.arg in ("lat", "lon") and how == "sel":
+                    # a place, as xarray picks one: .sel(lat=-2, lon=147.4)
+                    if "point" in picked or kw.arg in at:
+                        _fail(node, f"{kw.arg} is picked twice")
+                    at[kw.arg] = _number_of(kw.value)
+                    if at[kw.arg] is None:
+                        _fail(node, f".sel({kw.arg}=) takes a number")
+                    continue
                 if kw.arg not in ("time", "level"):
-                    _fail(node, f".{how}() takes time and level, not {kw.arg}")
+                    _fail(node, f".{how}() takes time and level"
+                                f"{', and .sel() lat and lon' if how == 'sel' else ''}"
+                                f", not {kw.arg}")
                 if kw.arg in picked:
                     _fail(node, f"{kw.arg} is picked twice")
                 picked[kw.arg] = self._pick(how, kw)
+            if at:
+                if len(at) != 2:
+                    _fail(node, ".sel() takes a place as both lat and lon: "
+                                ".sel(lat=-2, lon=147.4)")
+                if not -90 <= at["lat"] <= 90:
+                    _fail(node, "lat runs from -90 to 90")
+                picked["point"] = [at["lon"], at["lat"]]
             return text, picked
         if isinstance(node, ast.Name) and node.id in self.defs:
             self.used.add(node.id)
@@ -673,6 +691,28 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
 _EMPTY_VIEW = re.compile(r"(\bview\([^()]*?\b(?:region|box)\s*=)\s*(?=[,)])")
 
 
+def _at_place(node) -> bool:
+    """Whether `node` ends in a .sel() that picks a place by lat and lon."""
+    while isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if node.func.attr == "sel" and {"lat", "lon"} & {kw.arg for kw in node.keywords}:
+            return True
+        node = node.func.value
+    return False
+
+
+def _ask(out: dict, call, ask: dict) -> None:
+    """Put the script's question. The same question written twice --
+    `sst.max()` and then `mark(sst.max())` -- is one, marked if either is;
+    two different questions are refused."""
+    had = out.get("ask")
+    if had is not None:
+        if {k: v for k, v in had.items() if k != "mark"} != \
+                {k: v for k, v in ask.items() if k != "mark"}:
+            _fail(call, "one question to a script")
+        ask = {**ask, "mark": True} if had.get("mark") or ask.get("mark") else ask
+    out["ask"] = ask
+
+
 def _parse_python(text: str, shown: str | None = None) -> dict:
     """The Python form: definitions, settings, view() and what draws."""
     # the script has no blocks, so how far a line is indented means nothing
@@ -741,10 +781,13 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
         expr, picked = fields.read(node)
         put("var", node, line, expr, call)
         for key, value in picked.items():
-            if isinstance(value, (dict, str)):     # a level's value; a date in quotes
+            if key == "point":                     # x.sel(lat=, lon=): that place
+                put(key, node, line, f"{value[0]!r}, {value[1]!r}", call)
+            elif isinstance(value, (dict, str)):   # a level's value; a date in quotes
                 put(key, node, line, call=call, ready=value)
             else:
                 put(key, node, line, str(value), call)
+        return picked
 
     for stmt in tree.body:
         line = stmt.lineno
@@ -779,11 +822,15 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
                                 f"x.{call.func.attr}(\"time\").max()")
                 _fail(call, f".{call.func.attr}() with nothing in the brackets asks "
                             f"where a field is largest or smallest in view")
-            if "ask" in out:
-                _fail(call, "one question to a script")
             expr, picked = fields.read(call.func.value)
             # a question is about a field, not a change of what is shown
-            out["ask"] = {"what": _STATS[call.func.attr], "var": expr, **picked}
+            _ask(out, call, {"what": _STATS[call.func.attr], "var": expr, **picked})
+            continue
+        if isinstance(stmt, ast.Expr) and _at_place(stmt.value):
+            # `d2m.sel(lat=-6.25, lon=147.5)`: the value there, read in the
+            # point panel, with the field shown
+            field(stmt.value, line)
+            out["panel"] = "mark"
             continue
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
             _fail(stmt, "expected name = value, view(...) or a call that draws, "
@@ -794,11 +841,12 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
             arg = call.args[0] if len(call.args) == 1 and not call.keywords else None
             if isinstance(arg, ast.Call) and isinstance(arg.func, ast.Attribute) \
                     and arg.func.attr in _STATS and not arg.args and not arg.keywords:
-                if "ask" in out:
-                    _fail(call, "one question to a script")
                 expr, picked = fields.read(arg.func.value)
-                out["ask"] = {"what": _STATS[arg.func.attr], "var": expr, **picked,
-                              "mark": True}
+                _ask(out, call, {"what": _STATS[arg.func.attr], "var": expr, **picked,
+                                 "mark": True})
+            elif arg is not None and _at_place(arg):
+                field(arg, line)
+                out["panel"] = "mark"
             elif not call.args and {kw.arg for kw in call.keywords} == {"lon", "lat"}:
                 at = {kw.arg: _number_of(kw.value) for kw in call.keywords}
                 if None in at.values():
@@ -916,15 +964,65 @@ def underlay(text: str, parsed: dict, shown: str | None) -> str | None:
 
 def read(text: str, meta: dict, shown: str | None = None) -> tuple[str, dict]:
     """A script checked against one open file and the view on screen:
-    (the text as applied, what `resolve` made of it)."""
-    parsed = parse(text, shown)
+    (the text as applied, what `resolve` made of it). The file's own names
+    for its axes are taken as xarray takes them (see `native`)."""
+    parsed = parse(native(text, meta), shown)
     more = underlay(text, parsed, shown)
     if more is not None:
         try:
-            return more, resolve(parse(more, shown), meta, shown)
+            return more, resolve(parse(native(more, meta), shown), meta, shown)
         except ScriptError:
             pass                  # what is shown cannot lie under a figure here
     return text, resolve(parsed, meta, shown)
+
+
+_PICK_CALL = re.compile(r"\.i?sel\(")
+_NEAREST = re.compile(r"""\s*,?\s*\bmethod\s*=\s*(['"])nearest\1\s*""")
+
+
+def native(text: str, meta: dict) -> str:
+    """`text` with the file's own axis names in `.sel()` and `.isel()` spelled
+    the way the rest of this module reads them: `ua.sel(plev=85000)` on a file
+    whose levels are `plev` is `ua.sel(level=85000)`, and
+    `t.isel(valid_time=3)` is `t.isel(time=3)`, as they are in xarray.
+
+    `method="nearest"` is dropped: a level that is not listed is the nearest
+    one already (`_level_index`). Only the keyword names inside those two
+    calls change; nothing else in the text is touched."""
+    rename = {v["dim"]: "level" for v in meta.get("variables", []) if v.get("dim")}
+    if meta.get("time_dim"):
+        rename[meta["time_dim"]] = "time"
+    rename.update(latitude="lat", longitude="lon")
+    rename = {k: v for k, v in rename.items() if k not in ("level", "time")}
+    if meta.get("time_dim") and meta["time_dim"] != "time":
+        # a reduction over the file's time axis: `t.mean("valid_time")`
+        text = re.sub(rf"""(\.(?:{'|'.join(_derive.REDUCTIONS)})\(\s*)(['"]){re.escape(
+            meta['time_dim'])}\2""", r"\1\2time\2", text)
+    out, at = [], 0
+    for hit in _PICK_CALL.finditer(text):
+        if hit.start() < at:
+            continue                 # inside a call already rewritten
+        start = hit.end()
+        depth, i, quote = 1, start, ""
+        while i < len(text) and depth:
+            c = text[i]
+            if quote:
+                quote = "" if c == quote else quote
+            elif c in "'\"":
+                quote = c
+            elif c in "([":
+                depth += 1
+            elif c in ")]":
+                depth -= 1
+            i += 1
+        if depth:
+            break                    # unbalanced: the parser says so
+        inner = _NEAREST.sub("", text[start:i - 1]).strip().strip(",").strip()
+        for old, new in rename.items():
+            inner = re.sub(rf"(^|,)\s*{re.escape(old)}\s*=(?!=)", rf"\1{new}=", inner)
+        out += [text[at:start], inner, ")"]
+        at = i
+    return "".join(out) + text[at:]
 
 
 #: What the plain lon/lat map is also called.
@@ -1019,9 +1117,15 @@ def _listed(values, want):
     return None
 
 
-def _level_index(lev, expr, variables: dict, shown: str | None = None):
+def _level_index(lev, expr, variables: dict, shown: str | None = None,
+                 notes: list | None = None):
     """A level given by its value as its number, where the file lists them.
-    Only a level the file lists is found: there is no nearest one."""
+
+    A value the file does not list is the nearest listed level, as xarray's
+    `.sel(level=..., method="nearest")` picks it -- halfway between two, the
+    larger value -- and a line saying so is added to `notes`. A value outside
+    the axis is refused, naming the axis's units: 850 on a level axis in Pa
+    is not 10000 Pa but, very likely, 850 hPa, which is the user's to write."""
     if not isinstance(lev, dict):
         return lev
     expr = expr or shown
@@ -1056,9 +1160,23 @@ def _level_index(lev, expr, variables: dict, shown: str | None = None):
                     f"{w}, and an expression is read at one level number; "
                     f"show the fields one at a time")
         return found
-    units = variables[owner].get("level_units") or ""
-    raise ScriptError(f"level: {asked} is not one of {owner}'s levels: "
-                      f"{', '.join(f'{v:g}' for v in values)} {units}".rstrip())
+    units = (variables[owner].get("level_units") or "").strip()
+    listing = f"{', '.join(f'{v:g}' for v in values)} {units}".rstrip()
+    if min(values) <= here <= max(values):
+        near = max(range(len(values)),
+                   key=lambda i: (-abs(values[i] - here), values[i]))
+        if notes is not None:
+            notes.append(f"{owner} has no level at {asked}; the nearest, "
+                         f"{values[near]:g} {units}".rstrip() + ", is shown")
+        return near
+    dim = variables[owner].get("dim") or "level"
+    hint = ""
+    for factor, said in ((100, "hPa"), (0.01, "Pa")):
+        if units.lower() in (_PASCAL_UNITS if factor == 100 else _PRESSURE_UNITS) \
+                and min(values) <= here * factor <= max(values):
+            hint = (f"; {owner}'s levels are in {units}: {here:g} {said} is "
+                    f"{owner}.sel({dim}={here * factor:g})")
+    raise ScriptError(f"level: {asked} is outside {owner}'s levels: {listing}{hint}")
 
 
 def _in_axis(want: float, lev: dict, var: dict):
@@ -1084,6 +1202,8 @@ def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
     lon/lat map. Raises ScriptError.
     """
     out = dict(state)
+    out.pop("notes", None)
+    notes: list[str] = []
     variables = {v["name"]: v for v in meta.get("variables", [])}
     levels = None
     if state.get("var") is not None:
@@ -1103,18 +1223,21 @@ def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
         out["time"] = _step(state["time"], meta)
     if state.get("level") is not None:
         lev = out["level"] = _level_index(state["level"], out.get("var"), variables,
-                                          shown)
+                                          shown, notes)
         expr = out.get("var") or shown
         if levels is None and expr:
             levels = _levels_of(expr, variables)
         if lev < 0 or (levels is not None and lev >= levels):
             listed = _owner_levels(expr, variables)
+            whole = expr if str(expr).isidentifier() else f"({expr})"
+            owner = next((variables[w] for w in re.findall(r"[A-Za-z_]\w*", str(expr))
+                          if (variables.get(w) or {}).get("dim")), {})
+            dim = owner.get("dim") or "level"
             if listed and _listed(listed[0], lev) is not None:
-                hint = (f"; {lev} is one of its level values -- "
-                        f"write level = {lev} {listed[1] or ''}".rstrip())
+                hint = (f"; {lev} is one of its level values ({listed[1] or 'no units'})"
+                        f": {whole}.sel({dim}={lev})")
             else:
-                whole = expr if str(expr).isidentifier() else f"({expr})"
-                hint = f"; a level by its value is {whole}.sel(level={lev})"
+                hint = f"; a level by its value is {whole}.sel({dim}={lev})"
             raise ScriptError(f"level: {lev} is outside {expr}'s {levels} level(s), "
                               f"numbered from 0{hint}" if levels is not None
                               else f"level: {lev} is below 0")
@@ -1130,7 +1253,7 @@ def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
         count = variables[name].get("levels", 1) if name in variables else None
         lev = ask.get("level")
         if lev is not None:
-            lev = ask["level"] = _level_index(lev, ask["var"], variables)
+            lev = ask["level"] = _level_index(lev, ask["var"], variables, notes=notes)
         if lev is not None and (lev < 0 or (count is not None and lev >= count)):
             raise ScriptError(f"level: {lev} is outside {ask['var']}'s level(s)")
         out["ask"] = ask
@@ -1216,7 +1339,8 @@ def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
         for layer in stack["layers"]:
             if isinstance(layer.get("level"), dict):
                 layer["level"] = _level_index(
-                    layer["level"], layer.get("var") or layer.get("u"), variables)
+                    layer["level"], layer.get("var") or layer.get("u"), variables,
+                    notes=notes)
         try:
             _layers.clean(stack, spatial, counts,
                           derived if meta.get("layer_expressions") else None)
@@ -1248,6 +1372,9 @@ def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
                               f"{', '.join([LONLAT, *offered])}")
     if "colour" in state and not meta.get("colour_options"):
         raise ScriptError("this page has no colour options")
+    if notes:
+        # what was taken in place of what was asked: a nearest level
+        out["notes"] = notes
     return out
 
 

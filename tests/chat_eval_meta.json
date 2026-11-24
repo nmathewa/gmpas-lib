@@ -219,7 +219,8 @@
     ],
     "spatial": true
    }
-  ]
+  ],
+  "time_dim": "Time"
  },
  "era5": {
   "file": "era5_levels.nc",
@@ -377,7 +378,8 @@
      250.0,
      200.0
     ],
-    "level_units": "hPa"
+    "level_units": "hPa",
+    "dim": "pressure_level"
    },
    {
     "name": "u",
@@ -414,7 +416,8 @@
      250.0,
      200.0
     ],
-    "level_units": "hPa"
+    "level_units": "hPa",
+    "dim": "pressure_level"
    },
    {
     "name": "v",
@@ -451,7 +454,8 @@
      250.0,
      200.0
     ],
-    "level_units": "hPa"
+    "level_units": "hPa",
+    "dim": "pressure_level"
    },
    {
     "name": "z",
@@ -488,9 +492,11 @@
      250.0,
      200.0
     ],
-    "level_units": "hPa"
+    "level_units": "hPa",
+    "dim": "pressure_level"
    }
   ],
-  "time_statistics": true
+  "time_statistics": true,
+  "time_dim": "valid_time"
  }
 }

@@ -387,8 +387,8 @@ def test_a_level_is_picked_by_its_value_where_the_file_lists_them():
 
 
 @pytest.mark.parametrize("text, says", [
-    ("shade(t.sel(level=860))",
-     "level: 860 is not one of t's levels: 1000, 850, 500 hPa"),
+    ("shade(t.sel(level=1100))",
+     "level: 1100 is outside t's levels: 1000, 850, 500 hPa"),
     ("shade(t2m.sel(level=850))", "level: t2m lists no level values"),
     ("shade(t.sel(level='low'))", "takes the level's own value"),
     ("vectors(u.sel(level=850), u.sel(level=500))\nshade(t)",
@@ -421,7 +421,7 @@ def test_a_var_line_reduced_over_time_is_read_as_before():
 
 
 @pytest.mark.parametrize("text, says", [
-    ("var = t.sel(level=860)", "level: 860 is not one of t's levels"),
+    ("var = t.sel(level=1100)", "level: 1100 is outside t's levels"),
     ('var = t.sel(time="2012-03-01 12:00")', "no step is labelled"),
     ("var = t.sel(level=850)\nlevel = 2", "level is already set"),
     ("var = t2m.sel(level=850)", "t2m lists no level values"),
@@ -440,9 +440,12 @@ def test_a_level_may_be_said_as_a_pressure():
         _read("var = u\nlevel = 500 mb")
     # with no field named, it is a level of the field on screen
     assert _read("level = 850 hPa", shown="t")["level"] == 1
-    # a level the file does not list is not matched to a nearby one
-    with pytest.raises(script.ScriptError, match="860 hPa is not one of t's levels"):
-        _read("var = t\nlevel = 860 hPa")
+    # a level the file does not list is the nearest one, and the state says so
+    near = _read("var = t\nlevel = 860 hPa")
+    assert near["level"] == 1
+    assert near["notes"] == ["t has no level at 860 hPa; the nearest, 850 hPa, is shown"]
+    with pytest.raises(script.ScriptError, match="1100 hPa is outside t's levels"):
+        _read("var = t\nlevel = 1100 hPa")
     with pytest.raises(script.ScriptError, match="lists no level values"):
         _read("level = 850 hPa")
     with pytest.raises(script.ScriptError, match="a pressure such as 500 hPa"):
@@ -730,3 +733,73 @@ def test_a_level_in_hpa_needs_levels_in_pressure():
 def test_an_infinite_level_is_not_a_level():
     with pytest.raises(script.ScriptError, match="not a level"):
         script.read("var = t.sel(level=1e999)", ERA)
+
+
+def test_the_nearest_level_is_the_one_xarray_picks():
+    """Halfway between two levels, xarray's method="nearest" takes the larger
+    value, whichever way the axis runs."""
+    import numpy as np
+    import xarray as xr
+
+    for values in ([1000.0, 850.0, 500.0], [500.0, 850.0, 1000.0]):
+        meta = {**LEVELS, "variables": [{**LEVELS["variables"][0],
+                                         "level_values": values}]}
+        da = xr.DataArray(np.arange(3), dims="p", coords={"p": values})
+        for want in (925.0, 600.0, 675.0, 990.0):
+            got = script.read(f"var = t.sel(level={want:g})", meta)[1]["level"]
+            assert values[got] == float(da.sel(p=want, method="nearest").p), want
+
+
+def test_the_files_own_axis_names_pick_as_in_xarray():
+    meta = {**LEVELS, "time_dim": "valid_time",
+            "variables": [{**v, "dim": "pressure_level"} if v.get("level_values") else v
+                          for v in LEVELS["variables"]]}
+    got = script.read("var = t.sel(pressure_level=500).isel(valid_time=1)", meta)[1]
+    assert (got["var"], got["level"], got["time"]) == ("t", 2, 1)
+    got = script.read('shade(t.sel(pressure_level=850, method="nearest"))', meta)[1]
+    assert got["level"] == 1
+    # the text applied is the text written, in the file's own names
+    text = "var = t.sel(pressure_level=500)"
+    assert script.read(text, meta)[0] == text
+
+
+def test_a_level_in_the_wrong_pressure_units_names_the_right_value():
+    pa = {**LEVELS, "variables": [{**LEVELS["variables"][0], "dim": "plev",
+                                   "level_values": [100000.0, 85000.0, 50000.0],
+                                   "level_units": "Pa"}]}
+    with pytest.raises(script.ScriptError, match=r"in Pa: 850 hPa is t.sel\(plev=85000\)"):
+        script.read("var = t.sel(plev=850)", pa)
+    assert script.read("var = t.sel(plev=85000)", pa)[1]["level"] == 1
+    # and the other way: pascals asked of an axis in hPa
+    with pytest.raises(script.ScriptError, match=r"in hPa: 85000 Pa is t.sel\(level=850\)"):
+        script.read("var = t.sel(level=85000)", LEVELS)
+
+
+def test_the_same_question_written_twice_is_one():
+    for text in ("t2m.min()\nmark(t2m.min())", "mark(t2m.min())\nt2m.min()"):
+        assert script.parse(text)["ask"] == {"what": "min", "var": "t2m", "mark": True}
+    assert script.parse("t2m.min()\nt2m.min()")["ask"] == {"what": "min", "var": "t2m"}
+    with pytest.raises(script.ScriptError, match="one question to a script"):
+        script.parse("t2m.min()\nmark(t2m.max())")
+
+
+def test_a_place_is_picked_as_xarray_picks_one():
+    """`.sel(lat=, lon=)` is the value there, read in the point panel; inside
+    series() or profile() it is where the series or the column is read."""
+    meta = {**LEVELS, "variables": [{**v, "kinds": ["map", "series", "profile",
+                                                    "layers"]}
+                                    for v in LEVELS["variables"]]}
+    got = _read('t2m.sel(lat=-6.25, lon=147.5, method="nearest")')
+    assert got == {"var": "t2m", "point": [147.5, -6.25], "panel": "mark"}
+    got = _read("mark(t.isel(time=1).sel(latitude=-6.25, longitude=147.5))")
+    assert (got["var"], got["time"], got["point"], got["panel"]) == \
+        ("t", 1, [147.5, -6.25], "mark")
+    got = script.read("series(t2m.sel(lon=147.5, lat=-6.25))", meta)[1]
+    assert (got["kind"], got["point"]) == ("series", [147.5, -6.25])
+    got = script.read("profile(t.sel(lon=150, lat=-2))", meta)[1]
+    assert (got["kind"], got["point"]) == ("profile", [150.0, -2.0])
+    for text, says in (("t2m.sel(lat=-6.25)", "both lat and lon"),
+                       ("t2m.sel(lat=95, lon=0)", "lat runs from -90 to 90"),
+                       ("var = t2m.isel(lat=3, lon=4)", "takes time and level, not lat")):
+        with pytest.raises(script.ScriptError, match=says):
+            _read(text)

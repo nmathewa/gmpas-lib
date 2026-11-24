@@ -518,8 +518,10 @@ class Viewer:
 
     def describe(self) -> dict:
         out = []
+        time_dim = ""
         for name in self.series.variables("nCells"):
             da = self.series.dataarray(name, 0)
+            time_dim = time_dim or (_data.time_axis(da) or "")
             out.append({
                 "name": name,
                 "label": _data.field_label(da),
@@ -554,6 +556,9 @@ class Viewer:
             "files": self.series.n_files,
             "steps": len(self.series),
             "labels": self.series.labels,
+            # what the file calls its time axis: a script may pick steps by it,
+            # as xarray would -- `.isel(Time=3)`
+            "time_dim": time_dim,
             "scanning": self.series.scanning,
             "home": list(self.home),
             "nx": self.nx,

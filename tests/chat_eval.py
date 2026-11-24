@@ -503,7 +503,9 @@ def judge(case: dict, got: dict) -> list[str]:
 
 
 def attempt(case: dict, cfg: dict, post=None) -> dict:
-    """Ask the model `case` once, as the page would."""
+    """Ask the model `case` once, as the page would: with `agent` on in the
+    configuration, as an agent run, which is what the page does then. A
+    stand-in `post` is always asked the one-shot way."""
     replies: list[str] = []
     inner = post or chat._post
 
@@ -512,13 +514,22 @@ def attempt(case: dict, cfg: dict, post=None) -> dict:
         replies.append(reply)
         return reply
 
+    # chat.ask runs an agent only when it is given its own transport; the
+    # replies of an agent run are read from the record it keeps instead
+    agent = post is None and cfg.get("agent")
+    record: dict = {}
     started = time.time()
     try:
         got = chat.ask(case["ask"], META[case["ctx"]], case["view"], cfg=cfg,
-                       post=counted, history=case["history"])
+                       post=chat._post if agent else counted, history=case["history"],
+                       record=record if agent else None)
         out = {"status": "script", "script": got["script"], "state": got["state"]}
     except chat.ChatError as exc:
         out = {"status": exc.kind, "error": str(exc)}
+    if agent:
+        replies = [f"{t['tool']}({json.dumps(t.get('args'))[:300]})"
+                   for t in record.get("tools", [])] + \
+                  [r["reply"] for r in record.get("rounds", [])]
     out.update(replies=replies, seconds=round(time.time() - started, 2))
     return out
 

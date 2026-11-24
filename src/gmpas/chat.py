@@ -286,17 +286,18 @@ _LANGUAGE = """\
 A script is a few lines that read like Python with xarray. It is not run as
 Python: only the forms below exist. Counting is from 0; time=-1 is the last step.
 
-Pick from a field:
-  t.isel(time=0, level=3)          a step and a level, by number
-  t.sel(time="2012-03-01 12:00")   a step, by its label
-  t.sel(level=850)                 a level, by its value, where the file lists them
-Make a field (then draw it with shade):
+Pick from a field as xarray does, by the file's own axis names (each field
+below says what its level axis is called and lists its values with units):
+{PICKS}Make a field (then draw it with shade):
   spd = hypot(u, v)                also a - b, a * 1000, a / b, diff(a)
 {TIME}Ask where a field is largest or smallest in view. The page answers with the
 value and the place and leaves the picture alone, so write this line only:
   snow.max()                       also .min(); .isel() picks a step or level
   mark(snow.max())                 the same, and the place is marked on the map
   mark(lon=147.4, lat=-2.0)        marks a place and shows the value there
+  x.sel(lat=-2.0, lon=147.4)       the value of x at a place (the nearest point);
+                                   series(x.sel(lat=-2.0, lon=147.4)) and
+                                   profile(...) are read there too
 Frame the map:
   view(region=(west, east, south, north))
   view()                           the whole area again
@@ -350,24 +351,54 @@ A field reduced over time is a field too (draw it, combine it, ask about it):
 """
 
 
+def _picks(meta: dict) -> str:
+    """The pick lines of the language, written with this file's own names."""
+    time = meta.get("time_dim") or "time"
+    leveled = next((v for v in meta.get("variables", []) if v.get("levels", 1) > 1),
+                   None)
+    labels = meta.get("labels") or ["2012-03-01 12:00"]
+    if leveled is None:
+        return (f"  x.isel({time}=0)          a step, by number\n"
+                f'  x.sel({time}="{labels[0]}")   a step, by its label\n'
+                "  (No field here has levels.)\n")
+    dim = leveled.get("dim") or "level"
+    name, values = leveled["name"], leveled.get("level_values")
+    out = (f"  {name}.isel({time}=0, {dim}=3)     a step and a level, by number from 0\n"
+           f'  {name}.sel({time}="{labels[0]}")   a step, by its label\n')
+    if values:
+        units = leveled.get("level_units") or "the axis's own units"
+        out += (f"  {name}.sel({dim}={values[len(values) // 2]:g})   a level, by its value "
+                f"in {units}, as listed;\n"
+                f"      a value between two listed levels picks the nearest\n")
+    else:
+        out += f"  ({name}'s levels have no values: pick them by number.)\n"
+    return out
+
+
+def _field_line(v: dict) -> str:
+    """One field of the file, as the model is told it: what system_prompt
+    and describe_file both list, so the two cannot drift apart."""
+    out = f"  {v['name']}: {v.get('label') or v['name']}"
+    if v.get("levels", 1) > 1:
+        dim = v.get("dim") or "level"
+        out += f"; {v['levels']} levels on {dim}, numbered 0 to {v['levels'] - 1}"
+        if v.get("level_values"):
+            out += " = " + ", ".join(f"{x:g}" for x in v["level_values"]) \
+                + f" {v.get('level_units') or '(no units)'}".rstrip()
+    if v.get("kinds"):
+        out += f"; plots: {', '.join(v['kinds'])}"
+    return out
+
+
 def system_prompt(meta: dict) -> str:
     """What the model is told: the task, the language, and the open file."""
-    def line(v):
-        out = f"  {v['name']}: {v.get('label') or v['name']}"
-        if v.get("levels", 1) > 1:
-            out += f" ({v['levels']} levels, 0 to {v['levels'] - 1}"
-            if v.get("level_values"):
-                out += ": " + ", ".join(f"{x:g}" for x in v["level_values"]) \
-                    + f" {v.get('level_units') or ''}".rstrip()
-            out += ")"
-        if v.get("kinds"):
-            out += f"; plots: {', '.join(v['kinds'])}"
-        return out
+    line = _field_line
 
     variables = "\n".join(line(v) for v in meta.get("variables", []))
     labels = meta.get("labels") or []
     steps = meta.get("steps", len(labels))
-    times = f"{steps} time step(s), 0 to {max(steps - 1, 0)}"
+    times = f"{steps} time step(s) on {meta.get('time_dim') or 'time'}, " \
+            f"0 to {max(steps - 1, 0)}"
     if labels:
         times += f"; the first is {labels[0]}, the last {labels[-1]}"
     home = meta.get("home")
@@ -381,7 +412,7 @@ def system_prompt(meta: dict) -> str:
     over_time = _OVER_TIME if meta.get("time_statistics") else \
         "  (No average over time on this file: say so if one is asked for.)\n"
     language = _LANGUAGE.replace("{EXPRESSIONS}", expressions) \
-                        .replace("{TIME}", over_time)
+                        .replace("{TIME}", over_time).replace("{PICKS}", _picks(meta))
     layers = "" if meta.get("layer_schema") else \
         "This file is drawn one field at a time: no layers, no winds.\n"
     return (
@@ -398,8 +429,10 @@ def system_prompt(meta: dict) -> str:
         "`var = x` or shade(x); for nothing underneath, begin with `var =`. When "
         "the view already lists draw calls, write all of them again with the "
         "change.\n"
-        "- `level = 3` is a level by its number. A level by its value is "
-        "`x.sel(level=850)`.\n"
+        "- A level by its value is `x.sel(<its level axis>=value)`, with the "
+        "value in that axis's own units as listed below: on an axis in Pa, 850 "
+        "hPa is 85000. Pick levels and steps with .sel() and .isel(), not with "
+        "`level =` or `time =` lines.\n"
         "- To clear a `key = value` setting such as vmin or levels, write it with "
         "nothing after the equals sign: `vmin =`. A layer is not a setting: to "
         "take one out of a figure, write the figure's other calls again without "
@@ -408,6 +441,12 @@ def system_prompt(meta: dict) -> str:
         "a standard deviation over time; saving or animating (the page's export "
         "buttons do those); a cross-section. Say so in one line starting `# `, "
         "and do not draw something else in its place.\n"
+        "- A follow-up -- there, that, the same, again, instead, undo, go back -- "
+        "means the earlier requests and their replies. A `# ` line the page added "
+        "to a reply is its answer: the place it names is what `there` means. "
+        "`undo` and `go back` write again what the earlier reply showed. What is "
+        "on screen now (the view given with the request) wins over the replies "
+        "where they differ: the user may have changed it by hand.\n"
         "- A request that leaves a choice open -- any projection, another "
         "palette -- is met by picking one, not by asking which.\n"
         "- Asked why something was not done, or what you can do, answer in one "
@@ -615,20 +654,11 @@ def _args(value) -> dict:
 
 def _describe_file(meta: dict) -> str:
     """The file `meta` describes, in words: what describe_file answers."""
-    out = ["Fields:"]
-    for v in meta.get("variables", []):
-        line = f"  {v['name']}: {v.get('label') or v['name']}"
-        if v.get("levels", 1) > 1:
-            line += f"; {v['levels']} levels, numbered 0 to {v['levels'] - 1}"
-            if v.get("level_values"):
-                line += " = " + ", ".join(f"{x:g}" for x in v["level_values"]) \
-                    + f" {v.get('level_units') or ''}".rstrip()
-        if v.get("kinds"):
-            line += f"; plots: {', '.join(v['kinds'])}"
-        out.append(line)
+    out = ["Fields:", *(_field_line(v) for v in meta.get("variables", []))]
     labels = meta.get("labels") or []
     steps = meta.get("steps", len(labels))
-    times = f"{steps} time step(s), numbered 0 to {max(steps - 1, 0)}"
+    times = f"{steps} time step(s) on {meta.get('time_dim') or 'time'}, " \
+            f"numbered 0 to {max(steps - 1, 0)}"
     if labels and len(labels) <= 40:
         times += ": " + ", ".join(labels)
     elif labels:
@@ -671,6 +701,7 @@ def _summary(state: dict, meta: dict) -> str:
     layers = (state.get("layers") or {}).get("layers")
     if layers:
         out.append("layers: " + ", ".join(str(x.get("kind")) for x in layers))
+    out += [f"note: {note}" for note in state.get("notes", [])]
     return "\n".join(out) or "nothing is changed"
 
 
@@ -826,7 +857,7 @@ MAX_HISTORY = 6
 
 
 def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
-        post=_post, history=None) -> dict:
+        post=_post, history=None, record: dict | None = None) -> dict:
     """The script for `text`, checked against the file `meta` describes.
 
     `current` is the view on screen, as a script, so a request such as
@@ -835,6 +866,8 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
     [{"request": ..., "reply": ...}], so that "no, the other one" does. Returns
     {"script": the text, "state": what `gmpas.script.resolve` made of it}.
     Raises ChatError when there is no usable script after one retry.
+    `record`, when given, is filled with what is logged: the rounds, the
+    tool calls of an agent run, the outcome.
     """
     text = " ".join(text.split())
     if not text:
@@ -855,11 +888,12 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
         messages += [{"role": "user", "content": turn["request"][:MAX_TEXT]},
                      {"role": "assistant", "content": turn["reply"][:2000]}]
     messages.append({"role": "user", "content": asked})
-    record = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "model": cfg["model"],
-              "provider": cfg.get("provider", "ollama"),
-              "file": meta.get("file"), "request": text, "view": current.strip(),
-              "system": messages[0]["content"],
-              "history": said[-MAX_HISTORY:], "rounds": []}
+    record = record if record is not None else {}
+    record.update({"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "model": cfg["model"],
+                   "provider": cfg.get("provider", "ollama"),
+                   "file": meta.get("file"), "request": text, "view": current.strip(),
+                   "system": messages[0]["content"],
+                   "history": said[-MAX_HISTORY:], "rounds": []})
     shown = _shown(current, meta)
     try:
         if cfg.get("agent") and post is _post:
@@ -909,6 +943,14 @@ def _fits(state: dict, shown, meta: dict) -> None:
             f"a level by its value is {shown}.sel(level={lev})")
 
 
+def _noted(written: str, state: dict) -> str:
+    """The script with what was taken in place of what was asked -- a nearest
+    level -- said in `# ` lines, so the user reads it beside the script."""
+    said = [f"# {note}\n" for note in state.get("notes", [])
+            if f"# {note}" not in written]
+    return written.rstrip("\n") + "\n" + "".join(said) if said else written
+
+
 def _rounds(cfg, messages, meta, post, record, shown=None) -> dict:
     problem = ""
     for _ in range(2):
@@ -932,6 +974,7 @@ def _rounds(cfg, messages, meta, post, record, shown=None) -> dict:
                           f"That script was refused: {problem}. Write it again, "
                           f"corrected, as script lines only."}]
             continue
+        written = _noted(written, state)
         record["script"] = written
         return {"script": written, "state": state}
     raise ChatError(f"the model's script was refused twice: {problem}", "refused")

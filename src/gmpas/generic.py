@@ -1121,6 +1121,8 @@ class GenericViewer:
             "files": len(self.files),
             "steps": len(self._steps),
             "labels": self.labels,
+            # what the file calls its time axis: `.sel(valid_time=...)`
+            "time_dim": self.time_name or "",
             "scanning": self.scanning,
             "home": list(self.home),
             "nx": self.nx,

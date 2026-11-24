@@ -389,7 +389,8 @@ def test_a_level_past_a_derived_fields_levels_is_refused():
     meta = {"steps": 1, "labels": ["x"], "variables": [
         {"name": "u", "levels": 3, "level_values": [1000, 850, 700], "level_units": "hPa"},
         {"name": "v", "levels": 3, "level_values": [1000, 850, 700], "level_units": "hPa"}]}
-    with pytest.raises(script.ScriptError, match="write level = 850 hPa"):
+    with pytest.raises(script.ScriptError,
+                       match=r"level values \(hPa\): .*sel\(level=850\)"):
         script.resolve(script.parse("var = hypot(u, v)\nlevel = 850"), meta)
     with pytest.raises(script.ScriptError, match="outside hypot"):
         script.resolve(script.parse("level = 5"), meta, "hypot(u, v)")

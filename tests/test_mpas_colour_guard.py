@@ -78,8 +78,8 @@ GOLDEN = {
 def test_the_mpas_viewer_still_describes_its_own_shape(tmp_path):
     """The colour keys grew (see test_mpas_colour.py), the native Hovmöller
     added two plot kinds (#111), and a figure of layers a third with its
-    schema; nothing else did, and no other --generic kind leaks onto the MPAS
-    page."""
+    schema, and `time_dim` names the time axis for scripts; nothing else did,
+    and no other lat/lon kind leaks onto the MPAS page."""
     from conftest import write_mesh
     from gmpas.viewer import Viewer
 
@@ -92,7 +92,8 @@ def test_the_mpas_viewer_still_describes_its_own_shape(tmp_path):
     finally:
         v.series.close()
     assert set(meta) == {"file", "mesh", "cells", "regional", "coverage", "files", "steps",
-                         "labels", "scanning", "home", "nx", "ny", "cmaps", "ramps",
+                         "labels", "time_dim", "scanning", "home", "nx", "ny", "cmaps",
+                         "ramps",
                          "palettes", "colour_options", "kind_labels", "kind_caps",
                          "layer_schema", "layer_expressions", "point_panel", "native",
                          "projections", "variables"}
