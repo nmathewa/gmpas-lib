@@ -126,10 +126,10 @@ def _find_axis(ds, axis: str, where: str = "") -> tuple[str, str]:
     best = [(sc, n) for sc, n in scored if sc > 0]
     if not best:
         raise ValueError(
-            f"no {axis} coordinate found{where}. --generic looks for CF "
+            f"no {axis} coordinate found{where}. The lat/lon reader looks for CF "
             f"standard_name/units/axis attributes, or a name like "
             f"{sorted(_LAT_NAMES if axis == 'lat' else _LON_NAMES)}. A projected "
-            f"or unstructured file needs a real mesh instead (drop --generic)."
+            f"or unstructured file needs a real mesh instead."
         )
     top = best[0][0]
     leaders = [n for sc, n in best if sc == top]
@@ -143,8 +143,8 @@ def _find_axis(ds, axis: str, where: str = "") -> tuple[str, str]:
         raise ValueError(
             f"{n!r} is the {axis} coordinate{where} but has dims {ds[n].dims}: this "
             f"is a curvilinear grid (2D lat/lon, e.g. WRF's XLAT/XLONG).{instead} "
-            f"--generic needs a regular grid, where {axis} is 1D; regrid it first, "
-            f"or drop --generic."
+            f"The lat/lon reader needs a regular grid, where {axis} is 1D; regrid it "
+            f"first."
         )
     # among equally strong 1D candidates, prefer a true dimension coordinate
     name = next((n for n in one_d if ds[n].dims == (n,)), one_d[0])
@@ -155,7 +155,7 @@ def _find_axis(ds, axis: str, where: str = "") -> tuple[str, str]:
     if values.size > 1 and not (np.all(step > 0) or np.all(step < 0)):
         raise ValueError(
             f"{name!r} is not monotonic{where}, so it cannot be sliced as a regular "
-            f"grid axis. --generic needs a sorted 1D {axis}."
+            f"grid axis. The lat/lon reader needs a sorted 1D {axis}."
         )
     if axis == "lat" and np.nanmax(np.abs(values)) > 90.001:
         raise ValueError(
@@ -222,7 +222,7 @@ def _named_axis(ds, name: str, axis: str, where: str = "") -> tuple[str, str]:
     if var.ndim != 1:
         raise ValueError(
             f"{name!r} has dims {var.dims}{where}, so it cannot be the {axis} axis "
-            f"of a regular grid. --generic needs a 1D coordinate; a 2D one means "
+            f"of a regular grid. The lat/lon reader needs a 1D coordinate; a 2D one means "
             f"a curvilinear grid, which has to be regridded first."
         )
     values = np.asarray(var.values, dtype=np.float64)
@@ -230,7 +230,7 @@ def _named_axis(ds, name: str, axis: str, where: str = "") -> tuple[str, str]:
     if values.size > 1 and not (np.all(step > 0) or np.all(step < 0)):
         raise ValueError(
             f"{name!r} is not monotonic{where}, so it cannot be sliced as a regular "
-            f"grid axis. --generic needs a sorted 1D {axis}."
+            f"grid axis. The lat/lon reader needs a sorted 1D {axis}."
         )
     if axis == "lat" and values.size and np.nanmax(np.abs(values)) > 90.001:
         raise ValueError(
@@ -704,8 +704,8 @@ class GenericViewer:
             raise ValueError(
                 f"{self.lat_name!r} and {self.lon_name!r} share the dimension "
                 f"{self.lat_dim!r}{where}: that is a list of points (a station file "
-                f"or an unstructured mesh), not a grid. --generic needs lat and lon "
-                f"on separate axes."
+                f"or an unstructured mesh), not a grid. The lat/lon reader needs lat "
+                f"and lon on separate axes."
             )
         dims = {str(d) for da in self.ds.data_vars.values() for d in da.dims}
         dims -= {self.lat_dim, self.lon_dim}
@@ -2445,7 +2445,7 @@ class GenericViewer:
         kinds: not yet."""
         if kind not in ("hovmoller", "section"):
             raise NotImplementedError(
-                "netCDF export for --generic is implemented for the Hovmöller "
+                "netCDF export of a lat/lon grid is implemented for the Hovmöller "
                 "and the section only")
         da = self.section(var, time, extent, sec) if kind == "section" \
             else self._hov_result(var, level, hov, extent)

@@ -115,14 +115,16 @@ def test_view_opens_mpas_without_being_told(tmp_path, monkeypatch, capsys):
     assert "gmpas: MPAS output · 2 cells" in capsys.readouterr().err
 
 
-def test_the_old_flag_still_works_and_says_it_is_not_needed(tmp_path, monkeypatch, capsys):
+def test_the_removed_flag_is_refused(tmp_path, monkeypatch, capsys):
+    """Deprecated in 0.9.0, removed after it (#189)."""
     from gmpas import cli
 
     seen = {}
     monkeypatch.setattr(cli, "_generic_view", lambda a: seen.setdefault("generic", 0))
-    cli.main(["view", "--generic", str(_grid(tmp_path))])
-    assert "generic" in seen
-    assert "--generic is no longer needed" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["view", "--generic", str(_grid(tmp_path))])
+    assert exc.value.code == 2 and not seen
+    assert "unrecognized arguments: --generic" in capsys.readouterr().err
 
 
 def test_info_summarises_a_grid(tmp_path, capsys):

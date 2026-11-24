@@ -645,16 +645,8 @@ def _dashboard(args, data_path=None, mesh_path="", hfun_path="") -> int:
 
 
 def _kind(args) -> str:
-    """MPAS or a regular lat/lon grid, decided from the file and said once.
-
-    `--generic` still forces the lat/lon reader for one more release; the
-    file decides otherwise (`data.detect_kind`).
-    """
-    if getattr(args, "generic", False):
-        print("gmpas: --generic is no longer needed -- files are recognised "
-              "automatically; it will be removed in the next release",
-              file=sys.stderr)
-        return "generic"
+    """MPAS or a regular lat/lon grid, decided from the file
+    (`data.detect_kind`) and said once."""
     from .data import detect_kind
 
     kind, why = detect_kind(args.path, getattr(args, "mesh", "") or "")
@@ -689,7 +681,7 @@ def _view(args) -> int:
 
 
 def _generic_view(args) -> int:
-    """`gmpas view --generic`: plain lat/lon-grid files, no mesh.
+    """`gmpas view` on plain lat/lon-grid files, no mesh.
 
     Takes files, globs and directories like `gmpas view`, as one time axis;
     the steps are counted in the background so a long run starts at once.
@@ -982,9 +974,6 @@ def build_parser() -> argparse.ArgumentParser:
     common(v)
     v.add_argument("--hfun", help="also serve the JIGSAW hfun.py behind this "
                                   "mesh, as a third page on the same port")
-    # deprecated: the file says whether it is MPAS output or a lat/lon grid
-    # (data.detect_kind); kept one more release so scripts keep working
-    v.add_argument("--generic", action="store_true", help=argparse.SUPPRESS)
     v.add_argument("-p", "--port", type=int, default=None,
                    help=f"port (default {DEFAULT_PORT}; the default wanders "
                         f"if busy, an explicit one fails instead)")
