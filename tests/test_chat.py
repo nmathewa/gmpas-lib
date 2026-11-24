@@ -174,17 +174,18 @@ def test_no_file_means_no_chat(tmp_path, monkeypatch):
         chat.ask("anything", META)
 
 
-def test_without_the_extra_there_is_no_chat(tmp_path, monkeypatch):
-    import importlib.util
+def test_chat_needs_no_client_package():
+    """Every provider is plain HTTP from the standard library."""
+    import ast
+    import inspect
 
-    real = importlib.util.find_spec
-    monkeypatch.setattr(importlib.util, "find_spec",
-                        lambda name, *a: None if name == "ollama" else real(name, *a))
-    monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "chat.conf"))
-    (tmp_path / "chat.conf").write_text("url = http://127.0.0.1:11434\nmodel = m\n")
-    assert not chat.installed()
-    monkeypatch.undo()
-    assert chat.installed() == (real("ollama") is not None)
+    tree = ast.parse(inspect.getsource(chat))
+    imported = {a.name.split(".")[0] for n in ast.walk(tree)
+                if isinstance(n, (ast.Import, ast.ImportFrom))
+                for a in getattr(n, "names", [])} | \
+        {n.module.split(".")[0] for n in ast.walk(tree)
+         if isinstance(n, ast.ImportFrom) and n.module}
+    assert "ollama" not in imported and not {"openai", "anthropic", "requests"} & imported
 
 
 def test_the_file_names_the_server_and_the_model(tmp_path):
@@ -261,7 +262,6 @@ def test_the_log_goes_to_the_data_directory_by_default(monkeypatch, tmp_path):
 @pytest.fixture
 def model_server():
     """A server speaking Ollama's /api/chat."""
-    pytest.importorskip("ollama", reason='the wire tests need "gmpas[chat]"')
     seen = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -314,7 +314,6 @@ def test_a_server_error_is_reported_with_what_it_said(model_server):
 
 
 def test_no_server_is_reported_as_no_answer():
-    pytest.importorskip("ollama", reason='the wire tests need "gmpas[chat]"')
     cfg = {"url": "http://127.0.0.1:9", "model": "m", "timeout": 2.0, "log": "off"}
     with pytest.raises(chat.ChatError, match="no answer from the model server"):
         chat.ask("temperature", META, cfg=cfg)
@@ -686,7 +685,6 @@ def test_a_history_that_is_not_a_list_is_none():
 
 
 def test_a_password_in_the_url_is_not_repeated():
-    pytest.importorskip("ollama", reason='the Ollama path needs "gmpas[chat]"')
     cfg = {**CFG, "url": "http://user:secret@127.0.0.1:9", "timeout": 2.0}
     with pytest.raises(chat.ChatError) as err:
         chat.ask("temperature", META, cfg=cfg)
@@ -696,7 +694,7 @@ def test_a_password_in_the_url_is_not_repeated():
 def test_a_model_that_takes_no_tools_is_asked_the_one_shot_way(monkeypatch, tmp_path):
     def talk(cfg, messages):
         raise chat.ChatError('the model server answered 400: "m" does not support tools',
-                             "server")
+                             "no_tools", status=400)
     monkeypatch.setattr(chat, "_talk", talk)
     monkeypatch.setattr(chat, "_agent", lambda *a, **k: talk(None, None))
     sent = []
@@ -710,3 +708,62 @@ def test_a_model_that_takes_no_tools_is_asked_the_one_shot_way(monkeypatch, tmp_
     got = chat.ask("temperature", META, cfg=cfg, post=one_shot)
     assert got["state"]["var"] == "t2m" and len(sent) == 1
     assert "does not support tools" in json.loads(log.read_text())["no_tools"]
+
+
+@pytest.fixture
+def flaky_server():
+    """A server that answers with each status in turn, then with a script."""
+    seen, statuses = [], []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(body)
+            code = statuses.pop(0) if statuses else 200
+            if code != 200:
+                said = (b'{"error": "registry.ollama.ai/library/m does not support tools"}'
+                        if code == 400 else b'{"error": "busy"}')
+                self.send_response(code)
+                self.end_headers()
+                self.wfile.write(said)
+                return
+            out = {"message": {"role": "assistant", "content": "var = t2m\n"}}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(out).encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", seen, statuses
+    srv.shutdown()
+
+
+def test_a_busy_server_is_asked_again(flaky_server, monkeypatch):
+    monkeypatch.setattr(chat, "_PAUSES", (0.0, 0.0))
+    url, seen, statuses = flaky_server
+    statuses += [429, 503]
+    cfg = {"url": url, "model": "m", "timeout": 5.0, "log": "off"}
+    assert chat.ask("temperature", META, cfg=cfg)["state"]["var"] == "t2m"
+    assert len(seen) == 3
+
+
+def test_a_server_busy_three_times_is_an_error(flaky_server, monkeypatch):
+    monkeypatch.setattr(chat, "_PAUSES", (0.0, 0.0))
+    url, seen, statuses = flaky_server
+    statuses += [503, 503, 503]
+    with pytest.raises(chat.ChatError, match="503: busy") as err:
+        chat.ask("temperature", META, cfg={"url": url, "model": "m", "timeout": 5.0,
+                                           "log": "off"})
+    assert err.value.kind == "server" and len(seen) == 3
+
+
+def test_a_server_that_refuses_tools_is_asked_without_them(flaky_server):
+    url, seen, statuses = flaky_server
+    statuses.append(400)
+    cfg = {"url": url, "model": "m", "timeout": 5.0, "log": "off", "agent": True}
+    assert chat.ask("temperature", META, cfg=cfg)["state"]["var"] == "t2m"
+    assert "tools" in seen[0] and "tools" not in seen[1]

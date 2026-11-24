@@ -12,9 +12,9 @@ becomes
 The model is the one named in a small file (see `config_path`): an Ollama
 server by default, or any server that speaks the OpenAI chat API (vLLM,
 llama.cpp, LM Studio, a hosted one), or Anthropic's API. gmpas ships no model
-and talks to no server but that one. Chat is an optional install --
-`pip install "gmpas[chat]"` brings the Ollama client -- and without it the
-page is as it always was.
+and talks to no server but that one, over plain HTTP: every provider is one
+request built by `_request` and one answer read by `_answer`, so chat needs no
+client package and nothing beyond the standard library.
 
 The model is told what the open file holds and which keys a script may set,
 and is asked for script lines and nothing else. Its reply is text, and it is
@@ -59,7 +59,6 @@ is kept in the log.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
@@ -92,19 +91,15 @@ class ChatError(ValueError):
 
     `kind` says which way it failed: "said" when the model answered in words
     that it cannot, "refused" when its script was refused twice, "server"
-    when the model could not be reached, and "request" for the rest.
+    when the model could not be reached, "no_tools" when the server refused
+    the tools offered, and "request" for the rest. `status` is the server's
+    HTTP status, when it answered with one.
     """
 
-    def __init__(self, message: str, kind: str = "request"):
+    def __init__(self, message: str, kind: str = "request", status: int | None = None):
         super().__init__(message)
         self.kind = kind
-
-
-def installed() -> bool:
-    """Whether chat is installed: `pip install "gmpas[chat]"`. Without it
-    there is no chat at all -- no panel, no configuration read, no server
-    asked -- and the page is as it always was."""
-    return importlib.util.find_spec("ollama") is not None
+        self.status = status
 
 
 def log_path(cfg: dict | None = None) -> Path | None:
@@ -442,99 +437,135 @@ def _key(cfg: dict) -> str:
 
 
 def _post(cfg: dict, messages: list[dict]) -> str:
-    """One round with the model: the reply's text."""
+    """One round with the model, no tools: the reply's text."""
+    return _send(cfg, messages)["text"]
+
+
+def _talk(cfg: dict, messages: list[dict]) -> dict:
+    """One round with the model, tools on offer: {"text": ..., "calls":
+    [{"id", "name", "args"}]}. Arguments that were not JSON come back as the
+    text, for `_run_tool` to refuse."""
+    return _send(cfg, messages, tools=True)
+
+
+def _send(cfg: dict, messages: list[dict], tools: bool = False) -> dict:
+    """One round with the model over plain HTTP, whichever provider the
+    configuration names: {"text", "calls"}. Every provider is a request built
+    by `_request` and an answer read by `_answer`; nothing else differs.
+
+    A server that refuses the tools themselves -- a model without tool use --
+    is a ChatError of kind "no_tools", so the caller can ask again without."""
     provider = cfg.get("provider", "ollama")
-    if provider == "openai":
-        return _post_openai(cfg, messages)
-    if provider == "anthropic":
-        return _post_anthropic(cfg, messages)
+    url, headers, body = _request(cfg, provider, messages, tools)
     try:
-        import ollama
-    except ImportError:
-        raise ChatError('chat is not installed: pip install "gmpas[chat]"') from None
+        got = _post_json(cfg, url, headers, body)
+    except ChatError as exc:
+        if tools and exc.status == 400 and "tool" in str(exc).lower():
+            raise ChatError(str(exc), "no_tools") from None
+        raise
+    try:
+        return _answer(provider, got)
+    except (KeyError, IndexError, TypeError, AttributeError):
+        raise ChatError("the model server's answer had no message in it",
+                        "server") from None
+
+
+def _request(cfg: dict, provider: str, messages: list[dict],
+             tools: bool) -> tuple[str, dict, dict]:
+    """The address, headers and body of one round, in `provider`'s shape."""
     key = _key(cfg)
-    headers = {"Authorization": f"Bearer {key}"} if key else {}
-    try:
-        client = ollama.Client(host=cfg["url"], headers=headers, timeout=cfg["timeout"])
-        options = {"temperature": 0}
-        extra = {}
+    wire = _as_wire(provider, messages)
+    if provider == "anthropic":
+        body = {"model": cfg["model"],
+                "system": "\n\n".join(m["content"] for m in messages
+                                       if m["role"] == "system"),
+                "messages": [m for m in wire if m["role"] != "system"],
+                "max_tokens": MAX_REPLY_TOKENS, "temperature": 0}
+        headers = {"x-api-key": key, "anthropic-version": _ANTHROPIC_VERSION}
+        url = cfg["url"] + "/v1/messages"
+    elif provider == "openai":
+        body = {"model": cfg["model"], "messages": wire, "temperature": 0,
+                "stream": False}
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        url = cfg["url"] + "/chat/completions"
+    else:
+        options, extra = {"temperature": 0}, {}
         think = cfg.get("think", "").lower()
-        if think in ("off", "no", "false", "0"):
+        if think in _OFF:
             extra["think"] = False
             options["num_predict"] = MAX_REPLY_TOKENS
         elif think:
-            extra["think"] = True if think in ("on", "yes", "true", "1") else think
-        got = client.chat(model=cfg["model"], messages=messages, stream=False,
-                          options=options, **extra)
-        return got["message"]["content"] or ""
-    except ollama.ResponseError as exc:
-        raise ChatError(f"the model server answered {exc.status_code}: "
-                        f"{_shown_url(str(exc.error))}", "server") from None
-    except (KeyError, TypeError):
-        raise ChatError("the model server's answer had no message in it",
-                        "server") from None
-    except Exception as exc:                 # no route, refused, timed out
-        raise ChatError(f"no answer from the model server at {_shown_url(cfg['url'])}: "
-                        f"{_shown_url(str(exc))}", "server") from None
+            extra["think"] = True if think in _ON else think
+        body = {"model": cfg["model"], "messages": wire, "stream": False,
+                "options": options, **extra}
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        url = cfg["url"] + "/api/chat"
+    if tools:
+        body["tools"] = _tool_list(provider)
+    return url, headers, body
+
+
+def _answer(provider: str, got: dict) -> dict:
+    """{"text", "calls"} from one provider's answer. A missing part raises
+    KeyError, IndexError or TypeError, which `_send` reports."""
+    if provider == "anthropic":
+        blocks = got["content"]
+        return {"text": "".join(b.get("text", "") for b in blocks
+                                if b.get("type") == "text"),
+                "calls": [{"id": b["id"], "name": b["name"], "args": b.get("input", {})}
+                          for b in blocks if b.get("type") == "tool_use"]}
+    message = got["choices"][0]["message"] if provider == "openai" else got["message"]
+    calls = [{"id": c.get("id") or f"call_{i}", "name": c["function"]["name"],
+              "args": c["function"].get("arguments") or {}}
+             for i, c in enumerate(message.get("tool_calls") or [])]
+    return {"text": message.get("content") or "", "calls": calls}
+
+
+#: Answers worth asking again, after a pause: busy, or failing for a moment.
+_AGAIN = (429, 500, 502, 503, 504, 529)
+#: How many times, and the pauses between, in seconds.
+_PAUSES = (1.0, 3.0)
 
 
 def _post_json(cfg: dict, url: str, headers: dict, body: dict) -> dict:
-    """POST `body` as JSON and read the JSON answer; any failure is a ChatError."""
+    """POST `body` as JSON and read the JSON answer; any failure is a ChatError.
+    A busy or briefly failing server is asked again, twice at most."""
     import urllib.error
     import urllib.request
 
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
-                                 headers={"Content-Type": "application/json", **headers})
-    try:
-        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as got:
-            return json.loads(got.read())
-    except urllib.error.HTTPError as exc:
-        said = exc.read().decode("utf-8", "replace")[:300]
+    data = json.dumps(body).encode()
+    for pause in (*_PAUSES, None):
+        req = urllib.request.Request(url, data=data, method="POST",
+                                     headers={"Content-Type": "application/json",
+                                              **headers})
         try:
-            err = json.loads(said).get("error", said)
-            said = err.get("message", said) if isinstance(err, dict) else str(err)
-        except (ValueError, AttributeError):
-            pass
-        raise ChatError(f"the model server answered {exc.code}: {said}", "server") from None
-    except ValueError:
-        raise ChatError("the model server's answer was not JSON", "server") from None
-    except Exception as exc:                 # no route, refused, timed out
-        raise ChatError(f"no answer from the model server at {_shown_url(cfg['url'])}: "
-                        f"{_shown_url(str(exc))}", "server") from None
+            with urllib.request.urlopen(req, timeout=cfg["timeout"]) as got:
+                return json.loads(got.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code in _AGAIN and pause is not None:
+                wait = exc.headers.get("Retry-After", "") if exc.headers else ""
+                time.sleep(min(float(wait), 10.0) if wait.isdigit() else pause)
+                continue
+            said = exc.read().decode("utf-8", "replace")[:300]
+            try:
+                err = json.loads(said).get("error", said)
+                said = err.get("message", said) if isinstance(err, dict) else str(err)
+            except (ValueError, AttributeError):
+                pass
+            raise ChatError(f"the model server answered {exc.code}: {_shown_url(said)}",
+                            "server", status=exc.code) from None
+        except ValueError:
+            raise ChatError("the model server's answer was not JSON", "server") from None
+        except Exception as exc:                 # no route, refused, timed out
+            raise ChatError(f"no answer from the model server at "
+                            f"{_shown_url(cfg['url'])}: {_shown_url(str(exc))}",
+                            "server") from None
+    raise AssertionError("unreachable")
 
 
 def _shown_url(text: str) -> str:
     """`text` with any user:password@ taken out of the addresses in it."""
     return re.sub(r"(\w+://)[^/@\s]*@", r"\1", text)
-
-
-def _post_openai(cfg: dict, messages: list[dict]) -> str:
-    """The OpenAI chat API, which most servers speak: vLLM, llama.cpp, LM Studio."""
-    key = _key(cfg)
-    got = _post_json(cfg, cfg["url"] + "/chat/completions",
-                     {"Authorization": f"Bearer {key}"} if key else {},
-                     {"model": cfg["model"], "messages": messages, "temperature": 0,
-                      "stream": False})
-    try:
-        return got["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError, TypeError):
-        raise ChatError("the model server's answer had no message in it",
-                        "server") from None
-
-
-def _post_anthropic(cfg: dict, messages: list[dict]) -> str:
-    """Anthropic's Messages API: the system prompt goes beside the turns."""
-    system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
-    turns = [m for m in messages if m["role"] != "system"]
-    got = _post_json(cfg, cfg["url"] + "/v1/messages",
-                     {"x-api-key": _key(cfg), "anthropic-version": _ANTHROPIC_VERSION},
-                     {"model": cfg["model"], "system": system, "messages": turns,
-                      "max_tokens": MAX_REPLY_TOKENS, "temperature": 0})
-    try:
-        return "".join(b.get("text", "") for b in got["content"] if b.get("type") == "text")
-    except (KeyError, TypeError, AttributeError):
-        raise ChatError("the model server's answer had no message in it",
-                        "server") from None
 
 
 # ------------------------------------------------------------------- agent
@@ -724,65 +755,6 @@ def _as_wire(provider: str, messages: list[dict]) -> list[dict]:
     return out
 
 
-def _talk(cfg: dict, messages: list[dict]) -> dict:
-    """One round with the model, tools on offer: {"text": ..., "calls":
-    [{"id", "name", "args"}]}. Arguments that were not JSON come back as the
-    text, for `_run_tool` to refuse."""
-    provider, key = cfg.get("provider", "ollama"), _key(cfg)
-    wire = _as_wire(provider, messages)
-    if provider == "anthropic":
-        system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
-        got = _post_json(cfg, cfg["url"] + "/v1/messages",
-                         {"x-api-key": key, "anthropic-version": _ANTHROPIC_VERSION},
-                         {"model": cfg["model"], "system": system,
-                          "messages": [m for m in wire if m["role"] != "system"],
-                          "tools": _tool_list(provider), "max_tokens": MAX_REPLY_TOKENS,
-                          "temperature": 0})
-        try:
-            blocks = got["content"]
-            return {"text": "".join(b.get("text", "") for b in blocks
-                                    if b.get("type") == "text"),
-                    "calls": [{"id": b["id"], "name": b["name"], "args": b.get("input", {})}
-                              for b in blocks if b.get("type") == "tool_use"]}
-        except (KeyError, TypeError, AttributeError):
-            raise ChatError("the model server's answer had no message in it",
-                            "server") from None
-    auth = {"Authorization": f"Bearer {key}"} if key else {}
-    if provider == "openai":
-        got = _post_json(cfg, cfg["url"] + "/chat/completions", auth,
-                         {"model": cfg["model"], "messages": wire,
-                          "tools": _tool_list(provider), "temperature": 0, "stream": False})
-        try:
-            message = got["choices"][0]["message"]
-            calls = [{"id": c.get("id") or f"call_{i}", "name": c["function"]["name"],
-                      "args": c["function"].get("arguments") or {}}
-                     for i, c in enumerate(message.get("tool_calls") or [])]
-        except (KeyError, IndexError, TypeError, AttributeError):
-            raise ChatError("the model server's answer had no message in it",
-                            "server") from None
-    else:
-        options, extra = {"temperature": 0}, {}
-        think = cfg.get("think", "").lower()
-        if think in _OFF:
-            extra["think"] = False
-            options["num_predict"] = MAX_REPLY_TOKENS
-        elif think:
-            extra["think"] = True if think in _ON else think
-        got = _post_json(cfg, cfg["url"] + "/api/chat", auth,
-                         {"model": cfg["model"], "messages": wire,
-                          "tools": _tool_list(provider), "stream": False,
-                          "options": options, **extra})
-        try:
-            message = got["message"]
-            calls = [{"id": f"call_{i}", "name": c["function"]["name"],
-                      "args": c["function"].get("arguments") or {}}
-                     for i, c in enumerate(message.get("tool_calls") or [])]
-        except (KeyError, TypeError, AttributeError):
-            raise ChatError("the model server's answer had no message in it",
-                            "server") from None
-    return {"text": message.get("content") or "", "calls": calls}
-
-
 def _given(args) -> str:
     """The final script from apply's arguments, with its message as a `# ` line.
     Raises ValueError for arguments that are not a script."""
@@ -896,7 +868,7 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
                 reply = _agent(cfg, messages, meta, record, shown)
             except ChatError as exc:
                 # a model that takes no tools is asked the one-shot way
-                if exc.kind != "server" or "tool" not in str(exc).lower():
+                if exc.kind != "no_tools":
                     raise
                 record["no_tools"], reply = str(exc), None
             if reply is not None:

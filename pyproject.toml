@@ -55,11 +55,12 @@ gmpas = "gmpas.cli:main"
 # ncremap. Both are executables, not Python packages, so pip cannot install
 # them, and neither is brought in by environment.yml either -- load your
 # system's builds instead; see docs/REMAPPING.md.
-# Asking for a view in words. The client only: the model is one the user
-# runs on a server named in chat.conf (docs/chat.md); none is shipped.
-chat = ["ollama>=0.4"]
+# Asking for a view in words needs nothing more: chat talks plain HTTP to the
+# server named in chat.conf (docs/chat.md). The extra is kept, empty, so
+# `pip install "gmpas[chat]"` from older instructions still works.
+chat = []
 test = ["pytest>=7.0"]
-dev = ["gmpas[test,chat]", "ruff>=0.4"]
+dev = ["gmpas[test]", "ruff>=0.4"]
 # The Read the Docs site (.readthedocs.yaml, docs/conf.py).
 docs = ["sphinx>=7", "myst-parser>=2", "furo", "sphinx-copybutton",
         "sphinxcontrib-mermaid"]
