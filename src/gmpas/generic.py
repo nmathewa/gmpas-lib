@@ -1121,8 +1121,10 @@ class GenericViewer:
             "files": len(self.files),
             "steps": len(self._steps),
             "labels": self.labels,
-            # what the file calls its time axis: `.sel(valid_time=...)`
+            # what the file calls its axes: `.sel(valid_time=...)`, and a
+            # place as `.sel(latitude=..., longitude=..., method="nearest")`
             "time_dim": self.time_name or "",
+            "lat_dim": self.lat_dim, "lon_dim": self.lon_dim,
             "scanning": self.scanning,
             "home": list(self.home),
             "nx": self.nx,

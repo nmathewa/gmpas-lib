@@ -134,6 +134,32 @@ def _four(key: str, text: str) -> list[float]:
     return [a, b, c, d]
 
 
+class _Place(list):
+    """A region given by a place's name: its box, and what the place is."""
+    label = ""
+
+
+def _place(name: str) -> _Place:
+    """The box of the place called `name` (gmpas.places), or ValueError
+    naming the places it could be, or saying there is none."""
+    from . import places
+
+    quoted = _QUOTED.match(name.strip())
+    name = quoted[2] if quoted else name.strip()        # region = "Europe"
+    found = places.lookup(name)
+    if not found:
+        # no example box here: a model told one copies it as the answer
+        raise ValueError(f"region: {name!r} is not a place gmpas knows; give its "
+                         f"west, east, south and north edges in degrees instead")
+    if len(found) > 1:
+        raise ValueError(f"region: {name!r} is " + " or ".join(
+            f"{label} ({', '.join(f'{v:g}' for v in box)})" for box, label in found)
+            + "; name one: region = \"" + found[0][1].lower() + "\"")
+    box = _Place(found[0][0])
+    box.label = found[0][1]
+    return box
+
+
 #: A level said as a pressure: the value and nothing else is taken from it.
 _PRESSURE = re.compile(r"^(\d+(?:\.\d+)?)\s*(?:hpa|mb|mbar|millibars?|hectopascals?)$",
                        re.I)
@@ -167,7 +193,9 @@ def _value(key: str, text: str):
             quoted = _QUOTED.match(text)
             return quoted[2] if quoted else text   # a label, matched in `resolve`
     if key == "region":
-        w, e, s, n = _four(key, text)
+        if not re.fullmatch(r"[\s\d.,+eE()\[\]-]*", text):
+            return _place(text)
+        w, e, s, n = _four(key, text.strip().strip("()[]"))     # (140, 155, -10, 5)
         if s < -90 or n > 90:
             raise ValueError("region: latitudes run from -90 to 90")
         return [w, e, s, n]
@@ -211,6 +239,12 @@ def _parse(text: str, lines: list[str], shown: str | None) -> dict:
     try:
         return _parse_lines(lines)
     except ScriptError:
+        # `sst` or `t2m - 273.15` alone: an expression, which xarray would show
+        if _one_expression(text):
+            try:
+                return _parse_python(text, shown)
+            except ScriptError:
+                pass
         # `spd = hypot(u, v)` and then `var = spd`: a definition makes it the
         # Python form even with no call in it. A name set and never used is
         # not a definition, though -- it is a key spelled wrong.
@@ -691,6 +725,29 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
 _EMPTY_VIEW = re.compile(r"(\bview\([^()]*?\b(?:region|box)\s*=)\s*(?=[,)])")
 
 
+def _one_expression(text: str) -> bool:
+    """Whether `text`, comments aside, is one Python expression."""
+    try:
+        body = ast.parse(text).body
+    except SyntaxError:
+        return False
+    return len(body) == 1 and isinstance(body[0], ast.Expr)
+
+
+def _is_expression(node) -> bool:
+    """Whether `node` is arithmetic over fields, as a statement of its own:
+    a name, `a - b`, `-a`, hypot()/diff(), or a chain of .sel()/.isel() and
+    reductions over time. A call that draws or frames is not one."""
+    if isinstance(node, (ast.Name, ast.BinOp, ast.UnaryOp)):
+        return True
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id in _FUNCS
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        return node.func.attr in ("sel", "isel", *_derive.REDUCTIONS) \
+            and (node.func.attr in ("sel", "isel") or bool(node.args or node.keywords))
+    return False
+
+
 def _at_place(node) -> bool:
     """Whether `node` ends in a .sel() that picks a place by lat and lon."""
     while isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
@@ -698,6 +755,12 @@ def _at_place(node) -> bool:
             return True
         node = node.func.value
     return False
+
+
+def _places_fit(box, home):
+    from .places import fit
+
+    return fit(box, home)
 
 
 def _ask(out: dict, call, ask: dict) -> None:
@@ -808,6 +871,10 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
         call = stmt.value if isinstance(stmt, ast.Expr) else None
         if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) \
                 and call.func.attr in (*_STATS, "mean", "sum", "std", "median"):
+            if call.func.attr in _derive.REDUCTIONS and (call.args or call.keywords):
+                # `sst.mean("time")` on its own: a field, shown as xarray would
+                field(call, line)
+                continue
             if call.func.attr not in _STATS:
                 if call.func.attr == "mean" and (call.args or call.keywords):
                     _fail(call, 'x.mean("time") is a field, not a question: draw '
@@ -815,16 +882,16 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
                 _fail(call, f".{call.func.attr}() is not in the script yet; "
                             f".max() and .min() are, and over time .mean(\"time\")")
             if call.args or call.keywords:
-                if call.func.attr in _derive.REDUCTIONS:
-                    _fail(call, f"x.{call.func.attr}(\"time\") is a field, not a "
-                                f"question: draw it, shade(x.{call.func.attr}"
-                                f"(\"time\")), or ask where it is largest, "
-                                f"x.{call.func.attr}(\"time\").max()")
                 _fail(call, f".{call.func.attr}() with nothing in the brackets asks "
                             f"where a field is largest or smallest in view")
             expr, picked = fields.read(call.func.value)
             # a question is about a field, not a change of what is shown
             _ask(out, call, {"what": _STATS[call.func.attr], "var": expr, **picked})
+            continue
+        if isinstance(stmt, ast.Expr) and _is_expression(stmt.value) \
+                and not _at_place(stmt.value):
+            # an expression on its own is shown, as xarray shows it
+            field(stmt.value, line)
             continue
         if isinstance(stmt, ast.Expr) and _at_place(stmt.value):
             # `d2m.sel(lat=-6.25, lon=147.5)`: the value there, read in the
@@ -1372,6 +1439,21 @@ def resolve(state: dict, meta: dict, shown: str | None = None) -> dict:
                               f"{', '.join([LONLAT, *offered])}")
     if "colour" in state and not meta.get("colour_options"):
         raise ScriptError("this page has no colour options")
+    if out.get("region") is not None and meta.get("home"):
+        # a box in the file's own longitudes: the United States, -125 to -67,
+        # is 235 to 293 on a file that runs 0 to 360
+        region = out["region"]
+        moved = _places_fit(region, meta["home"])
+        if moved is None:
+            what = getattr(region, "label", "") or ", ".join(f"{v:g}" for v in region)
+            home = meta["home"]
+            raise ScriptError(f"region: {what} is outside the data, which covers "
+                              f"longitude {home[0]:g} to {home[1]:g} and latitude "
+                              f"{home[2]:g} to {home[3]:g}")
+        out["region"] = [round(v, 4) for v in moved]
+        if getattr(region, "label", ""):
+            notes.append(f"{region.label}: region = "
+                         + ", ".join(f"{v:g}" for v in out["region"]))
     if notes:
         # what was taken in place of what was asked: a nearest level
         out["notes"] = notes

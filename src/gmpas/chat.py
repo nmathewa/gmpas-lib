@@ -299,6 +299,10 @@ value and the place and leaves the picture alone, so write this line only:
                                    series(x.sel(lat=-2.0, lon=147.4)) and
                                    profile(...) are read there too
 Frame the map:
+  view(region="Bay of Bengal")     a place by its name: a country, a US state, a
+                                   sea, a desert, a climate region such as
+                                   "Nino 3.4" (the places a request names are
+                                   listed with it)
   view(region=(west, east, south, north))
   view()                           the whole area again
   view(proj="Mercator")            a projection; shade() only
@@ -805,6 +809,11 @@ def _agent(cfg: dict, messages: list[dict], meta: dict, record: dict, shown,
     log = record["tools"] = []
     for turn in range(1, cfg.get("steps", DEFAULT_STEPS) + 1):
         got = talk(cfg, work)
+        if not got["calls"] and not got["text"].strip():
+            # a reasoning model that thought and said nothing -- gpt-oss does
+            # this now and then: ask again, which spends one of the steps
+            log.append({"turn": turn, "empty": True})
+            continue
         if not got["calls"]:
             return got["text"]
         for call in got["calls"]:
@@ -864,7 +873,9 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
     "the same, but zoomed on Africa" has something to mean; `history` is the
     earlier requests of this conversation and what was answered, as
     [{"request": ..., "reply": ...}], so that "no, the other one" does. Returns
-    {"script": the text, "state": what `gmpas.script.resolve` made of it}.
+    {"script": the text, "state": what `gmpas.script.resolve` made of it}; a
+    request that is a script already is applied as written, with no model
+    asked, and the answer says so with "direct": True.
     Raises ChatError when there is no usable script after one retry.
     `record`, when given, is filled with what is logged: the rounds, the
     tool calls of an agent run, the outcome.
@@ -874,12 +885,18 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
         raise ChatError("ask for a view in a sentence")
     if len(text) > MAX_TEXT:
         raise ChatError(f"a request is at most {MAX_TEXT} characters")
+    direct = _direct(text, meta, current)
+    if direct is not None:
+        return direct
     if cfg is None:
         cfg = load_config()
     if cfg is None:
         raise ChatError(f"no model is configured; write {config_path()}")
     asked = text if not current.strip() else \
         f"The view now:\n{current.strip()}\n\nRequest: {text}"
+    named = _named_places(text)
+    if named:
+        asked += "\n\n" + named
     messages = [{"role": "system", "content": system_prompt(meta)}]
     said = [h for h in (history if isinstance(history, list) else [])
             if isinstance(h, dict)
@@ -919,6 +936,41 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
         raise
     finally:
         _log(cfg, record)
+
+
+def _named_places(text: str) -> str:
+    """The places a request names, looked up in gmpas's gazetteer and said as
+    facts, so the model need not know where they are."""
+    from . import places
+
+    lines = []
+    for name, found in places.find(text):
+        if len(found) == 1:
+            box, label = found[0]
+            lines.append(f'  "{name}" is {label}: view(region="{name}") = '
+                         + ", ".join(f"{v:g}" for v in box))
+        else:
+            lines.append(f'  "{name}" could be ' + " or ".join(
+                f'{label} (view(region="{label.lower()}"))' for _, label in found)
+                + "; if the request does not say which, ask in one `# ` line")
+    return ("Places named in the request (gmpas's gazetteer):\n" + "\n".join(lines)) \
+        if lines else ""
+
+
+def _direct(text: str, meta: dict, current: str) -> dict | None:
+    """A request that is a script already -- `t.sel(plev=85000)`, `sst`,
+    `view(proj="Mercator")` -- applied as written, with no model asked: or
+    None, for words. Only a script that changes something counts, so a
+    comment alone still goes to the model."""
+    shown = _shown(current, meta)
+    try:
+        written, state = _script.read(text, meta, shown)
+        _fits(state, shown, meta)
+    except _script.ScriptError:
+        return None
+    if not state:
+        return None
+    return {"script": _noted(written, state), "state": state, "direct": True}
 
 
 def _shown(current: str, meta: dict):

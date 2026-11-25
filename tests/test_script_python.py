@@ -88,7 +88,6 @@ def test_view_frames_the_map():
     ("veiw(proj='Mercator')", "veiw\\(\\) is not understood; did you mean view"),
     ("view(center=3)", "view\\(\\) has no center"),
     ("section(t2m)", "section\\(\\) is not in the script yet"),
-    ("hypot(u, v)", "makes a field; draw it"),
     ("series(t2m, lon=147)", "takes both lon and lat"),
     ("contourf(t2m)\nhist(u)", "hist\\(\\) is a plot of its own"),
     ("vectors(u)", "vectors\\(\\) takes u and v"),
@@ -588,10 +587,24 @@ def test_a_projection_named_beside_a_figure_is_the_figures_own():
 
 
 def test_a_question_takes_no_argument():
-    for text in ('t2m.max("time")', "t2m.min(dim='time')", 'mark(t2m.max("time"))',
-                 't2m.mean("time")', "t2m.max(3)"):
+    for text in ('mark(t2m.max("time"))', "t2m.max(3)"):
         with pytest.raises(script.ScriptError,
-                           match="is a field, not a question|takes a question|in view"):
+                           match="is a field, not a question|takes a question|in view|"
+                                 "says so"):
+            script.parse(text)
+
+
+def test_an_expression_on_its_own_is_shown_as_xarray_shows_it():
+    """Evaluated alone, xarray shows an expression: so does the script."""
+    assert script.parse("hypot(u, v)") == {"var": "hypot(u, v)"}
+    assert script.parse("t2m - 273.15") == {"var": "t2m - 273.15"}
+    assert script.parse("t2m") == {"var": "t2m"}
+    assert script.parse('t2m.mean("time")') == {"var": "t2m.mean('time')"}
+    assert script.parse("u.isel(time=1, level=2)") == {"var": "u", "time": 1, "level": 2}
+    # words are still not a script, and a misspelt key is still a misspelt key
+    for text, says in (("plot t2m", "expected key = value"),
+                       ("cmpa = viridis", "cmpa")):
+        with pytest.raises(script.ScriptError, match=says):
             script.parse(text)
 
 

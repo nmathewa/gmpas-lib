@@ -792,3 +792,36 @@ def test_a_nearest_level_is_said_beside_the_script():
         "# t has no level at 80000; the nearest, 85000 Pa, is shown"
     checked = chat._check_script("var = t.sel(plev=80000)", meta, None)
     assert "note: t has no level at 80000; the nearest, 85000 Pa, is shown" in checked
+
+
+def test_an_empty_agent_round_is_asked_again():
+    """A reasoning model may end a round with nothing said and no tool asked."""
+    rounds = [{"text": "", "calls": []}, {"text": "var = t2m\n", "calls": []}]
+    record: dict = {}
+    reply = chat._agent({**CFG, "agent": True}, [{"role": "system", "content": "s"},
+                                                 {"role": "user", "content": "q"}],
+                        META, record, None, talk=lambda cfg, work: rounds.pop(0))
+    assert reply == "var = t2m\n" and record["tools"] == [{"turn": 1, "empty": True}]
+    # always empty: out of steps, and the request is asked the one-shot way
+    record = {}
+    assert chat._agent({**CFG, "agent": True, "steps": 2},
+                       [{"role": "system", "content": "s"}], META, record, None,
+                       talk=lambda cfg, work: {"text": " ", "calls": []}) is None
+
+
+def test_a_script_is_applied_without_asking_the_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(tmp_path / "absent.conf"))
+
+    def never(cfg, messages):
+        raise AssertionError("the model was asked")
+    for text, want in (("t2m", {"var": "t2m"}),
+                       ("u.isel(time=1, level=2)", {"var": "u", "time": 1, "level": 2}),
+                       ('view(proj="Mercator")', {"proj": "Mercator"})):
+        got = chat.ask(text, META, post=never)
+        assert got["direct"] is True and got["script"] == text
+        assert {k: got["state"][k] for k in want} == want
+    # words, a comment alone, or a script that does not fit go to the model
+    for text in ("show the temperature", "# hi", "level = 9"):
+        post = _says("var = t2m\n")
+        assert "direct" not in chat.ask(text, META, current="var = u", cfg=CFG, post=post)
+        assert post.seen

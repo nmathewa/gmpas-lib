@@ -523,12 +523,13 @@ def attempt(case: dict, cfg: dict, post=None) -> dict:
         got = chat.ask(case["ask"], META[case["ctx"]], case["view"], cfg=cfg,
                        post=chat._post if agent else counted, history=case["history"],
                        record=record if agent else None)
-        out = {"status": "script", "script": got["script"], "state": got["state"]}
+        out = {"status": "script", "script": got["script"], "state": got["state"],
+               "direct": bool(got.get("direct"))}
     except chat.ChatError as exc:
         out = {"status": exc.kind, "error": str(exc)}
     if agent:
-        replies = [f"{t['tool']}({json.dumps(t.get('args'))[:300]})"
-                   for t in record.get("tools", [])] + \
+        replies = [f"{t['tool']}({json.dumps(t.get('args'))[:300]})" if "tool" in t
+                   else "(an empty round)" for t in record.get("tools", [])] + \
                   [r["reply"] for r in record.get("rounds", [])]
     out.update(replies=replies, seconds=round(time.time() - started, 2))
     return out
