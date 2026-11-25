@@ -45,6 +45,7 @@ dependencies = [
     "cartopy>=0.22",
     "pillow>=9.0",
     "cmocean>=4.0",        # cmo.* palettes (MIT)
+    "metpy>=1.6",          # mpcalc.* in scripts and chat; imported only when used (BSD)
 ]
 
 [project.scripts]

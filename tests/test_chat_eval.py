@@ -58,7 +58,8 @@ def test_every_case_starts_from_a_view_its_file_has():
     ("d sst-273.15", "shade(sst.isel(time=0) - 273.15)", True),
     ("d mag(hu_oml,hv_oml)", "var = hypot(hu_oml, hv_oml)", True),
     ("ds.skintemp.max()", "skintemp.max()", True),
-    ("ds.skintemp.max()", "var = skintemp", False),
+    # a script already: applied as written, so a wrong stand-in is never asked
+    ("ds.skintemp.max()", "var = skintemp", True),
     ("use a red-blue colormap", "cmap = RdBu_r", True),
     ("use a red-blue colormap", "cmap = viridis", False),
     ("reset the colour range", "vmin =\nvmax =", True),

@@ -53,12 +53,31 @@ _BARE = re.compile(rf"^\s*({_FIELD})\s*$")
 _DIFF = re.compile(rf"^\s*diff\(\s*({_NAME})\s*\)\s*$")
 _HYPOT = re.compile(rf"^\s*hypot\(\s*({_FIELD})\s*,\s*({_FIELD})\s*\)\s*$")
 _BINARY = re.compile(rf"^\s*({_OPERAND})\s*([+\-*/])\s*({_OPERAND})\s*$")
+_METPY = re.compile(rf"^\s*(?:mpcalc\.|metpy\.calc\.)?(\w+)"
+                    rf"\(\s*({_NAME}(?:\s*,\s*{_NAME})*)\s*\)\s*$")
+
+#: The MetPy calculations an expression may call, with what each argument
+#: is. MetPy computes them, with units; gmpas only reads the fields. An
+#: argument that is a pressure may be the level axis itself (`plev`).
+METPY = {
+    "wind_speed": ("u", "v"),
+    "wind_direction": ("u", "v"),
+    "dewpoint_from_relative_humidity": ("temperature", "relative_humidity"),
+    "relative_humidity_from_dewpoint": ("temperature", "dewpoint"),
+    "potential_temperature": ("pressure", "temperature"),
+    "equivalent_potential_temperature": ("pressure", "temperature", "dewpoint"),
+    "moist_static_energy": ("height", "temperature", "specific_humidity"),
+    "specific_humidity_from_dewpoint": ("pressure", "dewpoint"),
+    "saturation_vapor_pressure": ("temperature",),
+    "geopotential_to_height": ("geopotential",),
+    "heat_index": ("temperature", "relative_humidity"),
+}
 #: The longest expression taken, in characters.
 MAX_EXPR = 500
 _OPS = {"+": np.add, "-": np.subtract, "*": np.multiply, "/": np.divide}
 
 FORMS = ("a + b, a - b, a * b, a / b (either side may be a number), "
-         "hypot(a, b), or diff(a)")
+         "hypot(a, b), diff(a), or a MetPy calculation: mpcalc.wind_speed(u, v)")
 
 
 def resolve(name: str, names: Iterable[str]) -> str | None:
@@ -112,6 +131,8 @@ def parse(expr: str, names: Iterable[str]) -> tuple:
         return ("diff", field(m.group(1)))
     if m := _HYPOT.match(expr):
         return ("hypot", field(m.group(1)), field(m.group(2)))
+    if (m := _METPY.match(expr)) and m.group(1) not in ("hypot", "diff"):
+        return metpy_plan(m.group(1), [a.strip() for a in m.group(2).split(",")], names)
     if m := _BINARY.match(expr):
         a, op, b = operand(m.group(1)), m.group(2), operand(m.group(3))
         if isinstance(a, float) and isinstance(b, float):
@@ -121,11 +142,35 @@ def parse(expr: str, names: Iterable[str]) -> tuple:
                    f"derived expression ({FORMS})")
 
 
+def metpy_plan(func: str, args: list[str], names: list[str]) -> tuple:
+    """("metpy", function, arguments): each argument a field of the file, or
+    ("axis", name) for a pressure given as the level axis. Raises KeyError."""
+    roles = METPY.get(func)
+    if roles is None:
+        raise KeyError(f"{func}() is not a calculation here; the MetPy ones are "
+                       f"{', '.join(sorted(METPY))}")
+    if len(args) != len(roles):
+        raise KeyError(f"mpcalc.{func}() takes {len(roles)}: {', '.join(roles)}")
+    out = []
+    for arg, role in zip(args, roles, strict=True):
+        real = resolve(arg, names)
+        if real is not None:
+            out.append(real)
+        elif role == "pressure":
+            out.append(("axis", arg))          # the level axis: checked when read
+        else:
+            raise KeyError(f"{arg!r} is not a variable in this file")
+    return ("metpy", func, tuple(out))
+
+
 def evaluate(plan: tuple, time: int, read: Callable[[str, int], np.ndarray],
-             reduce: Callable[[tuple], np.ndarray] | None = None) -> np.ndarray:
+             reduce: Callable[[tuple], np.ndarray] | None = None,
+             about: Callable | None = None) -> np.ndarray:
     """Run a plan from `parse`. `read(name, step)` returns one real field;
     `reduce(term)` returns a field reduced over time (see `reduced`), which
-    does not depend on the step."""
+    does not depend on the step. `about(name)` gives a field's units, and
+    `about(("axis", name))` the level axis's value and units at the level
+    read; a MetPy calculation needs them."""
     def get(what):
         if isinstance(what, str):
             return read(what, time)
@@ -146,12 +191,85 @@ def evaluate(plan: tuple, time: int, read: Callable[[str, int], np.ndarray],
         return cur - read(plan[1], time - 1)
     if form == "hypot":
         return np.hypot(get(plan[1]), get(plan[2]))
+    if form == "metpy":
+        return calculate(plan[1], plan[2], get, about)[0]
     _, op, a, b = plan
     return _OPS[op](get(a), get(b))
 
 
+#: What each kind of argument must measure, as pint writes dimensions.
+_DIMENSION = {"u": "[length] / [time]", "v": "[length] / [time]",
+              "temperature": "[temperature]", "dewpoint": "[temperature]",
+              "pressure": "[mass] / [length] / [time] ** 2", "height": "[length]",
+              "geopotential": "[length] ** 2 / [time] ** 2",
+              "relative_humidity": "", "specific_humidity": ""}
+
+
+def check_units(plan: tuple, units_of: Callable) -> None:
+    """That each argument of a MetPy calculation measures what it is for --
+    a temperature in K or degC, a relative humidity as a fraction or percent
+    -- before anything is read. `units_of(arg)` gives an argument's units
+    ("" when unknown). Raises KeyError naming the argument and its units."""
+    if plan[0] != "metpy":
+        return
+    from metpy.units import units
+
+    func, args = plan[1], plan[2]
+    for arg, role in zip(args, METPY[func], strict=True):
+        name = arg[1] if isinstance(arg, tuple) else arg
+        unit = units_of(arg)
+        if not unit:
+            raise KeyError(f"mpcalc.{func}(): {name} has no units, in the file or in "
+                           f"the models' tables")
+        try:
+            dims = units.Quantity(1.0, unit).dimensionality
+        except Exception:
+            raise KeyError(f"mpcalc.{func}(): {name}'s units, {unit!r}, are not units "
+                           f"MetPy reads") from None
+        want = units.Quantity(1.0, "1").dimensionality if not _DIMENSION[role] else \
+            units.get_dimensionality(_DIMENSION[role])
+        if dims != want:
+            what = "a fraction or a percentage" if not _DIMENSION[role] else \
+                f"a {role.replace('_', ' ')}"
+            raise KeyError(f"mpcalc.{func}(): the {role.replace('_', ' ')} is {name}, "
+                           f"in {unit}, which is not {what}")
+
+
+def calculate(func: str, args: tuple, get: Callable, about: Callable | None):
+    """MetPy's `func` of the arguments, with units: (values, units of the
+    result). A field with no units known -- not in the file, not in the
+    models' tables (gmpas.variables) -- is refused, naming it."""
+    if about is None:
+        raise KeyError(f"mpcalc.{func}() needs the fields' units, which this view "
+                       f"cannot give")
+    import metpy.calc as mpcalc
+    from metpy.units import units
+
+    given = []
+    for arg in args:
+        if isinstance(arg, tuple):
+            value, unit = about(arg)
+            given.append(units.Quantity(value, unit))
+            continue
+        unit = about(arg)
+        if not unit:
+            raise KeyError(f"{arg} has no units, in the file or in the models' tables, "
+                           f"so mpcalc.{func}() cannot use it")
+        try:
+            given.append(units.Quantity(np.asarray(get(arg), dtype=np.float64), unit))
+        except Exception:
+            raise KeyError(f"{arg}'s units, {unit!r}, are not units MetPy reads") from None
+    try:
+        out = getattr(mpcalc, func)(*given)
+    except Exception as exc:
+        raise KeyError(f"mpcalc.{func}(): {exc}") from None
+    return np.asarray(out.magnitude, dtype=np.float64), f"{out.units:~}"
+
+
 def terms(plan: tuple) -> list[tuple]:
     """The fields reduced over time that a plan uses."""
+    if plan[0] == "metpy":
+        return []                        # its arguments are fields and the level axis
     return [part for part in plan[1:] if isinstance(part, tuple)]
 
 

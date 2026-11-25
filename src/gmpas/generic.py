@@ -1048,6 +1048,22 @@ class GenericViewer:
             return {}
         return {"level_values": values, "level_units": str(coord.attrs.get("units", ""))}
 
+    def _about(self, level: int):
+        """What a MetPy calculation needs to know (derive.evaluate's `about`):
+        a field's units -- the file's, else the models' tables by its GRIB
+        code -- and the level axis's value and units at `level`."""
+        def about(what):
+            if isinstance(what, tuple):
+                dim = what[1]
+                listed = self._level_values(dim) if dim in self.ds.dims else {}
+                if not listed or not 0 <= level < len(listed["level_values"]):
+                    raise KeyError(f"{dim!r} is not a level axis with values in this "
+                                   f"file, so it cannot be the pressure")
+                return listed["level_values"][level], listed["level_units"]
+            attrs = _variables.filled(what, dict(self.ds[what].attrs))
+            return str(attrs.get("units", ""))
+        return about
+
     def _stack_dims(self, da) -> list[str]:
         """Every axis of `da` that is not lat, lon or time, vertical first.
 
@@ -1098,11 +1114,13 @@ class GenericViewer:
         for name, da in self.ds.data_vars.items():
             spatial = self.lat_dim in da.dims and self.lon_dim in da.dims
             stack = self._stack_dims(da)
+            attrs = _variables.filled(str(name), dict(da.attrs))
             variables.append({
                 "name": name,
                 # a long name or units the file leaves out, by its GRIB code
-                "label": _data.field_label(da, _variables.filled(str(name),
-                                                                 dict(da.attrs))),
+                "label": _data.field_label(da, attrs),
+                "units": str(attrs.get("units", "")),
+                "units_source": attrs.get("units_source", ""),
                 "static": not (self.time_name and self.time_name in da.dims)
                           and len(self.files) == 1,
                 # the slider drives the first stacking axis, the rest are
@@ -1202,7 +1220,8 @@ class GenericViewer:
             plan = _derive.parse(var, self._spatial_vars())
             return _derive.evaluate(
                 plan, step, lambda name, s: self._gather(name, s, level, rows, cols),
-                lambda term: self._reduced(term, level).values[np.ix_(frow, fcol)])
+                lambda term: self._reduced(term, level).values[np.ix_(frow, fcol)],
+                self._about(level))
         r0, r1 = int(frow.min()), int(frow.max()) + 1
         c0, c1 = int(fcol.min()), int(fcol.max()) + 1
         with self._lock:
@@ -1222,7 +1241,8 @@ class GenericViewer:
             return _derive.evaluate(
                 plan, step,
                 lambda name, s: self._gather_points(name, s, level, rows, cols),
-                lambda term: self._reduced(term, level).values[frow, fcol])
+                lambda term: self._reduced(term, level).values[frow, fcol],
+                self._about(level))
         r0, r1 = int(frow.min()), int(frow.max()) + 1
         c0, c1 = int(fcol.min()), int(fcol.max()) + 1
         with self._lock:
@@ -1959,7 +1979,7 @@ class GenericViewer:
             crops.append(da)
             return np.asarray(da.values, dtype=np.float64)
 
-        values = _derive.evaluate(plan, time, read, reduce)
+        values = _derive.evaluate(plan, time, read, reduce, self._about(level))
         out = crops[0].copy(data=values)
         out.name = var
         if plan[0] != "field":

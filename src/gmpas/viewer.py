@@ -523,11 +523,15 @@ class Viewer:
         for name in self.series.variables("nCells"):
             da = self.series.dataarray(name, 0)
             time_dim = time_dim or (_data.time_axis(da) or "")
+            attrs = _variables.filled(name, dict(da.attrs), "mpas")
             out.append({
                 "name": name,
                 # a long name or units the file leaves out, from MPAS's registry
-                "label": _data.field_label(da, _variables.filled(name, dict(da.attrs),
-                                                                 "mpas")),
+                "label": _data.field_label(da, attrs),
+                # what a MetPy calculation and the transcript read; the source
+                # is named when the units are the registry's, not the file's
+                "units": str(attrs.get("units", "")),
+                "units_source": attrs.get("units_source", ""),
                 # A history file carries the mesh alongside the fields, so
                 # latCell, edgesOnCell, meshDensity and friends all live on
                 # nCells too. Carrying a time dimension is what separates a
@@ -667,8 +671,18 @@ class Viewer:
         def read(name: str, step: int) -> np.ndarray:
             return self.series.values(name, level=level, sel=self._pins(name), step=step)
 
+        def about(what):
+            # a MetPy calculation's units: the file's, else MPAS's registry.
+            # MPAS model levels carry no pressure: the pressure field is it
+            if isinstance(what, tuple):
+                raise KeyError(f"{what[1]!r} is not a level axis with values on this "
+                               f"mesh; pass the pressure field instead")
+            attrs = _variables.filled(what, dict(self.series.dataarray(what, 0).attrs),
+                                      "mpas")
+            return str(attrs.get("units", ""))
+
         plan = _derive.parse(expr, self.plottable_cell_vars())
-        return _derive.evaluate(plan, time, read)
+        return _derive.evaluate(plan, time, read, about=about)
 
     #: the handler forwards a colour parameter only to a viewer that has this,
     #: and returns the bar it produces as the X-Colorbar header

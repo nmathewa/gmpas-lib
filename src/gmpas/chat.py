@@ -290,6 +290,13 @@ Pick from a field as xarray does, by the file's own axis names (each field
 below says what its level axis is called and lists its values with units):
 {PICKS}Make a field (then draw it with shade):
   spd = hypot(u, v)                also a - b, a * 1000, a / b, diff(a)
+  mpcalc.wind_speed(u, v)          a MetPy calculation, with units: also
+      wind_direction(u, v), dewpoint_from_relative_humidity(t, rh),
+      relative_humidity_from_dewpoint(t, td), potential_temperature(p, t),
+      equivalent_potential_temperature(p, t, td), moist_static_energy(z, t, q),
+      specific_humidity_from_dewpoint(p, td), saturation_vapor_pressure(t),
+      geopotential_to_height(z), heat_index(t, rh). A pressure may be the
+      level axis itself: mpcalc.potential_temperature(plev, t).
 {TIME}Ask where a field is largest or smallest in view. The page answers with the
 value and the place and leaves the picture alone, so write this line only:
   snow.max()                       also .min(); .isel() picks a step or level

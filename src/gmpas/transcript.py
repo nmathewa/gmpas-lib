@@ -74,9 +74,47 @@ def _operand(part, time: str) -> str:
     return _num(part)
 
 
-def expression(plan: tuple, time: str) -> str:
+def _metpy(plan: tuple, variables: dict) -> tuple[str, list]:
+    """A MetPy calculation as MetPy's docs write it, over `ds`: a field whose
+    units come from the models' tables, not the file, is given them with
+    .assign_attrs, and the comment says so. The result's units are MetPy's."""
+    func, args = plan[1], plan[2]
+    written, notes, units = [], [], {}
+    for arg in args:
+        if isinstance(arg, tuple):               # the level axis, as the pressure
+            written.append(_field(arg[1]))
+            owner = next((v for v in variables.values() if v.get("dim") == arg[1]), {})
+            units[arg] = owner.get("level_units", "")
+            continue
+        var = variables.get(arg, {})
+        units[arg] = var.get("units", "")
+        if var.get("units_source"):
+            written.append(f'{_field(arg)}.assign_attrs(units={_num(units[arg])})')
+            notes.append(f"{arg} in {units[arg]}, from the {var['units_source']}")
+        else:
+            written.append(_field(arg))
+    try:
+        import warnings
+
+        import numpy as np
+
+        # only the result's units are wanted: one quiet value of each
+        with warnings.catch_warnings(), np.errstate(all="ignore"):
+            warnings.simplefilter("ignore")
+            _, out = _derive.calculate(
+                func, args, lambda a: np.ones(1),
+                lambda a: (1000.0, units[a]) if isinstance(a, tuple) else units[a])
+        notes.append(f"in {out}" if out.strip() else "a fraction, no units")
+    except KeyError:
+        pass
+    return f"mpcalc.{func}({', '.join(written)})", notes
+
+
+def expression(plan: tuple, time: str, variables: dict | None = None) -> str:
     """A plan from `derive.parse`, as an xarray expression over `ds`."""
     form = plan[0]
+    if form == "metpy":
+        return _metpy(plan, variables or {})[0]
     if form == "field":
         return _operand(plan[1], time)
     if form == "hypot":
@@ -95,6 +133,8 @@ _OPS = ("+", "-", "*", "/")
 
 def _names(plan: tuple) -> list[str]:
     """The file's fields a plan reads."""
+    if plan[0] == "metpy":
+        return [a for a in plan[2] if isinstance(a, str)]
     out = []
     for part in plan[1:]:
         if isinstance(part, str) and part not in _OPS:
@@ -107,6 +147,8 @@ def _names(plan: tuple) -> list[str]:
 def _stepped(plan: tuple) -> bool:
     """Whether a field of the plan still has a time axis to pick a step on: a
     field reduced over time has none."""
+    if plan[0] == "metpy":
+        return True
     return any(isinstance(part, str) and part not in _OPS for part in plan[1:])
 
 
@@ -117,7 +159,9 @@ def field(expr: str, meta: dict, time=None, level=None, point=None) -> tuple[str
     variables = {v["name"]: v for v in meta.get("variables", [])}
     plan = _derive.parse(expr, variables)
     axis = meta.get("time_dim") or "time"
-    body, picks, notes = expression(plan, axis), [], []
+    body, picks, notes = expression(plan, axis, variables), [], []
+    if plan[0] == "metpy":
+        notes += _metpy(plan, variables)[1]
     if time is not None and _stepped(plan):
         picks.append(f".isel({axis}={time})")
         labels = meta.get("labels") or []
@@ -142,6 +186,9 @@ def field(expr: str, meta: dict, time=None, level=None, point=None) -> tuple[str
         else:
             notes.append(f"the nearest cell to {_place(lon, lat)}")
     whole = f"({body})" if plan[0] in ("binary", "diff") and picks else body
+    if plan[0] == "metpy" and picks:
+        # MetPy keeps the units on the result; picks then work as on any field
+        whole = body
     return whole + "".join(picks), notes
 
 

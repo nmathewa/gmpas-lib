@@ -462,7 +462,8 @@ class _Fields:
 
     def read(self, node) -> tuple[str, dict]:
         """`node` as (the expression the derive box takes, {time, level})."""
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and not _is_metpy(node):
             how = node.func.attr
             if how in _derive.REDUCTIONS:
                 node, picked = self._level_out(node)
@@ -620,6 +621,12 @@ class _Fields:
             node.left = self._plain(node.left, picked)
             node.right = self._plain(node.right, picked)
             return node
+        if _is_metpy(node) and not node.keywords:
+            # MetPy's: its arguments are fields (or the level axis), one each
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
+            node.func = ast.Attribute(ast.Name("mpcalc", ast.Load()), name, ast.Load())
+            node.args = [self._plain(a, picked) for a in node.args]
+            return node
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and not node.keywords:
             if node.func.id not in _FUNCS:
@@ -725,6 +732,48 @@ def _stack(draws: list, fields: _Fields) -> tuple[dict, dict]:
 _EMPTY_VIEW = re.compile(r"(\bview\([^()]*?\b(?:region|box)\s*=)\s*(?=[,)])")
 
 
+class _XarrayNames(ast.NodeTransformer):
+    """The spellings xarray and MetPy code uses, as the script reads them:
+    `ds["t2m"]` and `ds.t2m` are the field t2m, `np.hypot` is hypot, and
+    `metpy.calc.wind_speed` is mpcalc.wind_speed. Read on the parsed text,
+    never on the raw string."""
+
+    _METHODS = {"sel", "isel", "mean", "max", "min", "sum", "std", "median", "plot"}
+
+    def visit_Subscript(self, node):
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Name) and node.value.id == "ds" \
+                and isinstance(node.slice, ast.Constant) \
+                and isinstance(node.slice.value, str):
+            return ast.copy_location(ast.Name(node.slice.value, ast.Load()), node)
+        return node
+
+    def visit_Attribute(self, node):
+        self.generic_visit(node)
+        value = node.value
+        if isinstance(value, ast.Name) and value.id == "ds" \
+                and node.attr not in self._METHODS:
+            return ast.copy_location(ast.Name(node.attr, ast.Load()), node)
+        if isinstance(value, ast.Name) and value.id in ("np", "numpy") \
+                and node.attr in _FUNCS:
+            return ast.copy_location(ast.Name(node.attr, ast.Load()), node)
+        if isinstance(value, ast.Attribute) and value.attr == "calc" \
+                and isinstance(value.value, ast.Name) and value.value.id == "metpy":
+            node.value = ast.Name("mpcalc", ast.Load())
+        return node
+
+
+def _is_metpy(node) -> bool:
+    """A MetPy calculation: mpcalc.wind_speed(u, v), or wind_speed(u, v)."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+            and func.value.id == "mpcalc":
+        return True
+    return isinstance(func, ast.Name) and func.id in _derive.METPY
+
+
 def _one_expression(text: str) -> bool:
     """Whether `text`, comments aside, is one Python expression."""
     try:
@@ -738,7 +787,7 @@ def _is_expression(node) -> bool:
     """Whether `node` is arithmetic over fields, as a statement of its own:
     a name, `a - b`, `-a`, hypot()/diff(), or a chain of .sel()/.isel() and
     reductions over time. A call that draws or frames is not one."""
-    if isinstance(node, (ast.Name, ast.BinOp, ast.UnaryOp)):
+    if isinstance(node, (ast.Name, ast.BinOp, ast.UnaryOp)) or _is_metpy(node):
         return True
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         return node.func.id in _FUNCS
@@ -788,6 +837,8 @@ def _parse_python(text: str, shown: str | None = None) -> dict:
         shown = (exc.text or "").strip()
         raise ScriptError(f"line {exc.lineno}: {exc.msg}"
                           + (f": {shown}" if shown else "")) from None
+    tree = _XarrayNames().visit(tree)
+    tree = _XarrayNames().visit(tree)
     fields = _Fields(shown)
     out: dict = {}
     colour: dict = {}
@@ -1125,6 +1176,20 @@ def _plan(expr: str, variables: dict, meta: dict, what: str) -> None:
         hint = next((h for h in (_near(w, variables) for w in words
                                  if w not in variables and w not in _FUNCS) if h), "")
         raise ScriptError(f"{what}: {exc.args[0]}{hint}") from None
+
+    def units_of(arg):
+        if isinstance(arg, tuple):            # the level axis, as the pressure
+            owner = next((v for v in variables.values() if v.get("dim") == arg[1]
+                          and v.get("level_values")), None)
+            if owner is None:
+                raise KeyError(f"{arg[1]!r} is not a variable, nor a level axis with "
+                               f"values in this file")
+            return owner.get("level_units") or ""
+        return variables[arg].get("units", "")
+    try:
+        _derive.check_units(plan, units_of)
+    except KeyError as exc:
+        raise ScriptError(f"{what}: {exc.args[0]}") from None
     for term in _derive.terms(plan):
         if not meta.get("time_statistics"):
             raise ScriptError(f"{what}: {term[4]}: a field reduced over time is "
