@@ -514,3 +514,22 @@ def test_a_large_gif_is_asked_about_before_it_is_built(page):
     finally:
         page.evaluate("n => { M.steps = n; }", steps)
         page.remove_listener("request", on_request)
+
+
+def test_a_script_typed_into_the_chat_is_applied_and_its_transcript_shown(
+        page, tmp_path, monkeypatch):
+    """A request that is a script already is applied without asking the model
+    -- here one that answers nothing -- and the chat shows what the view now
+    reads, as xarray."""
+    conf = tmp_path / "chat.conf"
+    conf.write_text("url = http://127.0.0.1:9\nmodel = stand-in\nlog = off\n")
+    monkeypatch.setenv("GMPAS_CHAT_CONFIG", str(conf))
+    page.reload(wait_until="networkidle")
+    page.wait_for_function("() => !document.querySelector('#chatGo').disabled",
+                           timeout=15000)
+    page.fill("#chatText", "theta")
+    page.click("#chatGo")
+    page.wait_for_selector("#chatlog .ran", timeout=15000)
+    ran = page.inner_text("#chatlog .ran")
+    assert ran.startswith('ds = xr.open_dataset("history.2012-01-01_00.00.00.nc")')
+    assert 'ds["theta"]' in ran

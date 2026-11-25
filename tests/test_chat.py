@@ -825,3 +825,30 @@ def test_a_script_is_applied_without_asking_the_model(tmp_path, monkeypatch):
         post = _says("var = t2m\n")
         assert "direct" not in chat.ask(text, META, current="var = u", cfg=CFG, post=post)
         assert post.seen
+
+
+def test_the_answer_says_what_the_view_reads_as_xarray():
+    meta = {**META, "file": "run.nc", "time_dim": "valid_time"}
+    got = chat.ask("u.isel(valid_time=2)", meta, current="var = t2m\ntime = 0\n")
+    assert got["ran"] == ('ds = xr.open_dataset("run.nc")\n'
+                          'ds["u"].isel(valid_time=2).isel(level=0)   # 2012-03-01 12:00\n')
+    # the view on screen counts: a palette change still reads the field shown
+    got = chat.ask("cmap = RdBu_r", meta, current="var = t2m\ntime = 1\n")
+    assert got["ran"].splitlines()[1].startswith('ds["t2m"].isel(valid_time=1)')
+
+
+def test_the_model_is_told_the_levels_a_request_names():
+    meta = {**META, "variables": [
+        {"name": "ua", "levels": 3, "dim": "plev", "level_values": [100000.0, 85000.0,
+                                                                     25000.0],
+         "level_units": "Pa"}]}
+    told = chat._named_levels("zonal wind at 850 hPa", meta)
+    assert '"850 hPa" is <field>.sel(plev=85000), level 1 of plev (85000 Pa)' in told
+    assert "<field>.sel(plev=85000)" in chat._named_levels("ua at 850", meta)   # bare
+    assert "nearest is <field>.sel(plev=25000)" in chat._named_levels("ua at 300 hPa",
+                                                                       meta)
+    assert "outside plev" in chat._named_levels("ua at 50 hPa", meta)
+    # numbers that are not levels: steps, hours, years, palette limits
+    for text in ("six hours later", "step 850", "in 2012", "ua at 600", "850 hours"):
+        assert chat._named_levels(text, meta) == "", text
+    assert chat._named_levels("850 hPa", META) == ""      # no axis in pressure

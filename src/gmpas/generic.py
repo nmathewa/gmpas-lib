@@ -38,6 +38,7 @@ from . import jobs as _jobs
 from . import layers as _layers
 from . import netcdf, palettes, timing
 from . import projection as _projection
+from . import variables as _variables
 from .mesh import EARTH_RADIUS
 from .raster import target_grid
 from .series import LRU_SIZE, expand, label_of
@@ -1099,7 +1100,9 @@ class GenericViewer:
             stack = self._stack_dims(da)
             variables.append({
                 "name": name,
-                "label": _data.field_label(da),
+                # a long name or units the file leaves out, by its GRIB code
+                "label": _data.field_label(da, _variables.filled(str(name),
+                                                                 dict(da.attrs))),
                 "static": not (self.time_name and self.time_name in da.dims)
                           and len(self.files) == 1,
                 # the slider drives the first stacking axis, the rest are
@@ -1124,7 +1127,9 @@ class GenericViewer:
             # what the file calls its axes: `.sel(valid_time=...)`, and a
             # place as `.sel(latitude=..., longitude=..., method="nearest")`
             "time_dim": self.time_name or "",
-            "lat_dim": self.lat_dim, "lon_dim": self.lon_dim,
+            # (only an axis with its own coordinate can be picked by value)
+            "lat_dim": self.lat_dim if self.lat_name == self.lat_dim else "",
+            "lon_dim": self.lon_dim if self.lon_name == self.lon_dim else "",
             "scanning": self.scanning,
             "home": list(self.home),
             "nx": self.nx,

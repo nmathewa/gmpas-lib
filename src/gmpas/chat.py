@@ -867,6 +867,37 @@ MAX_HISTORY = 6
 
 def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
         post=_post, history=None, record: dict | None = None) -> dict:
+    """See `_ask`. The answer also carries "ran": the data the view reads
+    once the script is applied, as xarray code (gmpas.transcript), so the
+    user sees what was done in the language it follows."""
+    got = _ask(text, meta, current, cfg, post, history, record)
+    ran = _ran(current, got["state"], meta)
+    if ran:
+        got["ran"] = ran
+        if record is not None:
+            record["ran"] = ran
+    return got
+
+
+def _ran(current: str, state: dict, meta: dict) -> str:
+    """The whole view after `state` is applied to the one on screen, as
+    xarray code; empty when it reads no field."""
+    from . import transcript
+
+    try:
+        view = _script.resolve(_script.parse(current), meta) if current.strip() else {}
+    except _script.ScriptError:
+        view = {}
+    view = {**view, **{k: v for k, v in state.items() if v is not None or k == "var"}}
+    if "ask" not in state:
+        view.pop("ask", None)           # a question is asked once, not kept
+    if "point" not in state:
+        view.pop("point", None)
+    return transcript.spell(view, meta)
+
+
+def _ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
+         post=_post, history=None, record: dict | None = None) -> dict:
     """The script for `text`, checked against the file `meta` describes.
 
     `current` is the view on screen, as a script, so a request such as
@@ -894,9 +925,9 @@ def ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
         raise ChatError(f"no model is configured; write {config_path()}")
     asked = text if not current.strip() else \
         f"The view now:\n{current.strip()}\n\nRequest: {text}"
-    named = _named_places(text)
-    if named:
-        asked += "\n\n" + named
+    for named in (_named_places(text), _named_levels(text, meta)):
+        if named:
+            asked += "\n\n" + named
     messages = [{"role": "system", "content": system_prompt(meta)}]
     said = [h for h in (history if isinstance(history, list) else [])
             if isinstance(h, dict)
@@ -955,6 +986,57 @@ def _named_places(text: str) -> str:
                 + "; if the request does not say which, ask in one `# ` line")
     return ("Places named in the request (gmpas's gazetteer):\n" + "\n".join(lines)) \
         if lines else ""
+
+
+#: A pressure in a request: a number and its unit, or a bare number that is
+#: one of the file's levels ("wind at 850"). Not a step, a time or a year.
+_PRESSURE_SAID = re.compile(
+    r"(?<![\w.])(\d{1,6}(?:\.\d+)?)\s*(hpa|mb|mbar|millibars?|hectopascals?|pa)?"
+    r"(?![\w.]*\s*(?:h\b|hours?|hrs?|days?|steps?|utc|z\b|km|m\b|%|k\b|deg|°))", re.I)
+
+
+def _named_levels(text: str, meta: dict) -> str:
+    """The pressure levels a request names, said as the line that picks each
+    from this file -- "850 hPa is t.sel(pressure_level=850)" -- so the model
+    copies a value instead of counting along the level list."""
+    owners = {}
+    for v in meta.get("variables", []):
+        units = (v.get("level_units") or "").strip().lower()
+        if v.get("level_values") and units in ("hpa", "mb", "mbar", "millibar", "pa"):
+            owners.setdefault((v.get("dim") or "level", units), v)
+    if not owners:
+        return ""
+    lines = []
+    for hit in _PRESSURE_SAID.finditer(text):
+        before = re.findall(r"[a-z]+", text[:hit.start()].lower())[-1:]
+        if before and before[0] in ("step", "steps", "time", "index", "number", "no",
+                                    "vmin", "vmax", "year") and not hit[2]:
+            continue                     # "step 850", "vmax 850": not a pressure
+        value, unit = float(hit[1]), (hit[2] or "").lower()
+        hpa = value / 100 if unit == "pa" else value
+        for (dim, units), v in owners.items():
+            values = v["level_values"]
+            axis_hpa = [x / 100 if units == "pa" else x for x in values]
+            if not unit and hpa not in axis_hpa:
+                continue                 # a bare number that is not a level
+            said = f"{hit[1]} {hit[2] or 'hPa'}".strip()
+            if hpa in axis_hpa:
+                i = axis_hpa.index(hpa)
+                lines.append(f'  "{said}" is <field>.sel({dim}={values[i]:g}), '
+                             f"level {i} of {dim} ({values[i]:g} {v.get('level_units')})")
+            elif min(axis_hpa) <= hpa <= max(axis_hpa):
+                i = min(range(len(values)), key=lambda k: (abs(axis_hpa[k] - hpa),
+                                                           -axis_hpa[k]))
+                lines.append(f'  "{said}" is not a level of {dim}; the nearest is '
+                             f"<field>.sel({dim}={values[i]:g}) "
+                             f"({values[i]:g} {v.get('level_units')})")
+            else:
+                lines.append(f'  "{said}" is outside {dim}, which runs '
+                             f"{max(axis_hpa):g} to {min(axis_hpa):g} hPa: say so")
+            break
+    lines = list(dict.fromkeys(lines))
+    return ("Levels named in the request (pick them by these values, not by "
+            "counting):\n" + "\n".join(lines)) if lines else ""
 
 
 def _direct(text: str, meta: dict, current: str) -> dict | None:

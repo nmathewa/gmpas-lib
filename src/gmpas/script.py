@@ -1055,7 +1055,14 @@ def native(text: str, meta: dict) -> str:
 
     `method="nearest"` is dropped: a level that is not listed is the nearest
     one already (`_level_index`). Only the keyword names inside those two
-    calls change; nothing else in the text is touched."""
+    calls change; nothing else in the text is touched.
+
+    This is a rewrite of the text before parsing, not a part of the parser:
+    `parse` reads a script without the file, and the file is what says that
+    `plev` is a level. The calls are found with their brackets balanced and
+    strings skipped, and the tests pin each form; moving the names into
+    `resolve` instead would let `parse` keep any keyword, which is the
+    better shape once the parser is reworked for the full xarray reference."""
     rename = {v["dim"]: "level" for v in meta.get("variables", []) if v.get("dim")}
     if meta.get("time_dim"):
         rename[meta["time_dim"]] = "time"

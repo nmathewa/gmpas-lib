@@ -337,10 +337,13 @@ def pretty_units(units: str) -> str:
     return units
 
 
-def field_label(da: xr.DataArray) -> str:
-    """Colorbar label: long_name and units when the file provides them."""
-    units = da.attrs.get("units", "")
-    name = da.attrs.get("long_name", da.name)
+def field_label(da: xr.DataArray, attrs: dict | None = None) -> str:
+    """Colorbar label: long_name and units when the file provides them, or
+    `attrs` when given -- the file's own filled from the models' tables
+    (gmpas.variables)."""
+    attrs = da.attrs if attrs is None else attrs
+    units = attrs.get("units", "")
+    name = attrs.get("long_name", da.name)
     return f"{name} [{pretty_units(units)}]" if units else str(name)
 
 

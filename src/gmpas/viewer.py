@@ -45,6 +45,7 @@ from . import jobs as _jobs
 from . import layers as _layers
 from . import script as _script
 from . import timing
+from . import variables as _variables
 from .cache import BuildCache
 from .mesh import MpasMesh
 from .projection import PAGE_CHOICES
@@ -524,7 +525,9 @@ class Viewer:
             time_dim = time_dim or (_data.time_axis(da) or "")
             out.append({
                 "name": name,
-                "label": _data.field_label(da),
+                # a long name or units the file leaves out, from MPAS's registry
+                "label": _data.field_label(da, _variables.filled(name, dict(da.attrs),
+                                                                 "mpas")),
                 # A history file carries the mesh alongside the fields, so
                 # latCell, edgesOnCell, meshDensity and friends all live on
                 # nCells too. Carrying a time dimension is what separates a
@@ -2261,6 +2264,8 @@ body.chat:not(.allctl) #extentsec{display:none!important}
             border-left:2px solid var(--line);padding-left:6px}
 #chatlog .a.bad{color:#e88}
 #chatlog .a.said{font:inherit;color:var(--fg)}
+#chatlog .ran{font:11px monospace;white-space:pre-wrap;color:var(--dim);opacity:.8;
+  border-left:2px solid var(--dim);padding-left:6px;margin:2px 0 6px}
 #lyJsonBox{width:100%;box-sizing:border-box;height:180px;font:11px monospace;margin-top:6px}
 #lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
 #hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
@@ -2876,6 +2881,8 @@ async function chatAsk(){
       return; }
     $("#scriptBox").value=d.script;
     a.textContent=d.script.trim();
+    // what the view now reads, in xarray: the transcript (gmpas.transcript)
+    if(d.ran) chatLine("ran", d.ran.trim()).title="the data this view reads, as xarray";
     const ok=await scriptRun(d.script);
     if(ok && ANSWER){
       chatLine("q", ANSWER);
