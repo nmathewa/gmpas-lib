@@ -334,7 +334,8 @@ Draw several things as one figure, in order, the first underneath:
   gridvalues(t) writes the numbers on the map.
   The map itself, each a call with options and no field:
     coastlines(color="black", linewidth=0.8, resolution="10m")
-    borders()  rivers(color="blue")  lakes()  land(facecolor="lightgray")
+    borders()  states()  rivers(color="blue")  lakes()  land(facecolor="lightgray")
+    (borders() is between countries, states() between states and provinces)
     ocean(facecolor="lightblue")  gridlines(labels=True, dlon=10, dlat=10)
     Draw land() and ocean() before the fields they sit under.
   figure(title="...", subtitle="...", projection="Robinson", look="ferret",
@@ -932,7 +933,7 @@ def _ask(text: str, meta: dict, current: str = "", cfg: dict | None = None,
         raise ChatError(f"no model is configured; write {config_path()}")
     asked = text if not current.strip() else \
         f"The view now:\n{current.strip()}\n\nRequest: {text}"
-    for named in (_named_places(text), _named_levels(text, meta)):
+    for named in (_named_places(text), _named_levels(text, meta), _named_features(text)):
         if named:
             asked += "\n\n" + named
     messages = [{"role": "system", "content": system_prompt(meta)}]
@@ -993,6 +994,23 @@ def _named_places(text: str) -> str:
                 + "; if the request does not say which, ask in one `# ` line")
     return ("Places named in the request (gmpas's gazetteer):\n" + "\n".join(lines)) \
         if lines else ""
+
+
+#: State or province boundaries asked for in words: "state borders" reads
+#: as borders() to a model, which draws only the lines between countries.
+_STATES_SAID = re.compile(r"\b(state|states|province|provinces|provincial|county|"
+                          r"counties|admin(?:istrative)?)\b[\w\s-]{0,12}?\b(border|"
+                          r"borders|boundary|boundaries|lines|outlines)\b", re.I)
+
+
+def _named_features(text: str) -> str:
+    """The map features a request names that a model mistakes for another,
+    said as the call that draws them."""
+    hit = _STATES_SAID.search(text)
+    if not hit:
+        return ""
+    return (f'Map features named in the request:\n  "{hit[0]}" is states(), the '
+            f"lines between states and provinces; borders() is only between countries")
 
 
 #: A pressure in a request: a number and its unit, or a bare number that is

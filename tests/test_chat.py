@@ -852,3 +852,11 @@ def test_the_model_is_told_the_levels_a_request_names():
     for text in ("six hours later", "step 850", "in 2012", "ua at 600", "850 hours"):
         assert chat._named_levels(text, meta) == "", text
     assert chat._named_levels("850 hPa", META) == ""      # no axis in pressure
+
+
+def test_state_borders_in_words_are_said_to_be_states():
+    for text in ("add state borders", "show the province boundaries",
+                 "US state lines please", "county outlines"):
+        assert "is states()" in chat._named_features(text), text
+    for text in ("add borders", "country borders", "the united states", "state of the art"):
+        assert chat._named_features(text) == "", text

@@ -349,10 +349,11 @@ KIND_CAPS = {
 #: a non-map variable is read whole to plot it; past this it is refused
 PLOT_READ_BYTES = 256 * 1024 * 1024
 
-#: the most values (steps x cells) a field reduced over time may read: all
-#: 2,073 steps of a 2-degree grid is 33 million; a year of hourly 0.25-degree
-#: fields is 9 billion, and is refused rather than left to run for minutes
-REDUCE_MAX_VALUES = 2_000_000_000
+#: a field reduced over time that reads more than this is asked about first,
+#: and then read as a job with progress (`reduce_progress`): all 2,073 steps
+#: of a 2-degree grid is 130 MB and runs at once; a year of hourly
+#: 0.25-degree fields is 36 GB, minutes of reading, and the user decides
+REDUCE_ASK_BYTES = 1 << 30
 #: how many reduced fields are kept (each is one float64 grid)
 REDUCED_KEPT = 8
 
@@ -587,6 +588,8 @@ class GenericViewer:
         self._reduced_fields: OrderedDict = OrderedDict()
         # Hovmöller results and the jobs reading them; see hovmoller_progress
         self._hov_jobs = _jobs.Jobs(name="gmpas-hovmoller")
+        # big reductions over time, run once they are confirmed (reduce_progress)
+        self._reduce_jobs = _jobs.Jobs(name="gmpas-reduce")
 
         try:
             self._build_grid()
@@ -796,6 +799,8 @@ class GenericViewer:
                     setattr(self, k, v)
                 raise
             self._hov_jobs.stop(timeout=5.0)
+            self._reduce_jobs.stop(timeout=5.0)
+            self._reduced_fields.clear()     # built on the old axes
             with self._lock:                 # frames were cut against old axes
                 for ds in self._open.values():
                     ds.close()
@@ -1008,6 +1013,7 @@ class GenericViewer:
         whatever runs next may be writing a file without the lock.
         """
         self._hov_jobs.stop(timeout)
+        self._reduce_jobs.stop(timeout)
 
     def close(self) -> None:
         self.stop_jobs()
@@ -1168,11 +1174,72 @@ class GenericViewer:
 
     # -- map frames ------------------------------------------------------
 
-    def _reduced(self, term: tuple, level: int):
+    def _term_cost(self, term: tuple) -> tuple[int, int]:
+        """(steps, bytes) a term reads: every step it picks, the whole grid
+        at the file's own precision."""
+        steps = _derive.steps_for(term[3], self.labels)
+        item = np.dtype(self.ds[term[1]].dtype).itemsize
+        return len(steps), len(steps) * self.lat.size * self.lon.size * item
+
+    def reduce_cost(self, var: str, level: int) -> dict:
+        """What drawing `var` would read for its fields reduced over time that
+        are not built yet: {"steps", "bytes", "done"}."""
+        try:
+            plan = _derive.parse(var, self._spatial_vars())
+        except KeyError:
+            return {"steps": 0, "bytes": 0, "done": True}
+        steps = size = 0
+        for term in _derive.terms(plan):
+            if (term[4], int(level), len(self._steps)) in self._reduced_fields:
+                continue
+            n, b = self._term_cost(term)
+            steps, size = steps + n, size + b
+        return {"steps": steps, "bytes": size, "done": steps == 0}
+
+    def reduce_progress(self, var: str, level: int, go: bool = False) -> dict:
+        """Where building `var`'s reductions over time stands: "done", "ask"
+        (bigger than REDUCE_ASK_BYTES and not confirmed, with what it would
+        read), or "running" with [steps read, steps]. `go` confirms and
+        starts it as a job; polling it never blocks."""
+        if self.scanning:
+            raise ValueError("this run's time axis is still being read; ask again "
+                             "in a moment")
+        try:
+            cost = self.reduce_cost(var, level)
+        except KeyError as exc:
+            raise ValueError(str(exc.args[0])) from None
+        if cost["done"]:
+            return {"state": "done"}
+        if cost["bytes"] >= REDUCE_ASK_BYTES and not go:
+            return {"state": "ask", "steps": cost["steps"], "bytes": cost["bytes"]}
+        terms = _derive.terms(_derive.parse(var, self._spatial_vars()))
+
+        def work(progress, cancel, publish=None):
+            done = 0
+            for term in terms:
+                n = self._term_cost(term)[0]
+                self._reduced(term, level, progress=lambda i, d=done: progress(d + i),
+                              cancel=cancel, confirmed=True)
+                done += n
+            return True
+
+        return self._reduce_jobs.progress(("reduce", var, int(level), len(self._steps)),
+                                          cost["steps"], work)
+
+    def reduce_cancel(self, var: str, level: int) -> bool:
+        """Stop building `var`'s reductions: the user moved on."""
+        return self._reduce_jobs.cancel(("reduce", var, int(level), len(self._steps)))
+
+    def _reduced(self, term: tuple, level: int, progress=None, cancel=None,
+                 confirmed: bool = False):
         """A field reduced over time (`derive.reduced`): the whole grid in the
         file's own order, float64, with the file's coordinates and no time
         axis. Read one step at a time, so it costs two grids of memory however
-        many steps it covers; built once for a term and level, and kept."""
+        many steps it covers; built once for a term and level, and kept.
+
+        One bigger than REDUCE_ASK_BYTES is built only `confirmed`, as the job
+        `reduce_progress` starts, which passes `progress(steps read)` and a
+        `cancel` event checked between steps."""
         _, name, how, picks, text = term
         if self.scanning:
             raise ValueError("this run's time axis is still being read; ask again "
@@ -1192,13 +1259,21 @@ class GenericViewer:
                 da = self._pick_levels(self._read(name, step), level)
                 return da.transpose(self.lat_dim, self.lon_dim).load()
 
+        if not confirmed:
+            n, size = self._term_cost(term)
+            if size >= REDUCE_ASK_BYTES:
+                raise ValueError(f"{text} reads {n:,} steps, about {size / 2**30:.1f} "
+                                 f"GB: it runs once it is confirmed")
         first = one(steps[0])
-        if len(steps) * first.size > REDUCE_MAX_VALUES:
-            raise ValueError(f"{text} would read {len(steps):,} steps of "
-                             f"{first.size:,} cells; pick fewer steps")
-        values = _derive.accumulate(how, (
-            np.asarray((first if s == steps[0] else one(s)).values, dtype=np.float64)
-            for s in steps))
+
+        def each():
+            for i, s in enumerate(steps):
+                if cancel is not None and cancel.is_set():
+                    raise _jobs.Cancelled()
+                yield np.asarray((first if i == 0 else one(s)).values, dtype=np.float64)
+                if progress is not None:
+                    progress(i + 1)
+        values = _derive.accumulate(how, each())
         got = first.drop_vars([c for c in first.coords if c not in first.dims]) \
                    .astype(np.float64).copy(data=values)
         got.name = text                      # its units are the field's own

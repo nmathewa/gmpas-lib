@@ -533,3 +533,57 @@ def test_a_script_typed_into_the_chat_is_applied_and_its_transcript_shown(
     ran = page.inner_text("#chatlog .ran")
     assert ran.startswith('ds = xr.open_dataset("history.2012-01-01_00.00.00.nc")')
     assert 'ds["theta"]' in ran
+
+
+@pytest.fixture
+def monthly_page(tmp_path, page):
+    """A lat/lon file of three years of monthly fields, on its own page."""
+    import pandas as pd
+
+    from gmpas.generic import GenericViewer
+    from gmpas.viewer import PAGE, _handler, bind
+
+    lat, lon = np.arange(30.0, -30.1, -5.0), np.arange(0.0, 360.0, 10.0)
+    time = pd.date_range("2011-01-01", periods=36, freq="MS")
+    sst = (20 + 5 * np.random.default_rng(2).random((36, lat.size, lon.size))).astype("f4")
+    xr.Dataset({"sst": (("time", "lat", "lon"), sst, {"units": "degC"})},
+               coords={"time": time, "lat": lat, "lon": lon}).to_netcdf(tmp_path / "sst.nc")
+    viewer = GenericViewer(tmp_path / "sst.nc", strict=True)
+    srv = bind(_handler(viewer, PAGE), 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    pg = page.context.browser.new_page(viewport={"width": 1100, "height": 800})
+    pg.goto(f"http://127.0.0.1:{srv.server_address[1]}/", wait_until="networkidle")
+    pg.wait_for_function("() => M && !M.scanning && cur", timeout=30000)
+    yield pg, viewer
+    pg.close()
+    srv.shutdown()
+    viewer.close()
+
+
+def test_a_big_reduction_is_confirmed_then_read_with_progress(monthly_page, monkeypatch):
+    import gmpas.generic as generic
+
+    pg, viewer = monthly_page
+    monkeypatch.setattr(generic, "REDUCE_ASK_BYTES", 1000)
+    asked = []
+    pg.once("dialog", lambda d: (asked.append(d.message), d.accept()))
+    pg.evaluate("""() => scriptRun('var = sst.mean("time")')""")
+    pg.wait_for_function("() => document.querySelector('#reducebar').style.display"
+                         " === 'none' && lastRange", timeout=30000)
+    assert asked and "reads 36 steps" in asked[0]
+    assert viewer.reduce_cost("sst.mean('time')", 0)["done"]
+    assert pg.evaluate("() => cur.name") == "sst.mean('time')"
+
+
+def test_a_big_reduction_declined_reads_nothing(monthly_page, monkeypatch):
+    import gmpas.generic as generic
+
+    pg, viewer = monthly_page
+    monkeypatch.setattr(generic, "REDUCE_ASK_BYTES", 1000)
+    pg.once("dialog", lambda d: d.dismiss())
+    pg.evaluate("""() => scriptRun('var = sst.max("time")')""")
+    pg.wait_for_function("() => /not read/.test(document.querySelector('#msg')"
+                         " ? document.querySelector('#msg').textContent : '')"
+                         " || /not read/.test(document.body.innerText)", timeout=15000)
+    assert not viewer.reduce_cost("sst.max('time')", 0)["done"]
+    assert viewer._reduce_jobs.running() == 0

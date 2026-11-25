@@ -46,7 +46,8 @@ marks any place and shows the value there. In an expression `var` is the
 field on screen.
 
 The map under and over them is drawn the same way -- `coastlines()`,
-`borders()`, `land()`, `ocean()`, `lakes()`, `rivers()`, `gridlines()` -- and
+`borders()`, `states()`, `land()`, `ocean()`, `lakes()`, `rivers()`,
+`gridlines()` -- and
 `figure()` sets the title, the projection and where the colour bars go.
 Coastlines and gridlines are there unless a script draws its own.
 
@@ -336,7 +337,8 @@ _VECTOR = {"vectors": "quiver", "quiver": "quiver", "barbs": "barbs",
 _AS_LAYER = {"shade": "pcolormesh", "contourf": "contourf", "contour": "contour",
              "pcolormesh": "pcolormesh", "imshow": "imshow", "gridvalues": "gridvalues"}
 #: The map itself, as layers: each is a call with options and no field.
-_FEATURE = ("coastlines", "borders", "land", "ocean", "lakes", "rivers", "gridlines")
+_FEATURE = ("coastlines", "borders", "states", "land", "ocean", "lakes", "rivers",
+            "gridlines")
 _DRAW = (*_FIELD, *_VECTOR, *_FEATURE, "gridvalues", "figure")
 _AT_POINT = ("series", "profile")
 #: A question about a field, as xarray asks it, and what it finds.

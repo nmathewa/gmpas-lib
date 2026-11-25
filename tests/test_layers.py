@@ -564,3 +564,27 @@ def test_an_unlisted_option_is_passed_on_and_a_near_miss_is_not():
     with pytest.raises(ValueError, match="unknown option"):
         L.clean({"figure": {}, "layers": [{"kind": "rivers",
                                            "options": {"zorder": 3}}]}, [], {})
+
+
+def test_state_borders_are_a_map_feature_of_their_own(gv, monkeypatch):
+    """`states()`: Natural Earth's admin-1 lines, asked for by name and drawn
+    as lines, beside the country borders."""
+    from cartopy.io import shapereader
+
+    from gmpas import layers, script
+
+    asked = []
+    real = shapereader.natural_earth
+
+    def seen(**kw):
+        asked.append(kw["name"])
+        return real(**kw)
+    monkeypatch.setattr(shapereader, "natural_earth", seen)
+    assert layers.LAYER_KINDS["states"]["label"] == "state and province borders"
+    png = gv.plot("t", 0, 0, "layers", gv.home, 300, 200,
+                  layers={"layers": [{"kind": "states",
+                                      "options": {"resolution": "110m"}}]})
+    assert png[:4] == b"\x89PNG" and "admin_1_states_provinces_lines" in asked
+    stack = script.parse("var = t\nstates(color='black')\nborders()")["layers"]
+    kinds = [x["kind"] for x in stack["layers"]]
+    assert kinds.index("states") < kinds.index("borders")      # in the order written

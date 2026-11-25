@@ -51,7 +51,6 @@ def open_mpas(data_path: str, mesh: str = "", **kwargs) -> xr.Dataset:
     return ds
 
 
-@xr.register_dataset_accessor("mpas")
 class MpasAccessor:
     """`ds.mpas` -- native-mesh plotting for an MPAS dataset."""
 

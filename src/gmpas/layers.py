@@ -222,6 +222,15 @@ LAYER_KINDS: dict[str, dict] = {
                     "resolution": {"type": "choice", "default": "auto",
                                    "choices": _RESOLUTIONS}},
     },
+    "states": {
+        "label": "state and province borders", "group": "feature", "needs": [],
+        "options": {"color": {"type": "color", "default": "#777777"},
+                    "linewidth": {"type": "float", "default": 0.4, "min": 0.0},
+                    "linestyle": {"type": "choice", "default": "solid",
+                                  "choices": _LINESTYLES},
+                    "resolution": {"type": "choice", "default": "auto",
+                                   "choices": _RESOLUTIONS}},
+    },
     "land": {
         "label": "land fill", "group": "feature", "needs": [],
         "options": {"facecolor": {"type": "color", "default": "#e8e2d0"},
@@ -265,6 +274,7 @@ LAYER_KINDS: dict[str, dict] = {
 _NATURAL_EARTH = {
     "coastlines": ("physical", "coastline"),
     "borders": ("cultural", "admin_0_boundary_lines_land"),
+    "states": ("cultural", "admin_1_states_provinces_lines"),
     "land": ("physical", "land"),
     "ocean": ("physical", "ocean"),
     "lakes": ("physical", "lakes"),
@@ -1277,7 +1287,7 @@ def _draw(viewer, fig, stack: dict, time: int, level: int, extent):
             elif kind == "lakes":
                 style = dict(facecolor=opts["facecolor"], edgecolor=opts["edgecolor"],
                              linewidth=0.3)
-            elif kind == "borders":
+            elif kind in ("borders", "states"):
                 style = dict(facecolor="none", edgecolor=opts["color"],
                              linewidth=opts["linewidth"], linestyle=opts["linestyle"])
             else:                                               # rivers

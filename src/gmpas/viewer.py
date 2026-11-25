@@ -1688,6 +1688,20 @@ def _handler(viewer: Viewer, html: str = ""):
                     self.send_header("Content-Length", str(len(png)))
                     self.end_headers()
                     return self.wfile.write(png)
+                if url.path == "/api/reduce":
+                    # a field reduced over time, built before it is drawn:
+                    # asked about when big, then read as a job the page polls
+                    if not hasattr(viewer, "reduce_progress"):
+                        return self._send(b'{"state": "done"}', "application/json")
+                    level = int(q.get("level", 0))
+                    if q.get("cancel") == "1":
+                        viewer.reduce_cancel(q["var"], level)
+                        return self._send(b'{"state": "cancelled"}', "application/json")
+                    state = viewer.reduce_progress(q["var"], level, go=q.get("go") == "1")
+                    if state["state"] == "error":
+                        raise ValueError(state["error"])
+                    return self._send(json.dumps(state).encode(), "application/json",
+                                      202 if state["state"] == "running" else 200)
                 if url.path == "/api/plot" and hasattr(viewer, "plot"):
                     extent = [float(v) for v in q["extent"].split(",")]
                     hov_viewer = hasattr(viewer, "hovmoller_progress")
@@ -2284,6 +2298,9 @@ body.chat:not(.allctl) #extentsec{display:none!important}
 #lyFig summary{cursor:pointer;color:var(--dim);font-size:11px;margin-top:8px}
 #hovmark{position:absolute;height:0;border-top:2px dashed #111;pointer-events:none;
          display:none;box-shadow:0 1px 0 #fffc}
+/* a field reduced over time being read: how far, across the top of the map */
+#reducebar{position:absolute;left:0;top:0;height:4px;width:0;background:#2f7dd3;
+           z-index:5;display:none;transition:width .3s}
 /* number inputs carry a wide intrinsic size; two to a row must share 220px */
 #hovbox .row>input,#hovbox .row>select{min-width:0;width:0;flex:1}
 #hovbox .kv{flex-wrap:wrap;gap:2px 8px}
@@ -2430,6 +2447,7 @@ button.on{background:var(--accent);color:var(--on-accent);border-color:var(--acc
     <span id="keyhint" class="pin" title="press ? for every key">keys: \u2190\u2192 time \u00b7 \u2191\u2193 level \u00b7 space play \u00b7 ?</span>
   </div>
   <div id="stage">
+    <div id="reducebar" role="progressbar" aria-label="reading steps"></div>
     <img id="plotimg" alt=""><div id="hovmark"></div>
     <div id="frame">
       <div id="latax"></div>
@@ -2917,7 +2935,7 @@ function scriptNum(v){ return String(+(+v).toPrecision(10)); }
 // A figure of layers, as the calls that draw it: the Python form of a script
 const LY_VERB={pcolormesh:"pcolormesh", contourf:"contourf", contour:"contour",
                imshow:"imshow", quiver:"vectors", barbs:"barbs", streamplot:"streamlines",
-               gridvalues:"gridvalues", coastlines:"coastlines", borders:"borders",
+               gridvalues:"gridvalues", coastlines:"coastlines", borders:"borders", states:"states",
                land:"land", ocean:"ocean", lakes:"lakes", rivers:"rivers",
                gridlines:"gridlines"};
 function scriptPy(v){
@@ -3539,6 +3557,51 @@ $("#colourReset").onclick=()=>{
   colourForm(); stopPlayback(); draw();
 };
 
+// A field reduced over time -- sst.mean("time") -- is built before it is
+// drawn. A small one is built as the frame is asked for; a big one is asked
+// about first (it may read gigabytes for minutes), then read as a job the
+// page polls, with the bar across the map showing how far it has got.
+let reducePoll=null, reduceKey=null;
+const REDUCE_YES={};
+const REDUCES=/\.(mean|max|min)\(/;
+function reduceBar(frac){
+  const b=$("#reducebar");
+  b.style.display = frac==null ? "none" : "block";
+  if(frac!=null) b.style.width=(100*frac).toFixed(1)+"%";
+}
+async function reduceReady(ctrl){
+  const key=cur.name+"|"+$("#level").value;
+  if(reduceKey && reduceKey!==key){        // moved on: stop the read nobody wants
+    const [v, l]=reduceKey.split("|");
+    fetch("api/reduce?"+new URLSearchParams({var:v, level:l, cancel:"1"}));
+  }
+  reduceKey=key;
+  const p=new URLSearchParams({var:cur.name, level:$("#level").value});
+  if(REDUCE_YES[key]) p.set("go","1");
+  const r=await fetch("api/reduce?"+p, {signal:ctrl.signal});
+  const d=await r.json();
+  if(!r.ok){ reduceBar(null); say(d.error); return false; }
+  if(d.state==="done"){ reduceBar(null); reduceKey=null; return true; }
+  if(d.state==="ask"){
+    const gb=d.bytes/2**30;
+    if(!confirm(`${cur.name} reads ${d.steps.toLocaleString("en")} steps, about `+
+        `${gb>=10 ? gb.toFixed(0) : gb.toFixed(1)} GB, from the files. `+
+        `That can take minutes on the machine running gmpas.\n\nRead them?`)){
+      reduceKey=null;
+      say("not read: pick fewer steps, or ask again and confirm"); return false; }
+    REDUCE_YES[key]=true;
+    return reduceReady(ctrl);
+  }
+  const [done, total]=d.progress;
+  reduceBar(total ? done/total : 0);
+  say(`reading ${done.toLocaleString("en")} / ${total.toLocaleString("en")} steps `+
+      `for ${cur.name}\u2026`);
+  clearTimeout(reducePoll);
+  reducePoll=setTimeout(()=>{
+    if(cur && cur.name+"|"+$("#level").value===key) draw(); }, 700);
+  return false;
+}
+
 async function draw(){
   if(!cur || HOLD) return;
   if(plotMode()) return drawPlot();
@@ -3551,6 +3614,8 @@ async function draw(){
   if(drawCtrl) drawCtrl.abort();
   const ctrl = drawCtrl = new AbortController();
   try{
+  if(M.time_statistics && REDUCES.test(cur.name) && !(await reduceReady(ctrl))) return;
+  else if(reduceKey){ reduceReady(ctrl).catch(()=>{}); }
   const b=outset(boxOf(view));
   const p=new URLSearchParams({var:cur.name,time:$("#time").value,
     level:$("#level").value,extent:b.join(","),cmap:$("#cmap").value,

@@ -77,3 +77,26 @@ def test_a_reader_worker_does_not_load_pandas():
         pool.shutdown()
     assert "netCDF4" in maps
     assert "pandas/_libs" not in maps
+
+
+@pytest.mark.parametrize("module", ["gmpas.mesh", "gmpas.data", "gmpas.accessor",
+                                    "gmpas.viewer", "gmpas.generic", "gmpas.cli"])
+def test_any_module_imports_first_in_a_fresh_interpreter(module):
+    """The hook that registers `ds.mpas` runs inside whichever module imports
+    xarray first. When it imported gmpas.accessor there, gmpas.mesh's own
+    `import xarray` came back round to a half-loaded gmpas.mesh, and every
+    `gmpas` command died on start-up while each module imported fine in a
+    test that had already loaded the others."""
+    assert _run(f"import {module}, xarray as xr; print(type(xr.Dataset().mpas).__name__)") \
+        == "MpasAccessor"
+
+
+def test_a_command_runs_in_a_fresh_process(tmp_path):
+    from conftest import write_mesh
+
+    path = write_mesh(tmp_path / "mesh.nc", [(0.0, 0.0), (10.0, 0.0)])
+    code = (f"import sys; from gmpas.cli import main; "
+            f"sys.exit(main(['info', {str(path)!r}]))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert "cells     : 2" in out.stdout

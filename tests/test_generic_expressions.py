@@ -245,3 +245,44 @@ def test_a_reduced_field_is_built_once_and_refused_when_it_cannot_be(monthly):
     finally:
         viewer.scanning = False
     assert viewer.describe()["time_statistics"] is True
+
+
+def test_a_big_reduction_is_asked_about_then_read_as_a_job(monthly, monkeypatch):
+    """Over REDUCE_ASK_BYTES a reduction is not read on its own: the page is
+    told what it would read, and a yes starts a job it polls for progress."""
+    import time as clock
+
+    import gmpas.generic as generic
+
+    viewer, whole = monthly
+    viewer._reduced_fields.clear()
+    expr = "sst.mean('time')"
+    monkeypatch.setattr(generic, "REDUCE_ASK_BYTES", 1000)      # this grid is bigger
+    cost = viewer.reduce_cost(expr, 0)
+    assert cost == {"steps": 36, "bytes": 36 * 13 * 36 * 4, "done": False}
+    assert viewer.reduce_progress(expr, 0) == {"state": "ask", "steps": 36,
+                                               "bytes": cost["bytes"]}
+    # nothing is read behind the user's back: drawing it is refused until a yes
+    with pytest.raises(ValueError, match="runs once it is confirmed"):
+        viewer._cropped(expr, 0, 0, WHOLE)
+    state = viewer.reduce_progress(expr, 0, go=True)
+    for _ in range(200):
+        if state["state"] == "done":
+            break
+        assert state["state"] == "running" and 0 <= state["progress"][0] <= 36
+        clock.sleep(0.05)
+        state = viewer.reduce_progress(expr, 0, go=True)
+    assert state["state"] == "done" and viewer.reduce_cost(expr, 0)["done"]
+    got = viewer._cropped(expr, 0, 0, WHOLE)          # now built: no question
+    want = whole.mean("time")
+    np.testing.assert_allclose(np.asarray(got.sortby("lat").values),
+                               np.asarray(want.sortby("lat").values), equal_nan=True)
+    assert viewer.reduce_progress(expr, 0) == {"state": "done"}
+
+
+def test_a_small_reduction_needs_no_question(monthly):
+    viewer, _ = monthly
+    viewer._reduced_fields.clear()
+    assert viewer.reduce_progress("sst.sel(month=1).mean('time')", 0)["state"] \
+        in ("running", "done")
+    assert viewer.reduce_progress("sst", 0) == {"state": "done"}

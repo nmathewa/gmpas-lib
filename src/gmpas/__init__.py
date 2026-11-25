@@ -56,6 +56,26 @@ def __dir__():
     return sorted(set(globals()) | set(__all__))
 
 
+def _register() -> None:
+    """Register `ds.mpas` with xarray, needing nothing but xarray.
+
+    The class registered is a stand-in: using `ds.mpas` builds the real
+    `MpasAccessor`, importing gmpas.accessor then. Registering cannot import
+    it, because the hook below may run in the middle of a gmpas module's own
+    `import xarray` -- gmpas.mesh's, say -- and gmpas.accessor imports that
+    very module, half-loaded at that moment.
+    """
+    import xarray as xr
+
+    class _Mpas:
+        def __new__(cls, ds):
+            from .accessor import MpasAccessor
+
+            return MpasAccessor(ds)
+
+    xr.register_dataset_accessor("mpas")(_Mpas)
+
+
 class _AfterXarray:
     """Registers `ds.mpas` as soon as xarray is imported, if it was not yet.
 
@@ -77,14 +97,14 @@ class _AfterXarray:
 
         def exec_module(module):
             load(module)
-            importlib.import_module(".accessor", __name__)
+            _register()
 
         spec.loader.exec_module = exec_module
         return spec
 
 
 if "xarray" in sys.modules:
-    importlib.import_module(".accessor", __name__)
+    _register()
 else:
     sys.meta_path.insert(0, _AfterXarray())
 
