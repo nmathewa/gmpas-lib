@@ -386,7 +386,9 @@ def expand(paths) -> list[Path]:
     out: list[Path] = []
     for item in paths:
         p = resolve_path(item)
-        if p.is_dir():
+        if netcdf.is_zarr(p):
+            out.append(p)                 # a Zarr store is one dataset, not a folder
+        elif p.is_dir():
             out.extend(_data_files(f for f in p.glob("*.nc") if not is_sidecar(f)))
         elif any(ch in str(item) for ch in "*?["):
             base = p.parent

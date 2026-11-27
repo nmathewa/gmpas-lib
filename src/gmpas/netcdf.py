@@ -38,3 +38,35 @@ import threading
 #: bookkeeping: releasing early would let one thread close a dataset another
 #: is mid-read on.
 LOCK = threading.RLock()
+
+
+# ------------------------------------------------------------------ Zarr
+
+def is_zarr(path) -> bool:
+    """Whether `path` is a Zarr store: a directory holding Zarr's own
+    metadata (v3 `zarr.json`, v2 `.zgroup` or consolidated `.zmetadata`)."""
+    from pathlib import Path
+
+    p = Path(path)
+    return p.is_dir() and any((p / name).is_file()
+                              for name in ("zarr.json", ".zgroup", ".zmetadata"))
+
+
+def open_any(path, **kwargs):
+    """A dataset from a netCDF file or a Zarr store, by what `path` is.
+
+    A netCDF file opens as it always has, with the netCDF4 engine; the caller
+    holds LOCK, as for any netCDF read. A Zarr store is not HDF5 and needs no
+    lock, but taking it is harmless. Zarr is the optional `gmpas[zarr]`."""
+    import xarray as xr
+
+    if is_zarr(path):
+        try:
+            import zarr  # noqa: F401
+        except ImportError:
+            raise ModuleNotFoundError(
+                f'{path} is a Zarr store, which needs: pip install "gmpas[zarr]"',
+                name="zarr") from None
+        kwargs.pop("engine", None)
+        return xr.open_zarr(path, **kwargs)
+    return xr.open_dataset(path, **{"engine": "netcdf4", **kwargs})

@@ -86,6 +86,31 @@ def find_mesh_beside(dpath: Path, n_cells: int) -> Path | None:
             t.note(scanned=len(candidates), opened=opened)
 
 
+def _zarr_kind(path) -> tuple[str, str]:
+    """`detect_kind` for a Zarr store: a regular lat/lon grid, by the same
+    `_find_axis` the lat/lon reader opens with. MPAS output in Zarr is not
+    read: the MPAS reader reads netCDF."""
+    from .generic import _find_axis
+
+    try:
+        with netcdf.open_any(path, decode_times=False) as ds:
+            if "nCells" in ds.sizes:
+                raise ValueError(f"{Path(path).name} holds MPAS output (nCells); gmpas "
+                                 f"reads MPAS output from netCDF files, not Zarr")
+            lat, lat_dim = _find_axis(ds, "lat")
+            lon, lon_dim = _find_axis(ds, "lon")
+            sizes = (ds.sizes[lat_dim], ds.sizes[lon_dim])
+    except (ValueError, KeyError) as exc:
+        if "MPAS output" in str(exc):
+            raise
+        return "ask", f"a Zarr store with no regular lat/lon grid ({exc})"
+    if lat_dim == lon_dim:
+        return "ask", (f"a Zarr store whose {lat!r}/{lon!r} share the dimension "
+                       f"{lat_dim!r} -- points, not a grid")
+    return "generic", (f"Zarr store · regular lat/lon grid · {sizes[0]} x {sizes[1]} "
+                       f"({lat}, {lon})")
+
+
 def detect_kind(paths, mesh_path: str = "") -> tuple[str, str]:
     """Whether `paths` is MPAS output or a regular lat/lon grid, and why.
 
@@ -108,6 +133,8 @@ def detect_kind(paths, mesh_path: str = "") -> tuple[str, str]:
     files = expand(paths)
     first, n_cells, inside = None, None, False
     for f in files:
+        if netcdf.is_zarr(f):
+            return _zarr_kind(f)
         try:
             with netcdf.LOCK, netCDF4.Dataset(f) as nc:
                 dim = nc.dimensions.get("nCells")

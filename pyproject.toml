@@ -60,6 +60,9 @@ gmpas = "gmpas.cli:main"
 # server named in chat.conf (docs/chat.md). The extra is kept, empty, so
 # `pip install "gmpas[chat]"` from older instructions still works.
 chat = []
+# Zarr stores (a `.zarr` directory) in the lat/lon viewer. zarr 3 needs
+# Python 3.11 or newer.
+zarr = ["zarr>=3; python_version >= '3.11'"]
 test = ["pytest>=7.0"]
 dev = ["gmpas[test]", "ruff>=0.4"]
 # The Read the Docs site (.readthedocs.yaml, docs/conf.py).

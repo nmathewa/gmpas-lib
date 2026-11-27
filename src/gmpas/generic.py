@@ -832,12 +832,11 @@ class GenericViewer:
         against the first one's grid before any of it is used: two files that
         merely share variable names would otherwise draw one on the other's
         coordinates without complaint."""
-        import xarray as xr
 
         if path in self._open:
             self._open.move_to_end(path)
             return self._open[path]
-        ds = xr.open_dataset(path, decode_timedelta=False, engine="netcdf4")
+        ds = netcdf.open_any(path, decode_timedelta=False)
         if check:
             problem = self._grid_problem(ds.sizes, ds[self.lat_name].values
                                          if self.lat_name in ds.variables else None,
@@ -949,6 +948,11 @@ class GenericViewer:
                 return              # reconfigured or closing: this axis is stale
             if path in counts:
                 continue
+            if netcdf.is_zarr(path):
+                problem = self._scan_zarr(path, counts, labels)
+                if problem:
+                    dropped.append(f"  {path.name}: {problem}")
+                continue
             try:
                 with self._lock, netCDF4.Dataset(path) as nc:
                     nc.set_auto_mask(False)
@@ -991,6 +995,41 @@ class GenericViewer:
         if note:
             print(note, file=sys.stderr)
         self.scanning = False
+
+    def _scan_zarr(self, path, counts: dict, labels: dict) -> str:
+        """`_scan` for a Zarr store, read through xarray with times left
+        undecoded, as the netCDF scan reads them: its step count and labels
+        into `counts` and `labels`, or the problem that keeps it out."""
+        import cftime
+
+        try:
+            with netcdf.open_any(path, decode_times=False) as ds:
+                problem = self._grid_problem(
+                    dict(ds.sizes),
+                    ds[self.lat_name].values if self.lat_name in ds.variables else None,
+                    ds[self.lon_name].values if self.lon_name in ds.variables else None)
+                if problem:
+                    return problem
+                tname, problem = self._time_in(
+                    {str(d) for da in ds.data_vars.values()
+                     if {self.lat_dim, self.lon_dim} <= set(da.dims) for d in da.dims},
+                    lambda d: _is_time(ds, d), ds.variables)
+                if problem:
+                    return problem
+                counts[path] = int(ds.sizes[tname]) if tname else 1
+                if tname in ds.variables:
+                    tv = ds[tname]
+                    units = str(tv.attrs.get("units", ""))
+                    values = np.asarray(tv.values)
+                    if " since " in units:
+                        dates = cftime.num2date(values, units,
+                                                tv.attrs.get("calendar", "standard"))
+                        labels[path] = _fmt_times(np.asarray(dates, dtype=object))
+                    else:
+                        labels[path] = _fmt_times(values, units)
+        except Exception as exc:
+            return str(exc)
+        return ""
 
     def __len__(self) -> int:
         return len(self._steps)
